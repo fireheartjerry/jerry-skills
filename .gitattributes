@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.md text eol=lf
+*.json text eol=lf
+skills/agent-sessions/scripts/agent-session text eol=lf

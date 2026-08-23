@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  agent-session — run claude/codex as isolated child sessions in tmux.
+#
+#  Each child gets its own tmux session, its own log, and a result file the
+#  parent reads instead of scraping scrollback. Children are detached by
+#  default, so one parent can run several at once.
+#
+#    agent-session spawn  <engine> <name> <dir> <prompt> [opts]
+#    agent-session list
+#    agent-session send   <name> <text> [--no-wait] [--timeout S]
+#    agent-session wait   <name> [timeout_s]
+#    agent-session result <name>
+#    agent-session log    <name> [lines]
+#    agent-session peek   <name> [lines]
+#    agent-session stop   <name>          # end a steerable child politely
+#    agent-session kill   <name>
+#    agent-session reap   [--force]
+#
+#  spawn options:
+#    --tier <t>       cheap | standard | deep   (default cheap)
+#    --model <m>      explicit model, overrides --tier
+#    --worktree       run in a fresh git worktree instead of <dir> itself
+#    --steerable      keep the conversation open for follow-up `send` calls
+#    --timeout <s>    per-turn timeout, default 3600
+#
+#  env:
+#    AGENT_SESSIONS_MAX      max concurrent working children (default 3)
+#    AGENT_SESSIONS_LINGER   seconds a finished session lingers (default 900)
+#    AGENT_SESSIONS_IDLE     steerable idle timeout, seconds (default 3600)
+#    AGENT_SESSION_DEPTH     set automatically; 2 is the nesting ceiling
+# =============================================================================
+set -Eeuo pipefail
+
+STATE_ROOT="${AGENT_SESSIONS_STATE:-$HOME/.local/state/agent-sessions}"
+MAX="${AGENT_SESSIONS_MAX:-3}"
+LINGER="${AGENT_SESSIONS_LINGER:-900}"
+IDLE="${AGENT_SESSIONS_IDLE:-3600}"
+DEPTH="${AGENT_SESSION_DEPTH:-0}"
+MAX_DEPTH=2
+PREFIX="as"
+
+mkdir -p "$STATE_ROOT"
+
+die() { echo "agent-session: $*" >&2; exit 2; }
+sessionOf() { printf '%s-%s' "$PREFIX" "$1"; }
+dirOf() { printf '%s/%s' "$STATE_ROOT" "$1"; }
+command -v tmux >/dev/null 2>&1 || die "missing dependency: tmux"
+
+# tmux launches children from a bare environment, so nvm's shims may not be on
+# PATH. Fall back to a login shell to find the engine.
+resolveEngine() {
+  local engine="$1" found
+  found="$(command -v "$engine" 2>/dev/null || true)"
+  [[ -n "$found" ]] || found="$(bash -lc "command -v $engine" 2>/dev/null || true)"
+  [[ -n "$found" ]] || die "cannot find '$engine' on PATH"
+  printf '%s' "$found"
+}
+
+# Model tiers. Spending a frontier model on mechanical work is the commonest way
+# these runs get expensive for nothing, so cheap is the default and escalation
+# is a decision — see references/models.md.
+modelForTier() {
+  case "$1:$2" in
+    claude:cheap)    printf 'haiku' ;;
+    claude:standard) printf 'sonnet' ;;
+    claude:deep)     printf 'opus' ;;
+    codex:*)         printf '' ;;   # codex uses its configured default
+    *) printf '' ;;
+  esac
+}
+
+# Counts children still working. A finished child lingers so a failure can be
+# inspected, but lingering must not hold a concurrency slot or three quick jobs
+# would block the next spawn for the whole linger window.
+runningCount() {
+  local count=0 session name
+  while read -r session; do
+    [[ -n "$session" ]] || continue
+    name="${session#${PREFIX}-}"
+    [[ -f "$(dirOf "$name")/result.json" ]] || count=$((count + 1))
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${PREFIX}-" || true)
+  printf '%d' "$count"
+}
+
+metaField() {
+  python3 -c "
+import json,sys
+try: print(json.load(open(sys.argv[1])).get(sys.argv[2]) or '')
+except Exception: print('')" "$1" "$2" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------- spawn -----
+cmdSpawn() {
+  [[ $# -ge 4 ]] || die "usage: spawn <engine> <name> <dir> <prompt> [opts]"
+  local engine="$1" name="$2" dir="$3" prompt="$4"; shift 4
+  [[ "$engine" == claude || "$engine" == codex ]] || die "engine must be claude or codex"
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "name must match [A-Za-z0-9._-]"
+  [[ -d "$dir" ]] || die "no such directory: $dir"
+  dir="$(cd "$dir" && pwd)"
+
+  local model="" tier="cheap" worktree=0 steerable=0 timeout=3600
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --model)     model="${2:?}"; shift 2 ;;
+      --tier)      tier="${2:?}"; shift 2 ;;
+      --worktree)  worktree=1; shift ;;
+      --steerable) steerable=1; shift ;;
+      --timeout)   timeout="${2:?}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  (( DEPTH < MAX_DEPTH )) || die \
+    "nesting depth $DEPTH is at the ceiling of $MAX_DEPTH; a grandchild may not spawn further children"
+  local running; running="$(runningCount)"
+  (( running < MAX )) || die \
+    "$running children already working (cap $MAX). Wait, reap, or raise AGENT_SESSIONS_MAX."
+
+  local session; session="$(sessionOf "$name")"
+  ! tmux has-session -t "$session" 2>/dev/null || die "session '$name' already exists"
+  [[ -n "$model" ]] || model="$(modelForTier "$engine" "$tier")"
+
+  local sdir; sdir="$(dirOf "$name")"
+  rm -rf "$sdir"; mkdir -p "$sdir/inbox" "$sdir/turns"
+  local log="$sdir/log"
+
+  # Worktree isolation: only meaningful in a git repo, and only worth the cost
+  # when the child will write. See references/isolation.md.
+  local workdir="$dir" wt=""
+  if (( worktree )); then
+    git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || die "--worktree needs a git repo: $dir"
+    local root; root="$(git -C "$dir" rev-parse --show-toplevel)"
+    wt="$sdir/worktree"
+    git -C "$root" worktree add -q -b "agent-session/$name" "$wt" 2>/dev/null \
+      || git -C "$root" worktree add -q "$wt" 2>/dev/null \
+      || die "could not create worktree at $wt"
+    workdir="$wt"
+  fi
+
+  local bin; bin="$(resolveEngine "$engine")"
+  local convo=""
+  (( steerable )) && convo="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+
+  python3 - "$sdir/meta.json" "$name" "$engine" "$workdir" "$dir" "$model" "$tier" \
+      "$steerable" "$worktree" "$wt" "$timeout" "$DEPTH" "$convo" "$bin" <<'PY'
+import json, sys, time
+(path, name, engine, workdir, origin, model, tier, steerable, worktree,
+ wt, timeout, depth, convo, binary) = sys.argv[1:15]
+json.dump({
+    "name": name, "engine": engine, "workdir": workdir, "origin": origin,
+    "model": model or "(engine default)", "tier": tier,
+    "steerable": bool(int(steerable)), "worktree": bool(int(worktree)),
+    "worktree_path": wt or None, "timeout": int(timeout),
+    "depth": int(depth) + 1, "conversation_id": convo or None, "binary": binary,
+    "started_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+}, open(path, "w"), indent=2)
+PY
+
+  cat > "$sdir/finish.py" <<'PY'
+import json, os, sys, time
+sdir, rc = sys.argv[1], int(sys.argv[2])
+log = os.path.join(sdir, "log")
+tail = ""
+if os.path.exists(log):
+    with open(log, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        handle.seek(max(0, handle.tell() - 4000))
+        tail = handle.read().decode("utf-8", "replace")
+try:
+    meta = json.load(open(os.path.join(sdir, "meta.json")))
+except Exception:
+    meta = {}
+json.dump({
+    "name": meta.get("name"), "engine": meta.get("engine"),
+    "workdir": meta.get("workdir"), "model": meta.get("model"),
+    "exit_code": rc, "status": {0: "ok", 124: "timeout"}.get(rc, "error"),
+    "finished_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    "log": log, "tail": tail[-4000:],
+}, open(os.path.join(sdir, "result.json"), "w"), indent=2)
+PY
+
+  local runner="$sdir/run.sh"
+  if (( steerable )); then
+    # A steerable child is a conversation driven turn by turn, not a terminal
+    # UI puppeted with keystrokes. Each turn is a headless run that resumes the
+    # same conversation, so there is no TTY to fight and every turn is logged
+    # and individually inspectable.
+    cat > "$runner" <<RUNNER
+#!/usr/bin/env bash
+set -uo pipefail
+cd $(printf '%q' "$workdir") || exit 2
+export AGENT_SESSION_DEPTH=$((DEPTH + 1))
+export AGENT_SESSION_NAME=$(printf '%q' "$name")
+SDIR=$(printf '%q' "$sdir")
+LOG="\$SDIR/log"
+IDLE=$IDLE
+TURN=0
+LAST=\$(date +%s)
+
+runTurn() {
+  # Declared separately on purpose: bash expands every word of a \`local\`
+  # statement before performing any of its assignments, so referring to \$n in
+  # the same statement that defines it fails under \`set -u\`.
+  local text="\$1"
+  local n="\$2"
+  local out="\$SDIR/turns/\$n.out"
+  {
+    echo "=== turn \$n @ \$(date -Is) ==="
+    echo "> \$text"
+  } >> "\$LOG"
+  local rc=0
+  if [[ "$engine" == claude ]]; then
+    if (( n == 1 )); then
+      timeout --signal=TERM --kill-after=30 $timeout \\
+        $(printf '%q' "$bin") -p "\$text" --session-id $(printf '%q' "$convo") \\
+        --dangerously-skip-permissions ${model:+--model $(printf '%q' "$model")} \\
+        > "\$out" 2>&1
+      rc=\$?
+    else
+      timeout --signal=TERM --kill-after=30 $timeout \\
+        $(printf '%q' "$bin") -p "\$text" --resume $(printf '%q' "$convo") \\
+        --dangerously-skip-permissions ${model:+--model $(printf '%q' "$model")} \\
+        > "\$out" 2>&1
+      rc=\$?
+    fi
+  else
+    if (( n == 1 )); then
+      timeout --signal=TERM --kill-after=30 $timeout \\
+        $(printf '%q' "$bin") exec --dangerously-bypass-approvals-and-sandbox \\
+        ${model:+--model $(printf '%q' "$model")} "\$text" > "\$out" 2>&1
+      rc=\$?
+    else
+      timeout --signal=TERM --kill-after=30 $timeout \\
+        $(printf '%q' "$bin") exec resume --last \\
+        --dangerously-bypass-approvals-and-sandbox "\$text" > "\$out" 2>&1
+      rc=\$?
+    fi
+  fi
+  cat "\$out" >> "\$LOG"
+  python3 -c "
+import json,sys
+n,rc,out=sys.argv[1],int(sys.argv[2]),sys.argv[3]
+body=open(out,encoding='utf-8',errors='replace').read()
+json.dump({'turn':int(n),'exit_code':rc,
+           'status':{0:'ok',124:'timeout'}.get(rc,'error'),
+           'output':body[-8000:]}, open(out.replace('.out','.json'),'w'), indent=2)
+" "\$n" "\$rc" "\$out"
+  echo "\$n" > "\$SDIR/last_turn"
+}
+
+# The opening prompt is turn 1.
+TURN=1
+runTurn "\$(cat "\$SDIR/inbox/000-initial")" 1
+rm -f "\$SDIR/inbox/000-initial"
+LAST=\$(date +%s)
+
+while true; do
+  [[ -f "\$SDIR/stop" ]] && break
+  next="\$(ls -1 "\$SDIR/inbox" 2>/dev/null | sort | head -1)"
+  if [[ -n "\$next" ]]; then
+    TURN=\$((TURN + 1))
+    text="\$(cat "\$SDIR/inbox/\$next")"
+    rm -f "\$SDIR/inbox/\$next"
+    runTurn "\$text" "\$TURN"
+    LAST=\$(date +%s)
+  else
+    (( \$(date +%s) - LAST > IDLE )) && break
+    sleep 2
+  fi
+done
+
+python3 "\$SDIR/finish.py" "\$SDIR" 0
+sleep $LINGER
+tmux kill-session -t $(printf '%q' "$session") 2>/dev/null
+RUNNER
+    printf '%s' "$prompt" > "$sdir/inbox/000-initial"
+  else
+    local -a cmd
+    case "$engine" in
+      claude) cmd=("$bin" -p "$prompt" --dangerously-skip-permissions)
+              [[ -n "$model" ]] && cmd+=(--model "$model") ;;
+      codex)  cmd=("$bin" exec --dangerously-bypass-approvals-and-sandbox)
+              [[ -n "$model" ]] && cmd+=(--model "$model")
+              cmd+=("$prompt") ;;
+    esac
+    {
+      echo '#!/usr/bin/env bash'
+      echo 'set -uo pipefail'
+      printf 'cd %q || exit 2\n' "$workdir"
+      printf 'export AGENT_SESSION_DEPTH=%d\n' $((DEPTH + 1))
+      printf 'export AGENT_SESSION_NAME=%q\n' "$name"
+      printf 'timeout --signal=TERM --kill-after=30 %q' "$timeout"
+      printf ' %q' "${cmd[@]}"
+      printf ' 2>&1 | tee -a %q\n' "$log"
+      echo 'rc=${PIPESTATUS[0]}'
+      printf 'python3 %q %q "$rc"\n' "$sdir/finish.py" "$sdir"
+      printf 'sleep %q\n' "$LINGER"
+      printf 'tmux kill-session -t %q 2>/dev/null\n' "$session"
+    } > "$runner"
+  fi
+  chmod +x "$runner"
+
+  tmux new-session -d -s "$session" -c "$workdir" "$runner"
+
+  echo "spawned $name  (tmux: $session, engine: $engine, model: ${model:-engine default}$( ((steerable)) && echo ', steerable'))"
+  echo "  state : $sdir"
+  echo "  log   : $log"
+  (( worktree )) && echo "  tree  : $workdir"
+  echo "  attach: tmux attach -t $session"
+}
+
+# ------------------------------------------------------------- inspect -----
+cmdList() {
+  printf '%-20s %-7s %-11s %-9s %s\n' NAME ENGINE STATE MODEL DIR
+  local any=0
+  for meta in "$STATE_ROOT"/*/meta.json; do
+    [[ -e "$meta" ]] || continue
+    any=1
+    python3 - "$meta" "$PREFIX" <<'PY'
+import json, os, subprocess, sys
+meta = json.load(open(sys.argv[1]))
+sdir = os.path.dirname(sys.argv[1])
+alive = subprocess.run(["tmux", "has-session", "-t", f"{sys.argv[2]}-{meta['name']}"],
+                       capture_output=True).returncode == 0
+if os.path.exists(os.path.join(sdir, "result.json")):
+    state = json.load(open(os.path.join(sdir, "result.json"))).get("status", "done")
+    if alive: state += "/linger"
+elif alive:
+    state = "steerable" if meta.get("steerable") else "running"
+else:
+    state = "orphaned"
+print(f"{meta['name']:<20} {meta['engine']:<7} {state:<11} "
+      f"{(meta.get('model') or '-')[:9]:<9} {meta.get('workdir','')}")
+PY
+  done
+  (( any )) || echo "(no sessions)"
+}
+
+cmdLog() {
+  local log; log="$(dirOf "${1:?usage: log <name> [lines]}")/log"
+  [[ -f "$log" ]] || die "no log for '$1'"
+  tail -n "${2:-80}" "$log"
+}
+
+cmdPeek() {
+  local session; session="$(sessionOf "${1:?usage: peek <name> [lines]}")"
+  tmux has-session -t "$session" 2>/dev/null || die "no live session '$1'"
+  tmux capture-pane -p -t "$session" -S "-${2:-60}"
+}
+
+cmdResult() {
+  local result; result="$(dirOf "${1:?usage: result <name>}")/result.json"
+  [[ -f "$result" ]] || die "'$1' has not finished (see: agent-session list)"
+  cat "$result"
+}
+
+cmdWait() {
+  local name="${1:?usage: wait <name> [timeout_s]}" budget="${2:-3600}"
+  local result; result="$(dirOf "$name")/result.json"
+  local deadline=$(( $(date +%s) + budget ))
+  while [[ ! -f "$result" ]]; do
+    (( $(date +%s) < deadline )) || die "timed out waiting for '$name'"
+    sleep 3
+  done
+  cat "$result"
+}
+
+# Sends the next turn to a steerable child. Waits for the reply by default,
+# because a parent almost always needs the answer before deciding what to say
+# next; --no-wait is there for genuinely fire-and-forget nudges.
+cmdSend() {
+  local name="${1:?usage: send <name> <text> [--no-wait] [--timeout S]}"; shift
+  local wait=1 budget=900 parts=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-wait) wait=0; shift ;;
+      --timeout) budget="${2:?}"; shift 2 ;;
+      *) parts+=("$1"); shift ;;
+    esac
+  done
+  local text="${parts[*]}"
+  [[ -n "$text" ]] || die "nothing to send"
+
+  local sdir; sdir="$(dirOf "$name")"
+  [[ -d "$sdir" ]] || die "no session '$name'"
+  [[ "$(metaField "$sdir/meta.json" steerable)" == "True" ]] \
+    || die "'$name' is a one-shot child; spawn with --steerable to hold a conversation"
+  tmux has-session -t "$(sessionOf "$name")" 2>/dev/null \
+    || die "'$name' is no longer running"
+
+  local before; before="$(cat "$sdir/last_turn" 2>/dev/null || echo 0)"
+  printf '%s' "$text" > "$sdir/inbox/$(date +%s%N)"
+  (( wait )) || { echo "queued for $name"; return 0; }
+
+  local deadline=$(( $(date +%s) + budget )) now
+  while true; do
+    now="$(cat "$sdir/last_turn" 2>/dev/null || echo 0)"
+    if [[ "$now" -gt "$before" ]]; then
+      cat "$sdir/turns/$now.json"
+      return 0
+    fi
+    (( $(date +%s) < deadline )) || die "timed out waiting for '$name' to answer"
+    sleep 3
+  done
+}
+
+cmdStop() {
+  local sdir; sdir="$(dirOf "${1:?usage: stop <name>}")"
+  [[ -d "$sdir" ]] || die "no session '$1'"
+  touch "$sdir/stop"
+  echo "asked $1 to finish after its current turn"
+}
+
+cmdKill() {
+  local session; session="$(sessionOf "${1:?usage: kill <name>}")"
+  tmux kill-session -t "$session" 2>/dev/null && echo "killed $1" || echo "no live session '$1'"
+}
+
+# Clears finished state and any worktree a child was given. Live sessions are
+# left alone unless --force, so reaping never interrupts running work.
+cmdReap() {
+  local force=0; [[ "${1:-}" == "--force" ]] && force=1
+  for meta in "$STATE_ROOT"/*/meta.json; do
+    [[ -e "$meta" ]] || continue
+    local sdir name session wt origin
+    sdir="$(dirname "$meta")"; name="$(basename "$sdir")"; session="$(sessionOf "$name")"
+    if tmux has-session -t "$session" 2>/dev/null; then
+      (( force )) || continue
+      tmux kill-session -t "$session" 2>/dev/null || true
+    fi
+    wt="$(metaField "$meta" worktree_path)"
+    origin="$(metaField "$meta" origin)"
+    [[ -n "$wt" && -d "$wt" && -n "$origin" ]] \
+      && git -C "$origin" worktree remove --force "$wt" 2>/dev/null || true
+    rm -rf "$sdir"
+    echo "reaped $name"
+  done
+}
+
+case "${1:-}" in
+  spawn)  shift; cmdSpawn "$@" ;;
+  list)   shift; cmdList "$@" ;;
+  log)    shift; cmdLog "$@" ;;
+  peek)   shift; cmdPeek "$@" ;;
+  send)   shift; cmdSend "$@" ;;
+  result) shift; cmdResult "$@" ;;
+  wait)   shift; cmdWait "$@" ;;
+  stop)   shift; cmdStop "$@" ;;
+  kill)   shift; cmdKill "$@" ;;
+  reap)   shift; cmdReap "$@" ;;
+  ""|-h|--help) sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$1' (try --help)" ;;
+esac

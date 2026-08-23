@@ -1,0 +1,26 @@
+{
+  "name": "jerry-skills",
+  "owner": {
+    "name": "Jerry Yuze Li",
+    "url": "https://github.com/fireheartjerry"
+  },
+  "metadata": {
+    "description": "Agent skills for adversarial quality loops and multi-agent delegation",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "jerry-skills",
+      "source": "./",
+      "description": "iterative-improvement (criteria-driven adversarial improvement loop) and agent-sessions (delegate to Claude/Codex children in isolated tmux sessions).",
+      "version": "1.0.0",
+      "author": {
+        "name": "Jerry Yuze Li",
+        "url": "https://github.com/fireheartjerry"
+      },
+      "keywords": ["skills", "agents", "multi-agent", "orchestration", "tmux", "codex", "quality"],
+      "category": "workflow",
+      "strict": false
+    }
+  ]
+}
