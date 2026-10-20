@@ -3,3 +3,8 @@ Thumbs.db
 node_modules/
 *.log
 .claude/settings.local.json
+PLAN.md
+eval-runs/
+.eval/
+__pycache__/
+*.pyc

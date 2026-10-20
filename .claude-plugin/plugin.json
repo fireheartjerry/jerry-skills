@@ -1,7 +1,7 @@
 {
   "name": "jerry-skills",
-  "description": "Two skills for making agents work harder than a single pass: iterative-improvement runs a criteria-driven adversarial loop that makes open-ended quality measurable, and agent-sessions delegates work to Claude and Codex children in isolated tmux sessions. Use when quality is subjective and needs a real feedback signal, or when work should fan out across several agents.",
-  "version": "1.0.0",
+  "description": "Four skills for making agents work like you would with unlimited time: mind-reading expands a few words into the full prompt you meant, using a model of you mined from your own agent history; high-agency carries tasks from intent to verified completion; iterative-improvement runs a criteria-driven adversarial loop that makes open-ended quality measurable; agent-sessions delegates work to Claude and Codex children in isolated tmux sessions.",
+  "version": "1.1.0",
   "author": {
     "name": "Jerry Yuze Li",
     "url": "https://github.com/fireheartjerry"
@@ -10,15 +10,19 @@
   "repository": "https://github.com/fireheartjerry/jerry-skills",
   "license": "MIT",
   "keywords": [
-    "skills",
     "agents",
+    "autonomy",
+    "code-review",
+    "codex",
+    "iteration",
+    "mind-reading",
     "multi-agent",
     "orchestration",
-    "tmux",
-    "codex",
-    "code-review",
-    "iteration",
-    "quality"
+    "personalization",
+    "prompting",
+    "quality",
+    "skills",
+    "tmux"
   ],
   "skills": "./skills/"
 }
