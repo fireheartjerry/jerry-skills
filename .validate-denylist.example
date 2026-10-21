@@ -1,0 +1,12 @@
+# Denylist for scripts/validate.py.
+#
+# Copy this file to .validate-denylist (that name is gitignored, this example is
+# not) and replace the placeholders with the private names, handles, hostnames
+# or codenames that must never appear in the public repository. One entry per
+# line; blank lines and lines starting with # are ignored. Matching is
+# case-insensitive and whole-word, across every tracked or to-be-tracked file.
+# This example file itself is exempt from the denylist check only, so the
+# placeholders below can stay as they are.
+Firstname Lastname
+private-hostname.local
+internal-codename

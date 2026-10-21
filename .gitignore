@@ -8,3 +8,6 @@ eval-runs/
 .eval/
 __pycache__/
 *.pyc
+research_notes/
+reports/
+.validate-denylist
