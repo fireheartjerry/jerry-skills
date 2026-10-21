@@ -1,0 +1,139 @@
+{
+ "_about": "Trigger cases for the SKILL.md description and mr.trigger.classify. `fire` is whether the skill should expand the message; `seed` is the text left after removing the invocation phrase. A seed is about the skill only when it names mind-reading next to one of its parts, or names grants.md, corrections.md, the always-on block or the reading tags; 'the model', 'the skill', 'SKILL.md' and 'index.json' alone are ordinary seed words.",
+ "positive": [
+  {
+   "message": "read my mind: the export is broken again",
+   "seed": "the export is broken again"
+  },
+  {
+   "message": "read my mind fix the login",
+   "seed": "fix the login"
+  },
+  {
+   "message": "mind-read this: ship it",
+   "seed": "ship it"
+  },
+  {
+   "message": "mind read this, status?",
+   "seed": "status?"
+  },
+  {
+   "message": "/mind-reading push to phone",
+   "seed": "push to phone"
+  },
+  {
+   "message": "$mind-reading keep going",
+   "seed": "keep going"
+  },
+  {
+   "message": "use /mind-reading rq cuz the hero overflows on mobile",
+   "seed": "use rq cuz the hero overflows on mobile"
+  },
+  {
+   "message": "ok read my mind on this one: the nightly job failed again",
+   "seed": "ok on this one: the nightly job failed again"
+  },
+  {
+   "message": "READ MY MIND: go bolder",
+   "seed": "go bolder"
+  },
+  {
+   "message": "read my mind\nthe cart page looks off on tablets",
+   "seed": "the cart page looks off on tablets"
+  },
+  {
+   "message": "read my mind: fix the git tags on the release",
+   "seed": "fix the git tags on the release"
+  },
+  {
+   "message": "read my mind: the model is slow on the eval set, profile it",
+   "seed": "the model is slow on the eval set, profile it"
+  },
+  {
+   "message": "read my mind: rebuild the model with the new detections",
+   "seed": "rebuild the model with the new detections"
+  },
+  {
+   "message": "read my mind fix the skill picker in the app",
+   "seed": "fix the skill picker in the app"
+  },
+  {
+   "message": "/mind-reading the index.json route 500s",
+   "seed": "the index.json route 500s"
+  },
+  {
+   "message": "read my mind: build.md is out of date in the repo",
+   "seed": "build.md is out of date in the repo"
+  }
+ ],
+ "negative": [
+  {
+   "message": "mind reading",
+   "reason": "no invocation phrase"
+  },
+  {
+   "message": "I can't read your mind, which file do you mean?",
+   "reason": "no invocation phrase"
+  },
+  {
+   "message": "the mind reading tags are too noisy, fix them",
+   "reason": "no invocation phrase"
+  },
+  {
+   "message": "what does the mind-reading skill do?",
+   "reason": "no invocation phrase"
+  },
+  {
+   "message": "rebuild my mind-reading model",
+   "reason": "no invocation phrase"
+  },
+  {
+   "message": "he said read my mind and laughed",
+   "reason": "quoted or reported phrase"
+  },
+  {
+   "message": "she typed \"read my mind: ship it\" into the other session",
+   "reason": "quoted or reported phrase"
+  },
+  {
+   "message": "the phrase 'read my mind' should fire the skill, right?",
+   "reason": "quoted or reported phrase"
+  },
+  {
+   "message": "my teammate wrote `/mind-reading status` in the channel",
+   "reason": "quoted or reported phrase"
+  },
+  {
+   "message": "read my mind",
+   "reason": "no seed after the phrase"
+  },
+  {
+   "message": "/mind-reading",
+   "reason": "no seed after the phrase"
+  },
+  {
+   "message": "read my mind: rebuild my mind-reading model",
+   "reason": "about the skill"
+  },
+  {
+   "message": "read my mind: refresh the mind-reading model with the new corrections",
+   "reason": "about the skill"
+  },
+  {
+   "message": "/mind-reading the [S] tags are wrong, fix them",
+   "reason": "about the skill"
+  },
+  {
+   "message": "read my mind: edit the mind-reading SKILL.md so the trigger is narrower",
+   "reason": "about the skill"
+  },
+  {
+   "message": "read my mind: the mind-reading slice is too big",
+   "reason": "about the skill"
+  },
+  {
+   "message": "$mind-reading add a grant to grants.md for pushes",
+   "reason": "about the skill"
+  }
+ ]
+}

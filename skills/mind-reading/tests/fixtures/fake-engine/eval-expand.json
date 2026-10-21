@@ -1,0 +1,5 @@
+{
+ "default": {
+  "prompt": "Fix the export end to end: find the root cause, check the other download paths, reproduce in the browser before and after, add a regression test, push when green, and report cause, change and verification in three lines."
+ }
+}

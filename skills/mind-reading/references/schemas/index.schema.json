@@ -1,0 +1,259 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "title": "mind-reading model index",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "version",
+  "model_hash",
+  "built",
+  "light",
+  "standing_rules",
+  "reading_notes",
+  "groups",
+  "layers",
+  "vocabulary",
+  "examples",
+  "corrections"
+ ],
+ "properties": {
+  "version": {
+   "type": "integer",
+   "const": 2
+  },
+  "model_hash": {
+   "type": "string"
+  },
+  "built": {
+   "type": "string"
+  },
+  "light": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "path",
+    "chars"
+   ],
+   "properties": {
+    "path": {
+     "type": "string"
+    },
+    "chars": {
+     "type": "integer"
+    }
+   }
+  },
+  "standing_rules": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "path",
+    "lines",
+    "chars"
+   ],
+   "properties": {
+    "path": {
+     "type": "string"
+    },
+    "lines": {
+     "type": "array",
+     "minItems": 2,
+     "maxItems": 2,
+     "items": {
+      "type": "integer",
+      "minimum": 1
+     }
+    },
+    "chars": {
+     "type": "integer"
+    }
+   }
+  },
+  "reading_notes": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "path",
+    "lines"
+   ],
+   "properties": {
+    "path": {
+     "type": "string"
+    },
+    "lines": {
+     "type": "array",
+     "minItems": 2,
+     "maxItems": 2,
+     "items": {
+      "type": "integer",
+      "minimum": 1
+     }
+    }
+   }
+  },
+  "groups": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "title",
+     "when",
+     "lines",
+     "chars"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "when": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "lines": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+       "type": "integer",
+       "minimum": 1
+      }
+     },
+     "chars": {
+      "type": "integer"
+     }
+    }
+   }
+  },
+  "layers": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "n",
+     "title",
+     "lines"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     },
+     "title": {
+      "type": "string"
+     },
+     "lines": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+       "type": "integer",
+       "minimum": 1
+      }
+     }
+    }
+   }
+  },
+  "vocabulary": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "phrase",
+     "line"
+    ],
+    "properties": {
+     "phrase": {
+      "type": "string"
+     },
+     "line": {
+      "type": "integer"
+     }
+    }
+   }
+  },
+  "examples": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "n",
+     "seed",
+     "tags",
+     "lines",
+     "chars"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer"
+     },
+     "seed": {
+      "type": "string"
+     },
+     "tags": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "lines": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+       "type": "integer",
+       "minimum": 1
+      }
+     },
+     "chars": {
+      "type": "integer"
+     }
+    }
+   }
+  },
+  "corrections": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "path",
+    "lines"
+   ],
+   "properties": {
+    "path": {
+     "type": "string"
+    },
+    "lines": {
+     "type": "integer"
+    }
+   }
+  },
+  "grants": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "path",
+    "count",
+    "active"
+   ],
+   "properties": {
+    "path": {
+     "type": "string"
+    },
+    "count": {
+     "type": "integer"
+    },
+    "active": {
+     "type": "integer"
+    }
+   }
+  }
+ }
+}

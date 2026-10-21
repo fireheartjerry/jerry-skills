@@ -1,0 +1,24 @@
+{
+ "default": {
+  "items": [
+   {
+    "id": 1,
+    "verdict": "full"
+   },
+   {
+    "id": 2,
+    "verdict": "partial"
+   },
+   {
+    "id": 3,
+    "verdict": "none"
+   }
+  ],
+  "contradictions": [
+   {
+    "text": "The expansion asks to wait for approval before pushing",
+    "requirement_id": null
+   }
+  ]
+ }
+}

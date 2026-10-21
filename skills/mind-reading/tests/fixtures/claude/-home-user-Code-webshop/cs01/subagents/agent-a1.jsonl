@@ -1,0 +1,1 @@
+{"parentUuid": null, "isSidechain": false, "type": "user", "message": {"role": "user", "content": "subagent text that must never be read"}, "uuid": "dc653c90-62f2-5254-9768-e7315b0db5aa", "timestamp": "2026-01-03T10:30:00.000Z", "userType": "external", "entrypoint": "cli", "cwd": "/home/user/Code/webshop", "sessionId": "agent-a1", "version": "2.1.0", "gitBranch": "main"}

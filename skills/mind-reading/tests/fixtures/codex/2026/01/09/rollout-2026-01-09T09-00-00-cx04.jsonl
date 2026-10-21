@@ -1,0 +1,2 @@
+{"timestamp": "2026-01-09T09:00:00.000Z", "type": "session_meta", "payload": {"id": "cx04", "timestamp": "2026-01-09T09:00:00.000Z", "cwd": "/home/user/Code/webshop", "originator": "codex_exec", "cli_version": "0.1.0", "source": "vscode", "thread_source": "user", "model_provider": "openai"}}
+{"timestamp": "2026-01-09T09:01:00.000Z", "ordinal": "2", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "codex_exec brief text"}], "id": "msg_6408562b-0a3"}}

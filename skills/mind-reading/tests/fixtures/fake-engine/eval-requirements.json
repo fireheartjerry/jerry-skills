@@ -1,0 +1,21 @@
+{
+ "default": {
+  "requirements": [
+   {
+    "id": 1,
+    "text": "Check every other download path for the same failure",
+    "kind": "scope"
+   },
+   {
+    "id": 2,
+    "text": "Add a regression test",
+    "kind": "quality"
+   },
+   {
+    "id": 3,
+    "text": "Report cause, change and verification",
+    "kind": "reporting"
+   }
+  ]
+ }
+}

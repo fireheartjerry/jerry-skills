@@ -1,0 +1,17 @@
+{
+ "profile": {
+  "$from_files": {
+   "profile_md": "../model/profile.md"
+  }
+ },
+ "light": {
+  "$from_files": {
+   "light_md": "../model/light.md"
+  }
+ },
+ "examples": {
+  "$from_files": {
+   "examples_md": "../model/examples.md"
+  }
+ }
+}

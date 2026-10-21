@@ -1,0 +1,6 @@
+{
+ "default": {
+  "$json_file": "../mined/chunk-00.json",
+  "$project": true
+ }
+}

@@ -1,0 +1,247 @@
+{
+ "traits": [
+  {
+   "layer": "quality_bar",
+   "claim": "Verifies on the real path before calling anything done",
+   "scope": "person",
+   "strength": "strong",
+   "count": 3,
+   "evidence": [
+    {
+     "quote": "run the tests before you report",
+     "time": "2026-01-03T10:09:00.000Z",
+     "session": "cs01",
+     "origin": "typed"
+    },
+    {
+     "quote": "fix it and show me a screenshot",
+     "time": "2026-03-12T10:09:00.000Z",
+     "session": "cs11",
+     "origin": "typed"
+    }
+   ]
+  },
+  {
+   "layer": "communication",
+   "claim": "Types short imperatives and adds the real ask in a second message",
+   "scope": "person",
+   "strength": "moderate",
+   "count": 2,
+   "evidence": [
+    {
+     "quote": "also check the other download buttons",
+     "time": "2026-01-03T10:05:00.000Z",
+     "session": "cs01",
+     "origin": "typed"
+    }
+   ]
+  },
+  {
+   "layer": "context",
+   "claim": "The release branch for sprint 0 is named release-0",
+   "scope": "project",
+   "strength": "weak",
+   "count": 1,
+   "evidence": [
+    {
+     "quote": "cut the release branch and tag it",
+     "time": "2026-03-05T10:00:00.000Z",
+     "session": "cs10",
+     "origin": "typed"
+    }
+   ]
+  },
+  {
+   "layer": "standing_rules",
+   "claim": "Finished work is pushed to the working branch",
+   "scope": "person",
+   "strength": "strong",
+   "count": 3,
+   "evidence": [
+    {
+     "quote": "push it when green",
+     "time": "2026-01-03T10:20:00.000Z",
+     "session": "cs01",
+     "origin": "typed"
+    },
+    {
+     "quote": "push to the working branch",
+     "time": "2026-03-20T16:30:00.000Z",
+     "session": "cs12",
+     "origin": "typed"
+    }
+   ]
+  },
+  {
+   "layer": "dislikes",
+   "claim": "Dislikes verbose release notes",
+   "scope": "person",
+   "strength": "weak",
+   "count": 1,
+   "evidence": [
+    {
+     "quote": "shorter, and lead with the user facing changes",
+     "time": "2026-01-14T13:04:00.000Z",
+     "session": "cs05",
+     "origin": "typed"
+    }
+   ]
+  },
+  {
+   "layer": "building",
+   "claim": "Accepts a drafted mandate and then narrows the first step",
+   "scope": "person",
+   "strength": "weak",
+   "count": 1,
+   "evidence": [
+    {
+     "quote": "Make the checkout flow resilient to payment provider timeouts",
+     "time": null,
+     "session": "cx10",
+     "origin": "drafted"
+    },
+    {
+     "quote": "start with the idempotency keys",
+     "time": "2026-01-30T16:09:00.000Z",
+     "session": "cx10",
+     "origin": "typed"
+    }
+   ]
+  }
+ ],
+ "unsaid_defaults": [
+  {
+   "when": "bug report naming one instance",
+   "default": "fix every sibling of the reported instance too",
+   "scope": "person",
+   "evidence": [
+    {
+     "first": "fix the export button it is broken again",
+     "later": "also check the other download buttons",
+     "time": "2026-01-03T10:05:00.000Z",
+     "session": "cs01"
+    }
+   ]
+  },
+  {
+   "when": "deploy request",
+   "default": "staging first, then production after a look",
+   "scope": "project",
+   "evidence": [
+    {
+     "first": "ok now deploy to staging",
+     "later": "staging first, then prod after I look at it",
+     "time": "2026-01-06T09:30:00.000Z",
+     "session": "cx01"
+    }
+   ]
+  }
+ ],
+ "seed_expansions": [
+  {
+   "seed": "fix the export button it is broken again",
+   "context": "a recurring CSV export failure",
+   "full_prompt": "The CSV export fails again; find the root cause and fix it, then check every other download path for the same failure. Reproduce in the browser before and after. Add a regression test. Push when green and report cause, change, verification.",
+   "tags": [
+    "bug",
+    "export"
+   ]
+  },
+  {
+   "seed": "progress update?",
+   "context": "a long rebuild is running",
+   "full_prompt": "Give me the status in three lines: what finished, what is blocked and why, what is next. Then keep working on the unblocked items.",
+   "tags": [
+    "status"
+   ]
+  },
+  {
+   "seed": "keep going",
+   "context": "the agent ended its turn with a report",
+   "full_prompt": "Resume exactly where you stopped; check what died; no recap.",
+   "tags": [
+    "resume"
+   ]
+  }
+ ],
+ "reactions": [
+  {
+   "kind": "correction",
+   "quote": "shorter, and lead with the user facing changes",
+   "about": "release notes draft",
+   "time": "2026-01-14T13:04:00.000Z",
+   "session": "cs05"
+  }
+ ],
+ "vocabulary": [
+  {
+   "phrase": "ship it",
+   "meaning": "merge and push the finished work"
+  },
+  {
+   "phrase": "Ship it",
+   "meaning": "the same, capitalised"
+  },
+  {
+   "phrase": "rq",
+   "meaning": "real quick: a small change, do it now"
+  }
+ ],
+ "preference_changes": [
+  {
+   "topic": "feature flags",
+   "earlier": "add a flag for every new path",
+   "later": "no flag, just ship",
+   "earlier_time": "2026-01-06T09:01:00.000Z",
+   "later_time": "2026-01-06T09:35:00.000Z",
+   "session": "cx01"
+  }
+ ],
+ "grants": [
+  {
+   "quote": "btw you can push the working branch whenever its green, no need to ask me",
+   "time": "2026-01-03T10:25:00.000Z",
+   "session": "cs01",
+   "origin": "typed",
+   "scope": "Alex's own projects",
+   "covers": "push the working branch once its green"
+  },
+  {
+   "quote": "push the working branch whenever its green",
+   "time": "2026-01-03T10:25:00.000Z",
+   "session": "cs01",
+   "origin": "typed",
+   "scope": "own projects",
+   "covers": "push the working branch"
+  },
+  {
+   "quote": "you don't need to ask before deleting old branches",
+   "time": "2026-01-03T10:26:00.000Z",
+   "session": "cs01",
+   "origin": "typed",
+   "scope": "own projects",
+   "covers": "delete merged branches"
+  },
+  {
+   "quote": "Do not touch the catalog service. You don't need to ask before retrying provider calls.",
+   "time": null,
+   "session": "cx10",
+   "origin": "drafted",
+   "scope": "checkout",
+   "covers": "retry provider calls"
+  },
+  {
+   "quote": "push it when green",
+   "time": "2026-01-03T10:20:00.000Z",
+   "session": "cs01",
+   "origin": "typed",
+   "scope": "own projects",
+   "covers": "send status messages"
+  }
+ ],
+ "session_stats": {
+  "sessions_read": 6,
+  "messages_read": 40,
+  "time_reliable_sessions": 6
+ }
+}

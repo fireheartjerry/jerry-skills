@@ -1,0 +1,10 @@
+{
+ "corrections": {
+  "$from_files": {
+   "profile_md": "../model-refreshed/profile.md",
+   "light_md": "../model/light.md",
+   "examples_md": "../model/examples.md"
+  },
+  "notes": []
+ }
+}
