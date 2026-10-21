@@ -1,4 +1,5 @@
-"""send bookkeeping, inbox atomicity, stop, idle, status aggregation, codex resume."""
+"""send bookkeeping, inbox atomicity, stop, idle, status aggregation, codex resume,
+send --interrupt."""
 
 import os
 import time
@@ -232,3 +233,45 @@ class SteerableTests(SessionTest):
         self.assertEqual(res["turns"], 2)
         self.assertEqual(self.turn("x", 2)["status"], "killed")
         self.assertFalse(pid_alive(pid))
+
+    def test_send_interrupt(self):
+        """--interrupt runs the INT/TERM/KILL ladder on the running turn, which
+        ends as killed; the message then runs as the next turn and the session
+        keeps going. An interrupted turn does not decide the session's status:
+        it is listed in interrupted_turns, not failed_turns."""
+        self.steerable("claude", "x", "start")
+        self.ok("turn", "x", "1", "--timeout", "20")
+        self.ok("send", "x", "@@hang", "--no-wait")
+        self.wait_until(lambda: (self.progress("x").get("phase") == "turn" and self.progress("x").get("turn") == 2),
+                        message="turn 2 not running")
+        cp = self.ok("send", "x", "next", "--interrupt", "--timeout", "30")
+        self.assertIn("interrupt : turn 2 is being stopped", cp.stdout)
+        self.assertIn("reply#3: next", cp.stdout)
+        self.assertEqual(self.turn("x", 2)["status"], "killed")
+        self.assertTrue(self.turn("x", 2).get("interrupted"))
+        self.assertEqual(self.signals("x")[0]["signal"], "SIGINT")
+        # The session is still usable after the interrupt.
+        cp = self.ok("send", "x", "after", "--timeout", "30")
+        self.assertIn("reply#4: after", cp.stdout)
+        self.ok("stop", "x")
+        res = self.wait_result("x", timeout=20)
+        self.assertEqual(res["failed_turns"], [])
+        self.assertEqual(res["interrupted_turns"], [2])
+        self.assertEqual(res["ended"], "stopped")
+        self.assertEqual(res["turns"], 4)
+        self.assertEqual(res["status"], "ok", res.get("reason"))
+        self.assertIsNone(res["failure_class"])
+        self.assertEqual(self.wait("x").returncode, 0)
+
+    def test_send_interrupt_when_idle_is_plain_send(self):
+        """With no turn running, --interrupt has nothing to stop and the
+        message is an ordinary next turn; a stale marker never hits a later turn."""
+        self.steerable("claude", "x", "start")
+        self.ok("turn", "x", "1", "--timeout", "20")
+        cp = self.ok("send", "x", "hello", "--interrupt", "--timeout", "30")
+        self.assertNotIn("interrupt :", cp.stdout)
+        self.assertIn("reply#2: hello", cp.stdout)
+        self.ok("stop", "x")
+        res = self.wait_result("x", timeout=20)
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["failed_turns"], [])

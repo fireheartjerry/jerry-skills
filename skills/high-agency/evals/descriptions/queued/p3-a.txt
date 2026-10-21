@@ -1,0 +1,1 @@
+Own a task to a verified result; not for pure explain, brainstorm or discuss requests. Use for multi-step builds, repairs, investigations, plans or briefs to execute, jobs that outlive a turn, and when the user says "high agency", "handle it", "keep going", "take ownership", or asks "does X work?" or "is it fixed?". Grants no new permission to send, publish, delete or spend.

@@ -148,7 +148,8 @@ class ExponentTests(unittest.TestCase):
         self.assertAlmostEqual(fitted, 2.0, delta=0.01)
         self.assertEqual(warnings, [])
         fitted, warnings = bench.scale_exponent([10, 20], [0.05, 0.06], 0.0)
-        self.assertTrue(any("under 200.0 ms" in w for w in warnings), warnings)
+        self.assertTrue(any("under 500.0 ms" in w and "at least 0.5 s" in w for w in warnings),
+                        warnings)
 
     def test_scale_exponent_within_baseline_is_not_fitted(self):
         fitted, warnings = bench.scale_exponent([10, 20], [0.020, 0.021], 0.021)
@@ -238,6 +239,12 @@ class SubprocessSmokeTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         data = json.loads(p.stdout)
         self.assertEqual(data["baseline"]["command"], ["true"])
+        # --baseline together with --no-baseline is a usage error, not a silent precedence
+        p = run_bench("scale", "--sizes", "10,20", "--baseline", "true", "--no-baseline",
+                      "--", "true", "{n}")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("--no-baseline", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
 
     def test_scale_requires_placeholder(self):
         p = run_bench("scale", "--sizes", "10,20", "--", "true")

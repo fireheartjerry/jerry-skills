@@ -1,21 +1,26 @@
 # jerry-skills
 
-Two agent skills for the work a single pass does badly: making open-ended quality
-measurable, and getting more than one agent on the problem.
+Five agent skills for the parts of agentic coding a single pass does badly: knowing
+what the user meant, owning a task to a verified finish, making open-ended quality
+measurable, running more than one agent, and proving a speedup is real.
 
-Both are plain markdown skills. They work in Claude Code as a plugin, and in
-Codex, Cursor, opencode or anything else that reads a `SKILL.md`.
+They are plain `SKILL.md` skills with supporting references, scripts and tests. They
+work in Claude Code (as a plugin or installed skills), Codex, and any agent that reads
+a `SKILL.md`.
 
 | Skill | What it does |
 |---|---|
-| [`iterative-improvement`](skills/iterative-improvement) | Turns "make this better" into a weighted criteria document, then runs hostile review → triage → execute → independent scoring until the score stops moving. |
-| [`agent-sessions`](skills/agent-sessions) | Runs Claude and Codex as isolated child sessions in tmux, so one agent can fan work out, hold a cross-engine debate, or delegate a long job and stay responsive. |
+| [`mind-reading`](skills/mind-reading) | Builds a model of you from your own Claude Code and Codex transcripts, then expands a few typed words into the full brief you meant, tags each inference by evidence, and acts on it. |
+| [`high-agency`](skills/high-agency) | Carries a task from intent to a verified result: infers what done means, proceeds on reversible assumptions, keeps consent boundaries, and closes the loop on long-running work. |
+| [`iterative-improvement`](skills/iterative-improvement) | Turns "make this better" into weighted criteria, then runs hostile review, triage, fixes and isolated scoring until the score stops moving. |
+| [`agent-sessions`](skills/agent-sessions) | Runs Claude, Codex or Gemini child sessions with results on disk: parallel fan-out, verify gates, budgets, cross-engine judging, best-of-N, worktrees, resume after reboot. |
+| [`competitive-systems`](skills/competitive-systems) | Evidence-driven performance work: profile, bound the gain, apply an algorithmic technique whose precondition holds, prove it with an oracle and statistically sound timing. Ships a portable `dev.py`. |
 
 ---
 
 ## Install
 
-### Claude Code (plugin)
+### Claude Code plugin
 
 ```
 /plugin marketplace add fireheartjerry/jerry-skills
@@ -25,114 +30,138 @@ Codex, Cursor, opencode or anything else that reads a `SKILL.md`.
 /plugin install jerry-skills@jerry-skills
 ```
 
-### Any agent (manual)
-
-Clone once and symlink the skills into wherever your agent looks:
+### Any agent (Claude Code, Codex, others)
 
 ```bash
 git clone https://github.com/fireheartjerry/jerry-skills.git ~/jerry-skills
-ln -s ~/jerry-skills/skills/iterative-improvement ~/.claude/skills/iterative-improvement
-ln -s ~/jerry-skills/skills/agent-sessions        ~/.claude/skills/agent-sessions
 ```
 
-Codex reads `AGENTS.md`, not a skills directory — point it at this repo by adding
-the contents of [`AGENTS.md`](AGENTS.md) to your own, or symlinking the skills
-somewhere your `AGENTS.md` references. Copying the directories instead of
-symlinking works fine too; nothing here phones home or expects a fixed path.
+```bash
+~/jerry-skills/install.sh
+```
+
+`install.sh` symlinks every skill into `~/.claude/skills`, `~/.codex/skills` and
+`~/.agents/skills`. It backs up any existing directory of the same name instead of
+overwriting it. Useful flags: `--target claude|codex|agents|all`, `--skill <name>`,
+`--copy`, `--dry-run`, `--uninstall`.
+
+Requirements by skill: `python3` (3.8 or newer) for the scripts; `tmux` plus the
+`claude`, `codex` or `gemini` CLI for `agent-sessions`; nothing beyond the agent for
+`high-agency`. Each skill's `SKILL.md` lists its own.
 
 ---
+
+## mind-reading
+
+People type "keep going", "ship it" or "fix the nav" and mean a full paragraph. This
+skill writes that paragraph the way you would have with unlimited time, shows it with
+every inferred sentence tagged by its evidence, then does it.
+
+It has two halves:
+
+- **A local build pipeline** (`scripts/mind_reading.py`) that extracts only the text
+  you typed from your transcripts, scrubs secrets and personal data, removes duplicated
+  and re-imported sessions, splits by time, mines constraints, corrections, follow-through
+  habits, vocabulary and explicit standing grants, and synthesizes a small profile, an
+  always-on rules file and seed-to-prompt examples. It includes an evaluation command
+  with a one-look rule for held-out data.
+- **A runtime** that loads only the parts of the model a seed needs, reads your
+  corrections first, and never treats an inference as permission. Actions that reach
+  other people, destroy data, spend money or change security settings stay held unless
+  your literal words or an explicit standing grant you wrote cover them.
+
+Everything stays on your machine. Start with
+[`references/build.md`](skills/mind-reading/references/build.md).
+
+What to expect: in the author's own single-user evaluation, the full model tied a
+hand-built predecessor on recall and anticipated more requirements in full, with zero
+unauthorized actions; on context-free first messages its gain over no model was small.
+That matches the published research: a personal model pays off on requests your history
+already covers, mostly through the constraints and follow-through you leave unsaid.
+
+## high-agency
+
+Coding agents stop after one step, re-ask for approval they already have, retry
+failures blindly, or call a passing exit code done. This skill sets an operating
+contract for substantial work: infer the outcome, proceed on the most likely reading,
+sweep the whole class of a reported bug, investigate before retrying, verify the result
+itself, and hand off honestly when a job outlives the turn. It distinguishes execute,
+discuss and status requests, scopes approvals to what was actually approved, and grants
+no new permission. A delegated-child mode covers agents working under a parent's brief.
 
 ## iterative-improvement
 
-The problem with asking an agent to improve something is that both the target
-and the progress are invisible. It will make *changes*, feel productive, and
-have no idea whether it moved toward or away from what you wanted. Ten rounds of
-that produces churn.
+When "better" has no test suite, an agent grading its own work reports progress it did
+not make. This skill interviews you into a weighted, scoreable criteria document, scores
+a baseline, then loops: an isolated hostile reviewer finds problems, the agent triages
+and fixes them, and a separate scorer that never sees the changelog rescores. Stopping is
+noise-aware (target, budget, regression or plateau). A lite mode covers small one-file
+requests. Reviewer and scorer children run read-only and without your global instructions.
 
-This skill makes the target explicit and numerical first — it interviews you
-into a weighted, scoreable criteria document — and then runs a loop where the
-critic and the scorer are both independent of the agent doing the work:
-
-```
-INTERVIEW ──► CRITERIA DOC (weighted, scoreable, user-approved)
-                    │
-                    ▼
-       ┌──────► HOSTILE REVIEW  (independent, brutal, specific)
-       │            │
-       │            ▼
-       │        TRIAGE          (accept, reject, defer — with reasons)
-       │            │
-       │            ▼
-       │        EXECUTE         (make the changes, verify each)
-       │            │
-       │            ▼
-       │        SCORE           (independent scorer, fresh context)
-       │            │
-       └────────────┴──► target hit / rounds spent / plateau ──► REPORT
-```
-
-The separation is the point. An agent grading its own homework reports progress
-it did not make; a reviewer that has never seen the reasoning finds what the
-author is blind to.
-
-**Use it when** two competent people could disagree about whether the work is
-finished — designs, landing pages, architecture, prose, a codebase that should
-be cleaner.
-
-**Don't use it when** there is one specific wrong behavior (that's debugging),
-when the task has a definite done state ("add a login page" — just build it), or
-when a test suite or benchmark already gives you an objective signal.
-
-Requires nothing beyond the agent itself. It pairs with `agent-sessions` when you
-want the reviewer and scorer to be genuinely separate processes — see
-[`references/cross-agent.md`](skills/iterative-improvement/references/cross-agent.md).
+Use it when two competent people could disagree about whether the work is finished.
+Do not use it for a single bug, a task with a definite done state, or anything a test
+suite or benchmark already measures.
 
 ## agent-sessions
 
-The naive way to delegate is `claude --dangerously-skip-permissions "..."` as a
-bare subprocess. That works right up until you want two at once, or you need to
-know whether one finished, or one corrupts a working tree the other is editing.
+A CLI (`scripts/agent-session`) that runs coding agents as isolated child sessions in
+tmux, so one agent can delegate to others and collect structured results. Each child
+gets its own log and a JSON result with the final answer, session id and cost.
+Highlights:
 
-`agent-sessions` is the same idea with those failure modes engineered out. Each
-child gets its own tmux session, its own log, and a result file the parent reads
-instead of scraping scrollback.
+- `wait --any`, `status`, `list --json` and a per-child event stream for a parent agent
+- a watchdog that kills the whole process group, classifies failures and retries a bounded number of times
+- verify gates: a command that must pass before a child counts as done
+- token and cost budgets across the whole child tree
+- an independent judge from the other engine, and best-of-N with automatic selection
+- git worktree isolation, cleanup that refuses to discard uncommitted work, resume after reboot
+- read-only children for review tasks
 
-```bash
-agent-session spawn claude audit-auth ~/code/app \
-  "Read src/auth/. List every place a token is validated. Output file:line and
-   what each checks. Do not change files." \
-  --tier cheap
+What it deliberately does not do, and which tool to use instead:
+[`references/comparison.md`](skills/agent-sessions/references/comparison.md).
+Run `agent-session doctor` first to check dependencies.
 
-agent-session list                 # what is running
-agent-session wait audit-auth 600  # block until done
-agent-session result audit-auth    # status, exit code, transcript tail
-```
+## competitive-systems
 
-Also does steerable children (`--steerable` plus `send`, for a real turn-by-turn
-conversation), git worktree isolation (`--worktree`, for children that write),
-and cross-engine debate — Codex has not seen your reasoning and will not politely
-agree with it.
+Most agent "optimizations" optimize the wrong place, break correctness, or report noise
+as a speedup. This skill runs one evidence loop: state the goal and correctness check,
+profile, bound the possible gain, pick a technique only when its precondition holds,
+implement it with a brute-force oracle, and accept a speedup only when its confidence
+interval clears the noise floor. Technique cards cover scheduling, test selection,
+dependency impact, multi-pattern matching, dedup, caching, LLM context packing and more,
+each with preconditions, complexity, a tested sketch and known traps.
 
-Model tier is explicit and defaults to cheap, because the largest waste in
-multi-agent work is running a frontier model on mechanical tasks:
-
-| Tier | Claude | For |
-|---|---|---|
-| `cheap` (default) | Haiku | Search sweeps, format conversions, running tests, applying a specified edit |
-| `standard` | Sonnet | Ordinary implementation and review |
-| `deep` | Opus | Subtle debugging, architecture, adversarial review where being wrong is expensive |
-
-**Requires:** `tmux`, the `claude` CLI, the `codex` CLI (only for Codex children),
-and `git` (only for `--worktree`). The `agent-session` script is at
-[`skills/agent-sessions/scripts/agent-session`](skills/agent-sessions/scripts/agent-session) —
-put it on your `PATH` or call it by absolute path.
-
-Concurrency, session lifetime and idle timeouts are set by `AGENT_SESSIONS_MAX`,
-`AGENT_SESSIONS_LINGER` and `AGENT_SESSIONS_IDLE`.
+`scripts/dev.py` is a portable task runner for any repository: language-aware check and
+test commands, affected-test selection, test timing history, a repo map, an LLM context
+packet, the technique catalog, and a benchmarking engine (`bench`, `compare`, `aa` noise
+floor, `scale`, `bound`, `report`, `changepoint`). `dev.py init` adds a `tools/dev.py`
+shim to a repository so it is always one command away.
 
 ---
 
+## Evidence
+
+Each skill ships its scenarios, rubric and results under `evals/` (mind-reading's
+evaluation is part of its pipeline). Blind A/B results against each skill's previous
+version, judged by a separate model on 12 scenarios with one trial each:
+
+| Skill | New | Previous | Wins / ties / losses |
+|---|---|---|---|
+| agent-sessions | 9.0 | 6.5 | 11 / 1 / 0 |
+| iterative-improvement | 9.2 | 5.7 | 10 / 2 / 0 |
+| high-agency | 8.8 | 6.2 (no skill: 7.0) | 8 / 1 / 3 vs no skill |
+| competitive-systems | 8.9 | 6.8 (no skill: 7.9) | 6 / 4 / 2 vs no skill |
+
+These are small samples scored by a model, not proofs. The offline test suites (run all
+of them with `scripts/run-all-tests.sh`) and `scripts/validate.py` run in CI on macOS
+and Linux.
+
+## Contributing
+
+Run `scripts/run-all-tests.sh` and `python3 scripts/validate.py` before opening a pull
+request. `validate.py` checks frontmatter, referenced paths, executable bits and the repo
+for secrets or personal data.
+
 ## License
 
-MIT — see [LICENSE](LICENSE). Use it, fork it, ship it commercially. Attribution
-appreciated, not required.
+MIT. See [LICENSE](LICENSE).

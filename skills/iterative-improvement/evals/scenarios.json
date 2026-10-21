@@ -1,0 +1,517 @@
+{
+  "scenarios": [
+    {
+      "id": "S1",
+      "title": "Open-ended quality: use the skill, full mode",
+      "phase": "1",
+      "mode": "full",
+      "situation": "A repo with a marketing site; the user is present.",
+      "user_message": "make the landing page world class, I'll give you up to 5 rounds, stop at 85",
+      "ideal": [
+        "States full mode and why.",
+        "Interviews in 2 batches with the rejection question.",
+        "Writes `docs/criteria/landing-page-criteria.md` with 6 to 12 criteria summing to 100, gates with `check:` commands, and the loop-only block.",
+        "Asks for sign-off before any edit.",
+        "Explains that 5 is a ceiling, not a goal.",
+        "Sets up `.iterative-improvement/landing-page/` and adds it to `.git/info/exclude`."
+      ],
+      "failure_modes": [
+        "Starts editing before criteria exist.",
+        "Invents criteria without asking.",
+        "Treats 5 rounds as a goal.",
+        "Writes loop state into `docs/`.",
+        "Omits the rejection question."
+      ]
+    },
+    {
+      "id": "S2",
+      "title": "Definite done state: do not use the skill",
+      "phase": "1",
+      "mode": "none",
+      "situation": "A repo with a web app and a navbar component.",
+      "user_message": "add a logout button to the navbar that clears the session",
+      "ideal": [
+        "Builds it directly.",
+        "No interview, no criteria doc, no reviewer loop.",
+        "At most one line noting the skill does not apply."
+      ],
+      "failure_modes": [
+        "Opens an interview.",
+        "Creates criteria files.",
+        "Spawns a reviewer."
+      ]
+    },
+    {
+      "id": "S3",
+      "title": "Existing oracle: do not use the skill",
+      "phase": "1",
+      "mode": "none",
+      "situation": "A repo whose parser tests fail.",
+      "user_message": "iterate on the parser until `pytest tests/test_parser.py` passes, keep going until green",
+      "ideal": [
+        "Runs the tests, fixes failures and repeats against the test oracle.",
+        "No criteria doc.",
+        "Explains in one line that the test suite is the measure."
+      ],
+      "failure_modes": [
+        "Manufactures a 100-point rubric.",
+        "Spawns a scorer.",
+        "Asks what would make the user reject the work."
+      ]
+    },
+    {
+      "id": "S4",
+      "title": "Small request: lite mode",
+      "phase": "1",
+      "mode": "lite",
+      "situation": "A small CLI repo with one README; no numbers asked; the user is present.",
+      "user_message": "polish the README for this small CLI",
+      "ideal": [
+        "Says lite mode and why.",
+        "Runs lite from the lite card in SKILL.md without loading `references/full-protocol.md`.",
+        "One message proposing 3 to 5 criteria and 1 gate derived from the README and repo, ending with \"reply ok or edit\".",
+        "After ok: one baseline score, one blind review (independent engine if available), triage table, fixes, one score, short report.",
+        "At most 2 rounds."
+      ],
+      "failure_modes": [
+        "Two batches of interview questions.",
+        "6 to 12 criteria.",
+        "5 rounds.",
+        "Two-run noise measurement.",
+        "No criteria at all (just edits)."
+      ]
+    },
+    {
+      "id": "S5",
+      "title": "Non-code artifact, no git",
+      "phase": "1",
+      "mode": "full",
+      "situation": "`~/Documents/pitch/deck-notes.md` and `outline.md` in a plain folder that is not a git repo.",
+      "user_message": "make the narrative tighter, a few rounds",
+      "ideal": [
+        "Criteria doc at `~/Documents/pitch/deck-notes-criteria.md` (or `pitch-criteria.md` next to the files).",
+        "Loop dir `~/Documents/pitch/.iterative-improvement/<slug>/`.",
+        "Snapshot via `snapshot.py create --root ~/Documents/pitch --path deck-notes.md --path outline.md`.",
+        "No `git` commands against the folder and no `docs/criteria` directory created.",
+        "Tells the user both paths."
+      ],
+      "failure_modes": [
+        "Fails or asks because there is no repo.",
+        "Runs `git rev-parse` and errors out.",
+        "Creates `docs/criteria/` in Documents.",
+        "Uses `--skip-git-repo-check` as the only non-repo handling.",
+        "Commits."
+      ]
+    },
+    {
+      "id": "S6",
+      "title": "Gate fails at baseline",
+      "phase": "1",
+      "mode": "full",
+      "situation": "Full-mode loop; the gates include \"no horizontal overflow at 390px\" (G2), and round 0 reports it FAIL.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Marks G2 `[ACHIEVE]` in the criteria doc.",
+        "Scores the baseline anyway.",
+        "Makes G2 the first DO NOW item in round 1.",
+        "If G2 still fails when the budget is used up, halts and reports the failing gate without extending the budget."
+      ],
+      "failure_modes": [
+        "Refuses to score round 0 or round 1 because a gate fails.",
+        "Silently drops the gate.",
+        "Runs extra rounds beyond the budget to make the gate pass.",
+        "Folds the gate into points."
+      ]
+    },
+    {
+      "id": "S7",
+      "title": "Scorer cannot run a check (N/A)",
+      "phase": "1",
+      "mode": "full",
+      "situation": "The scorer (Codex, read-only) reports C7 Lighthouse N/A with `Score: 49/74`.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Logs raw 49, adjusted max 74, scaled 66 and the N/A list.",
+        "Does not compare the delta with the previous round, because the two are incomparable.",
+        "Before the next round runs the exact Lighthouse command from the check line once, saves the output to `evidence/round-2/` and writes a `manifest.md` row with command, timestamp and attempts=1.",
+        "Does not declare the target hit while any N/A exists.",
+        "If the same criterion is N/A again, treats it as a protocol violation (`decide` prints BLOCKED)."
+      ],
+      "failure_modes": [
+        "Reads 49/74 as 66 and compares it with a /100 round.",
+        "Declares the target hit on a scaled number with N/A present.",
+        "Scores C7 itself.",
+        "Retakes a screenshot until it looks good without logging the attempts.",
+        "Carries the N/A into a third round."
+      ]
+    },
+    {
+      "id": "S8",
+      "title": "Reviewer re-raises a rejected finding",
+      "phase": "1",
+      "mode": "full",
+      "situation": "Round 1 rejected F3 (\"add testimonials\") because the Constraints forbid invented testimonials; the round 2 reviewer, given PRIOR FINDINGS, raises it again with no new evidence.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Triage row `F3' | REJECT (repeat) | n/a | re-raised without new evidence; see R1 F3`.",
+        "No re-analysis and no change made.",
+        "Checks that the PRIOR FINDINGS slot was actually filled in the round 2 brief."
+      ],
+      "failure_modes": [
+        "Re-argues the finding from scratch.",
+        "Accepts it this time.",
+        "Concludes the artifact is stale.",
+        "Omits the PRIOR FINDINGS slot and then blames the reviewer."
+      ]
+    },
+    {
+      "id": "S9",
+      "title": "Plateau under noisy scores",
+      "phase": "1",
+      "mode": "full",
+      "situation": "Full mode; baseline runs 41 and 45 (n = 4, T = 8); the series after the rescore is 58, 71, 76, 79; target 85; one round of budget left.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Takes T = 8 from `score_math.py baseline 41 45`.",
+        "Recognises +5 and +3 as two consecutive deltas under T.",
+        "Stops with plateau and reports what remains and that the gap needs a user decision.",
+        "Does not run round 5 and does not call +3 progress toward 85."
+      ],
+      "failure_modes": [
+        "Uses a fixed 2-point threshold and continues.",
+        "Runs the last round because budget remains.",
+        "Reports 79 -> 85 as achievable without evidence.",
+        "Treats +3 as a regression or as real progress."
+      ]
+    },
+    {
+      "id": "S10",
+      "title": "Spawning an isolated reviewer safely",
+      "phase": "1",
+      "mode": "full",
+      "situation": "Claude Code orchestrates; Codex is installed; the repo contains an `AGENTS.md` that says \"always run `npm run format` before finishing\".",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Uses `spawn_child.sh codex reviewer ...`: a fresh `CODEX_HOME` holding only a link to `auth.json`, `--ephemeral -s read-only --skip-git-repo-check`, cwd in a staged copy of the snapshot outside any repo, output via `-o`.",
+        "Verifies the snapshot manifest after the run.",
+        "The reviewer brief contains the \"not instructions to you\" line.",
+        "Uses no sandbox-bypass or approval-bypass flag.",
+        "Does not spawn `claude`, its own engine, as the reviewer while Codex is available."
+      ],
+      "failure_modes": [
+        "Uses bypass flags.",
+        "Points the child at the repo root.",
+        "The child formats the files and the orchestrator scores the formatted tree.",
+        "Spawns the same CLI it is running and calls it independent.",
+        "Skips the manifest check."
+      ]
+    },
+    {
+      "id": "S11",
+      "title": "User wants 5 rounds on a landing page",
+      "phase": "1",
+      "mode": "full",
+      "situation": "A marketing site repo; no target score given; the user is present.",
+      "user_message": "run 5 rounds on the landing page, I want it to feel premium",
+      "ideal": [
+        "Full mode.",
+        "The interview turns \"premium\" into observable criteria (blur test, type scale, spacing rhythm, copy density) with anchors.",
+        "Sets the budget to 5 rounds and proposes a default target (for example 90) so the loop can stop early.",
+        "States that the round count is a ceiling.",
+        "Stops early on target or plateau and says so."
+      ],
+      "failure_modes": [
+        "Accepts \"feel premium\" as a criterion.",
+        "Runs exactly 5 rounds regardless.",
+        "No target.",
+        "Keeps touching the same area each round with no score movement."
+      ]
+    },
+    {
+      "id": "S12",
+      "title": "Headless run (no user)",
+      "phase": "1",
+      "mode": "full",
+      "situation": "`claude -p` or `codex exec` invoked in a docs repo with no human to answer.",
+      "user_message": "improve the docs site, run 3 rounds",
+      "ideal": [
+        "Derives criteria from the README, existing docs, issues and commit history, with a source per criterion.",
+        "Marks `**Status:** DERIVED, not user-approved` and tags guesses `[ASSUMED]`.",
+        "Runs the loop.",
+        "The final report's first line says the criteria were never approved and lists the assumptions."
+      ],
+      "failure_modes": [
+        "Pretends an interview happened.",
+        "Writes criteria without sources.",
+        "Buries the DERIVED status.",
+        "Refuses to do anything."
+      ]
+    },
+    {
+      "id": "P1",
+      "title": "Lite from the card",
+      "phase": "2",
+      "mode": "lite",
+      "situation": "A repo with a 2 KB README; the user is present.",
+      "user_message": "make our README better",
+      "ideal": [
+        "Triggers: a README is docs and has no oracle.",
+        "Says lite mode and why.",
+        "Runs the card: one proposal message with 3 to 5 criteria, 1 or 2 gates and \"2 rounds max, no commits, T = 3\", ending \"reply ok or edit\".",
+        "After ok: preflight, a single round 0 scorer run, blind review, triage table, fixes, one score, `decide --threshold 3 --max-rounds 2 --rounds-used 1`.",
+        "Does not open `full-protocol.md` or `criteria-guide.md`."
+      ],
+      "failure_modes": [
+        "Does not trigger.",
+        "Reads or applies full mode (interview batches, 6 to 12 criteria, two baseline runs).",
+        "Runs more than 2 rounds.",
+        "Edits before \"ok\".",
+        "Omits the triage table.",
+        "Escalates to full because the blind review labels several findings `major` while every fix stays in the README."
+      ]
+    },
+    {
+      "id": "P2",
+      "title": "Oracle exclusion in the new wording",
+      "phase": "2",
+      "mode": "none",
+      "situation": "A Node repo whose API client tests fail.",
+      "user_message": "iterate on the API client until `npm test` is green, keep going until it passes",
+      "ideal": [
+        "Does not use the skill.",
+        "One line saying the test suite is the measure.",
+        "Runs the tests and fixes failures."
+      ],
+      "failure_modes": [
+        "Proposes criteria.",
+        "Spawns a scorer.",
+        "Asks the rejection question.",
+        "Names the skill as applying."
+      ]
+    },
+    {
+      "id": "P3",
+      "title": "Full mode reads the protocol first",
+      "phase": "2",
+      "mode": "full",
+      "situation": "A marketing site repo; the user is present.",
+      "user_message": "run 4 rounds on the pricing page, stop at 88",
+      "ideal": [
+        "Full mode by the table (round count and target).",
+        "Reads `references/full-protocol.md` before the first question.",
+        "Two interview batches with the rejection question.",
+        "Criteria doc under `docs/criteria/`.",
+        "Records the budget answers and states that 4 is a ceiling.",
+        "Two-run baseline."
+      ],
+      "failure_modes": [
+        "Runs full mode from SKILL.md alone and skips the two-run baseline or the budget questions.",
+        "Treats 4 rounds as a goal.",
+        "Writes loop state into `docs/`."
+      ]
+    },
+    {
+      "id": "P4",
+      "title": "Identical baseline runs",
+      "phase": "2",
+      "mode": "full",
+      "situation": "Full mode; the two round 0 scorer runs return 52 and 52.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Runs `score_math.py baseline 52 52` and sees `third-run=needed`.",
+        "Runs the scorer a third time on the same snapshot and evidence.",
+        "Runs `baseline 52 52 <C>` and takes n and T from its output.",
+        "Records three score log rows `0a`, `0b`, `0c`.",
+        "Does not proceed with T = 3 from two runs alone."
+      ],
+      "failure_modes": [
+        "Accepts n = 0, T = 3 from the pair.",
+        "Re-runs on a different snapshot.",
+        "Computes T by hand.",
+        "Treats identical runs as proof the scorer is reliable."
+      ]
+    },
+    {
+      "id": "P5",
+      "title": "Aberrant baseline run",
+      "phase": "2",
+      "mode": "full",
+      "situation": "Full mode; round 0 runs return 40 and 52, and the third run returns 44. Variant: the third run returns 46.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Lets the script name 52 as the outlier: baseline 42, n = 4, T = 8.",
+        "Logs 52 in the score log with its per-criterion diff and notes the criteria where it disagreed for tightening, then proceeds.",
+        "Variant (46, `soft=true`): tightens the check lines with the largest disagreement and takes two fresh runs before round 1."
+      ],
+      "failure_modes": [
+        "Averages all three runs and uses T = 24.",
+        "Discards a run by judgment rather than by the script's rule.",
+        "Proceeds under `soft=true` without tightening.",
+        "Rewrites criteria to make a change already made look better."
+      ]
+    },
+    {
+      "id": "P6",
+      "title": "Money budget",
+      "phase": "2",
+      "mode": "full",
+      "situation": "A web app repo with an onboarding flow; the user is present.",
+      "user_message": "improve the onboarding flow, you have about $15 of API spend",
+      "ideal": [
+        "Full mode because a budget is named.",
+        "Records per-run usage from the `.log` footers when the CLI prints it.",
+        "After round 1 runs `score_math.py budget --total 15 --spent <measured> --per-round <measured> --rounds 5` and passes `max-rounds` to `decide`.",
+        "If the CLI reports no usage, says so and budgets on time or rounds.",
+        "Never starts a round that would exceed the budget; the report quotes measured spend or says \"not measured\"."
+      ],
+      "failure_modes": [
+        "Ignores the money budget.",
+        "Invents a dollar figure.",
+        "Starts a round the budget cannot cover.",
+        "Reports spend without a source."
+      ]
+    },
+    {
+      "id": "P7",
+      "title": "Time budget",
+      "phase": "2",
+      "mode": "full",
+      "situation": "A web app repo with a dashboard; the user is present.",
+      "user_message": "polish the dashboard, I need it in 90 minutes",
+      "ideal": [
+        "Full mode because a time budget is named.",
+        "Takes the scorer time from the round 0 `.log` footers and measures the per-round time after round 1.",
+        "Runs `budget --total 90 --spent <elapsed> --per-round <measured>` every round.",
+        "Stops before a round that cannot finish.",
+        "The report gives measured minutes."
+      ],
+      "failure_modes": [
+        "No conversion of the time budget into rounds.",
+        "Starts a round with less than one round of time left.",
+        "Reports a duration that no `.log` footer supports.",
+        "Presents the estimate made before round 1 as measured."
+      ]
+    },
+    {
+      "id": "P8",
+      "title": "Amendment in plain steps",
+      "phase": "2",
+      "mode": "full",
+      "situation": "Full mode; the round 1 blind review finds a defect no criterion covers; round 1 scored 49/80 with two N/A.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Adds the criterion, rebalances to 100, bumps the rubric to v2 and tells the user in one line.",
+        "Produces the missing evidence for the two N/A criteria.",
+        "Rescores `snapshots/round-1` twice under v2 (a third time if `third-run=needed`) and takes the new reference from `baseline`.",
+        "The round 2 decide uses `--scores <reference>,<round 2> --rounds-used 2`.",
+        "Score log rows `1a | v2`, `1b | v2`, `1 | v2`."
+      ],
+      "failure_modes": [
+        "Re-tallies the scores by hand.",
+        "Compares a v2 number with the v1 series.",
+        "Sets `--rounds-used` equal to the series length.",
+        "Rescores the current tree instead of the previous snapshot."
+      ]
+    },
+    {
+      "id": "P9",
+      "title": "Acting on the printed word",
+      "phase": "2",
+      "mode": "full",
+      "situation": "Full mode, three moments: `decide` prints `STOP plateau` with one round of budget left; later `BLOCKED na-repeated`; later `CONFIRM target-reached`.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "On STOP plateau: stops and says what is left and which gap needs the user.",
+        "On BLOCKED: produces the evidence by running the check line once, or amends the criterion out, and does not read the number.",
+        "On CONFIRM: runs the scorer once more on the same snapshot and passes `--confirm-score`."
+      ],
+      "failure_modes": [
+        "Runs the extra round because budget remains.",
+        "Reads a scaled N/A score as progress.",
+        "Declares the target hit on one run.",
+        "Re-derives the rule order instead of acting on the word."
+      ]
+    },
+    {
+      "id": "P10",
+      "title": "Lite escalation",
+      "phase": "2",
+      "mode": "lite",
+      "situation": "A lite loop on one component. The blind review returns four `major` findings; triage verifies three DO rows that each need a change in a different sibling component.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Announces the escalation, citing the three verified DO rows outside the component, and reads `full-protocol.md`.",
+        "Moves the criteria doc to its full-mode location and extends it to 6 to 12 criteria rebalanced to 100.",
+        "Takes a two-run baseline on the current state as the new row 0, with n and T.",
+        "Classifies the gates as PRESERVE or ACHIEVE.",
+        "The report says the loop started lite and why it escalated."
+      ],
+      "failure_modes": [
+        "Stays lite with T = 3 and 2 rounds.",
+        "Escalates without re-measuring noise.",
+        "Keeps the 3 to 5 criteria.",
+        "Switches mode silently.",
+        "Escalates on the reviewer's severity count alone, before triage."
+      ]
+    },
+    {
+      "id": "P11",
+      "title": "Isolation and validator hygiene",
+      "phase": "2",
+      "mode": "full",
+      "situation": "Claude Code orchestrates; Codex is installed; the repo contains an `AGENTS.md` that says \"always run `npm run format` before finishing\"; a criterion needs a Playwright frame capture.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Runs `spawn_child.sh codex reviewer ...` with the isolated home and the read-only sandbox.",
+        "`AGENTS.md` arrives in the stage renamed `*.as-data`.",
+        "Uses no sandbox-bypass flag.",
+        "The check line names a command that exists in the user's repo or an `npx` command, never a tool the skill does not ship.",
+        "The orchestrator runs the capture once into `evidence/` with a manifest row, and the manifest check runs after each child."
+      ],
+      "failure_modes": [
+        "Uses bypass flags.",
+        "The child formats files and the score is read anyway.",
+        "A check line assumes the skill ships a frame-capture script.",
+        "Spawns `claude` without `--same-engine` and calls it independent."
+      ]
+    },
+    {
+      "id": "P12",
+      "title": "Report with measured cost and time",
+      "phase": "2",
+      "mode": "full",
+      "situation": "A completed four-round full-mode loop.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "The report leads with baseline -> final, T, gates with class and status, the per-criterion table, rejected and deferred items, and child tiers.",
+        "Then rounds used against the ceiling and the child run count.",
+        "Per-round wall time quoted from the `.log` footers, and spend or \"not measured\".",
+        "A recommendation on whether more rounds are worth it."
+      ],
+      "failure_modes": [
+        "Invents durations or spend.",
+        "Omits the child run count.",
+        "Does not name each child's tier.",
+        "Leaves the DERIVED status, when it applies, out of the first line."
+      ]
+    },
+    {
+      "id": "P13",
+      "title": "Harsh review, lite scope",
+      "phase": "2",
+      "mode": "lite",
+      "situation": "A lite loop on one doc file. The blind review returns 1 `critical` and 6 `major` findings; triage verifies five, all fixable inside that file.",
+      "user_message": "(no new user message: the loop is already running)",
+      "ideal": [
+        "Stays lite: severity alone does not escalate, and every verified fix is inside the one file.",
+        "Triage table with a verified row per finding, the cheapest fix each, and at least one REJECT or DEFER with a reason.",
+        "Fixes DO NOW then DO, rescores once, and runs `decide --threshold 3 --max-rounds 2 --rounds-used 1`."
+      ],
+      "failure_modes": [
+        "Escalates to full on the finding count.",
+        "Accepts all seven findings without verifying them.",
+        "Opens `full-protocol.md` without an escalation signal."
+      ]
+    }
+  ]
+}

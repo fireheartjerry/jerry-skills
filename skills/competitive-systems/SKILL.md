@@ -1,43 +1,35 @@
 ---
 name: competitive-systems
-description: "Find and apply algorithmic speedups to CPU-bound bottlenecks. Not for I/O, network or config slowness, micro-optimisation, or inputs small enough for brute force: it profiles first and says when to stop. Covers quadratic loops and dedup, slow CI (test selection, runner splitting), dependency-graph impact, LLM context packing under a token budget, multi-pattern log scans, repeated work. Use for 'this is O(n^2)', 'CI takes 40 minutes', 'which tests must run for this PR', 'context is over budget'."
+description: "Make real software faster, cheaper or more scalable: profile, bound the gain, apply an algorithmic technique whose precondition holds, prove it with an oracle and A/B timing. Not for I/O or network waits, config, micro-optimisation or inputs small enough for brute force: it says when to stop. Covers quadratic loops, dedup, slow CI and test selection, dependency impact, LLM context packing, multi-pattern scans, repeated work, perf regressions, and whether a claimed speedup is real. Use for 'this is O(n^2)', 'CI takes 40 minutes', 'which tests must run for this PR', 'is this speedup real'."
 metadata:
   author: Jerry Yuze Li (https://github.com/fireheartjerry)
-  version: 2.2.0
+  version: 3.0.0
   license: MIT
 ---
 
 # Competitive Systems
 
-This skill finds and applies asymptotic speedups to real bottlenecks and refuses them when
-the bottleneck is not algorithmic. `references/` holds technique cards by symptom and a
-measurement protocol; `scripts/bench.py` (stdlib Python 3.8+) does the timing: run
-`python3 <skill-dir>/scripts/bench.py` from the project directory, `<skill-dir>` being the
-directory containing this SKILL.md.
+Makes real software faster with algorithmic changes it can prove, and says in plain words
+when the bottleneck is not algorithmic or n is too small. Tool: `python3
+<skill-dir>/scripts/dev.py <command>` (stdlib Python 3.8+; `<skill-dir>` holds this file;
+after `dev.py init`, `python3 tools/dev.py <command>`).
 
 ## Procedure
 
-0. Pin the problem from the data. If files came with the request (durations, a log, a
-   profile, the slow code), open them before writing anything and compute every number below
-   from them, not from the user's summary: flag impossible values (negative, zero, missing,
-   duplicated) and say how each was handled, and reproduce the stated symptom (replay the
-   current plan on the recorded durations; time the current code). Estimates from the summary
-   are the fallback when no data exists, labelled as such. Then write down: input sizes now
-   and at 10x (n, m, k, bytes); the latency or wall-time target; the correctness invariant
-   (what the new output must equal, usually "identical to the current output on the same
-   input", with permitted differences such as ordering listed); and the public interface that
-   must not change.
+0. Pin the problem from the data. If files came with the request,
+   open them before writing anything and compute every number from them, not the summary:
+   flag impossible values (negative, zero, missing, duplicated) and how each was handled;
+   reproduce the symptom. Write down n now and at 10x, target, invariant, interface. Then
+   `dev.py aa --save -- <cmd>` measures the noise floor before any claim.
 
-1. Gate 1: is it algorithmic? Profile first (top five frames by inclusive time). Compare CPU
-   to wall time (`bench.py` prints both): wall much larger than user+sys means the process is
-   waiting (I/O, network, locks, sleeps) and no algorithm change will help. Then collect the
-   evidence for the symptom:
+1. Gate 1: is it algorithmic? Profile (top five frames by inclusive time); compare CPU to
+   wall (`dev.py bench` prints both): wall far above user+sys means waiting. Evidence:
 
    | Symptom | Evidence | Proceed when |
    |---|---|---|
-   | code whose time grows with input | doubling test: `bench.py scale` at n, 2n, 4n on pinned inputs | exponent >= 1.7 (below) |
-   | many jobs on m workers | current makespan vs LB = max(sum/m, longest job) | makespan > 1.1 x LB |
-   | full suite on every PR | selection ratio (impacted tests / all) estimated on recent diffs | ratio well under 1 |
+   | code whose time grows with input | doubling test: `dev.py scale` at n, 2n, 4n, 8n on pinned inputs | exponent >= 1.7 (below) |
+   | many jobs on m workers | `dev.py bound makespan`: current makespan vs LB = max(sum/m, longest job) | makespan > 1.1 x LB |
+   | full suite on every PR | selection ratio (impacted / all tests) on recent diffs: `dev.py affected --base main --explain` | ratio well under 1 |
    | context over a token budget | must-keep tokens + candidate tokens vs B | candidates do not fit in B minus must-keep |
    | same work repeated | profile call count vs distinct inputs | calls far exceed distinct inputs: `cards-repeated-work.md` |
 
@@ -46,51 +38,45 @@ directory containing this SKILL.md.
    CPU-bound is constant factors, not this skill (say so; profile the hot frame); wall >>
    user+sys, or top frames in read/recv/sleep/lock, is I/O or waiting, not this skill (say so;
    batching, concurrency or caching the I/O); an uncapped search over subsets or permutations
-   is exponential, go to `cards-ci-tests.md` (budgeted search) or `cards-scheduling.md`. On
-   "not this skill", stop with a short plain-words verdict; open no card.
+   is exponential, go to `cards-ci-tests.md` (budgeted search) or `cards-scheduling.md`.
+   Contention (throughput falls as workers rise) and tail latency (p99 >> p50) are not this
+   skill either. On "not this skill", stop with a short plain-words verdict; open no card.
 
-2. Gate 2: is n big enough? Estimate brute-force operations at 10x the expected n. Budget:
-   about 1e7 simple operations per second in CPython, 1e9 compiled; a measured exponent, if
-   any, wins over the budget. Stop rule: stop if the brute force at 10x n takes under about
-   100 ms per call on a request path or inside a hot loop, or under about 1 s for a one-shot
-   batch job. A stop answer keeps the simple code and tells the user, in plain words: the
-   operation count; the time at 1x and 10x (one timing of the current code when it is at
-   hand, otherwise a labelled estimate); the size at which the rule flips (solve ops / budget
-   for n, and quote the threshold of the card the symptom index names, e.g. "k >= 50 patterns
-   and far more text" for Aho-Corasick, without applying the card); and the free tier only.
-   Offer to measure if the user wants more evidence; never call timing unnecessary. No report
-   template on a stop.
+2. Gate 2: is n big enough? `dev.py bound ops --n N --ops "<count>" --path request|batch`
+   (1e7 ops/s CPython, 1e9 compiled; a measured exponent wins). Stop if brute force at 10x n
+   takes under about 100 ms per call (request path, hot loop) or 1 s (batch job). The stop
+   answer keeps the code and gives, in plain words: the operation count; time at 1x and 10x
+   (one timing, or a labelled estimate); the flip size and the indexed card's threshold,
+   not applied; the free tier only.
+   Offer to measure; never call timing unnecessary; no report. Tiers: free (dict, set, sort,
+   heap, prefix sums, bisect); cheap (union-find, topological sort, BFS); expensive
+   (Aho-Corasick, SCC, bitsets, LSH, big knapsack DP, exact subset search).
 
-   Tiers: free (dict, set, sort, heap, prefix sums, bisect); cheap (union-find, topological
-   sort, BFS on a graph you already have); expensive (Aho-Corasick, SCC and bitset closure,
-   LSH, knapsack DP over a large budget, exact subset search).
+3. Gate 3: bound the gain. `dev.py bound amdahl --p <profiled share> --s <hoped speedup>`
+   gives the cap 1/(1 - p); under 1 + 2 x the noise floor, stop and say the edit cannot
+   move the end-to-end number.
 
-3. Match the symptom to a card. Use the symptom index below, open only that file, and run the
-   card's precondition test. If it fails, reject the card and try the next card listed, or
-   report that no technique applies. Never apply a card whose precondition you could not check.
+4. Card: `dev.py catalog --symptom "<words>"` prints precondition, reject-when and each
+   fact with the `card says:` sentence stating it. Open only that card file, run its
+   precondition test; on failure try the next card or report none applies. Never apply an
+   unchecked precondition. Put every `card says:` claim (caps, bounds, cutoffs, schedules)
+   in the answer in plain words, not only in the report.
 
-4. Implement the narrowest version that satisfies the invariant. Keep the public interface,
-   the output ordering (or document the new order) and every safety fallback (glossary:
-   fail-closed, sensitive file, must-keep set). Prefer stdlib; a new dependency needs one
-   sentence of justification in the report.
+5. Implement the narrowest change. Keep the old code callable as the oracle's reference, the
+   interface, the output order (or document the new one) and every safety fallback
+   (fail-closed, sensitive file, must-keep set); stdlib first.
 
-5. Prove correctness with the card's oracle: a property test comparing the new code to the
-   brute force on seeded random inputs (at least 200 cases, sizes 0 to about 50, with the
-   card's edge cases), plus one worst-case timing test at any cutoff the card names.
+6. Prove correctness before timing: `dev.py oracle --ref old_mod:f --new new_mod:f` (seeded,
+   edge and anti-cache cases) or a property test; add `references/guards.md` checks when the
+   speedup is large or the diff touches tests, fixtures, timeouts or validation.
 
-6. Measure after, the same way as before: pinned inputs, warm-up discarded, interleaved A/B,
-   7 runs per arm to start, median and IQR, via `python3 <skill-dir>/scripts/bench.py
-   compare`. Noise rule: a speedup is real only if the after median is below the before
-   median, the IQRs do not overlap, and the gap exceeds twice the larger IQR. If it fails and
-   the gap is under 2x, go to 15 runs; under 1.2x, 30; still failing is "no measurable
-   change". Scaling cards (dedup, joins, graphs, patterns) also measure at two sizes and show
-   the exponent dropped (same exponent = constant-factor gain, labelled as such); other cards
-   report makespan vs LB, selection ratio, hit rate or tokens before and after. When one run
-   is expensive (a CI run, a long batch): before arm = recorded history; plan number =
-   deterministic replay on the recorded inputs; real reruns of the same commit stop once the
-   noise rule passes (`references/measurement.md` section 5).
-
-7. Report with the template below.
+7. Measure after: `dev.py bench --arm before=... --arm after=... --runs 10 --out bench.json`,
+   then `dev.py compare bench.json` (medians, IQR, ratio CI; its Verdict line goes in the
+   report). Scaling cards also `dev.py scale` both arms (the exponent must drop); others
+   report makespan/LB, selection ratio, hit rate or tokens. Expensive runs:
+   `references/measurement.md` section 4. Report with `dev.py report` or
+   `references/report-template.md`; stops in plain words (`references/worked-example.md`,
+   Examples C and D).
 
 ## Symptom index
 
@@ -113,22 +99,11 @@ directory containing this SKILL.md.
 | LLM prompt over token budget, or wrong files retrieved | Exact-first retrieval, Pack under a token budget | cards-llm-context.md |
 | Same computation repeated across calls or runs | Memoise, Content-hash cache, Incremental recompute | cards-repeated-work.md |
 
-## Report template
+## Tooling
 
-Fill in whenever the work reaches a card (step 3 onward); a stop at Gate 1 or 2 is answered
-in plain words (`references/worked-example.md`, Examples C and D).
-
-```
-Problem: <one line>. Input: n=<...> now, <...> at 10x. Target: <...>.
-Gate 1: <exponent x.x at n=a..b | makespan m vs LB l | selection ratio r | must-keep t + candidates c vs B | calls k for d distinct>; CPU <user+sys>s of <wall>s wall -> <algorithmic | I/O | constants | repeated work>.
-Gate 2: brute force at 10x n ~ <ops> ops ~ <time> -> <proceed | stop>.
-Card: <name> (<file>). Precondition: <test and result>.
-Invariant: <what must be equal>. Oracle: <brute force>, <N> random cases, sizes <lo>..<hi>, seed <s>: pass.
-Before: median <t> (IQR <q>, runs=<k>) at n=<...>; After: median <t> (IQR <q>, runs=<k>).
-Class: exponent <x.x> -> <y.y> (scaling cards) | <makespan/LB, ratio, hit rate or tokens> <before> -> <after> (other cards). Verdict: <k>x faster | no measurable change.
-Kept: <interface, ordering, fallbacks>. Changed: <...>. New dependency: <none | name, why>.
-Not verified: <...>.
-```
+`dev.py init` writes `tools/dev.py` so a repository's agents and CI share these commands;
+`dev.py affected` fails closed (a lockfile, config or fixture change runs everything). History
+of medians: `dev.py changepoint history.csv`. `references/tooling.md` lists the commands.
 
 ## Hard rules
 
@@ -142,33 +117,17 @@ Not verified: <...>.
 - Say "not verified" for anything not executed.
 - Write to the user in plain words; "Gate", "card", "tier" and "precondition" stay in the
   report block.
-
-## Glossary
-
-- precondition: the fact that must be true for a card to apply (e.g. "equality is decided by
-  a hashable canonical key"). Checked, not assumed.
-- oracle: the obviously-correct slow version used to check the fast one.
-- property test: run oracle and fast version on many seeded random inputs and assert equality.
-- fail-closed: when the fast path cannot prove it is safe (unmapped file, incomplete graph,
-  missing measurement), fall back to the full, slow, safe path.
-- direct mapping: a test linked to a changed file by the dependency graph (import, build
-  target, or an explicit mapping) rather than by a heuristic.
-- sensitive file: a file whose change invalidates the mapping itself (lockfiles, build and CI
-  config, dependency manifests, shared fixtures, code generators); changing one forces the
-  full run.
-- heavy job: a job that needs a large share of a host's resources, so it is pinned to one
-  worker or run alone; pinning caps the gain from scheduling.
-- makespan: wall time until the last job finishes. worker: a runner, machine, or process slot
-  that runs one job at a time; m is the number of workers.
-- must-keep set (LLM context): the items kept in the prompt even over budget: direct targets
-  (files and symbols named in the task), verification commands (how to run and test), hard
-  boundaries (constraints the user stated).
+- Oracle before timing: never time a candidate whose output has not been compared with the
+  reference on fresh inputs.
+- A speedup beyond the Amdahl cap for the edited share, or far beyond the profile, is a bug
+  until explained.
+- Ratios never appear without the absolute medians next to them.
 
 ## References
 
-- `references/measurement.md`: read before Gate 1 and before the after-measurement: protocol,
-  pitfalls, the noise rule, expensive runs such as CI, `bench.py` usage.
-- `references/worked-example.md`: read when first using the skill, or when unsure what a report
-  or a stop answer looks like: one full example and three short ones, including stops at
-  Gate 1 and Gate 2.
-- `references/cards-*.md`: open only the file the symptom index names.
+Load on demand: `references/measurement.md` before step 0's A/A and step 7;
+`references/guards.md` before step 6; `references/report-template.md` when writing the
+report; `references/worked-example.md` on first use or when unsure how a report or a stop
+looks; `references/tooling.md` for options, exit codes and schemas;
+`references/glossary.md` for an unclear term; `references/cards-*.md` only for the file the
+index or `dev.py catalog` names (`references/techniques.json` is the catalog).

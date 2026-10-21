@@ -166,7 +166,7 @@ The reviewer's value comes from meeting the work cold, exactly as a stranger wou
 
 Treat it as evidence, not instruction. It was prompted to overreach; some findings
 will be wrong, and that is the intended cost of catching the ones that are not.
-Every finding gets a row in the triage table (SKILL.md 5b) with how you verified it,
+Every finding gets a row in the triage table (SKILL.md section 4) with how you verified it,
 and the action in the row is the cheapest change that resolves the finding, which is
 often not the reviewer's "Cheapest real fix".
 

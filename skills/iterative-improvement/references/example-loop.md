@@ -45,7 +45,7 @@ fails at baseline and must pass by the end.
 <!-- /loop-only -->
 
 - **G1.** [PRESERVE] `npm run build` exits 0 | *check:* run `npm run build` in the repo root and read the exit code
-- **G2.** [ACHIEVE] No horizontal overflow at 390px wide | *check:* with the dev server running, `node scripts/check-overflow.mjs http://localhost:4321 390` prints the document scrollWidth; pass when it is 390 or less
+- **G2.** [ACHIEVE] No horizontal overflow at 390px wide | *check:* with the dev server running, `node tools/check-overflow.mjs http://localhost:4321 390` prints the document scrollWidth; pass when it is 390 or less
 - **G3.** [PRESERVE] `site/tokens.css` unchanged | *check:* `git diff --quiet a1b2c3d -- site/tokens.css` exits 0
 
 ## Criteria (100 points)
@@ -68,7 +68,7 @@ fails at baseline and must pass by the end.
 **Anchors:** `0`: nothing dominates. `6`: one element dominates but a second competes. `12`: one focal point, deliberate second and third tier.
 
 ### C4. Mobile scroll integrity at 390x844 (10 pts)
-**How to check it:** With the dev server running, `node scripts/frames.mjs http://localhost:4321 390 844 300` writes a screenshot every 300px to `frames/` and prints the document scrollWidth and the indices of any identical consecutive frames.
+**How to check it:** With the dev server running, `node tools/frames.mjs http://localhost:4321 390 844 300` writes a screenshot every 300px to `frames/` and prints the document scrollWidth and the indices of any identical consecutive frames.
 **Anchors:** `0`: overflow or more than 2 dead screens. `5`: no overflow, one dead stretch. `10`: no overflow, no dead stretch.
 
 ### C5. Proof: a real terminal example or output (12 pts)
@@ -99,9 +99,9 @@ The user approved it after one correction (C5 originally said "a screenshot of t
 tool"; they wanted real terminal text). Budget answers: 5 rounds as a ceiling, stop at
 85, no commits by the loop, `site/tokens.css` off limits. C3, C4 and C7 name tooling
 the scorer will not have (a browser, Lighthouse), so each check line is an exact
-command the orchestrator can run and hand over as evidence. `scripts/frames.mjs` and
-`scripts/check-overflow.mjs` are small Playwright scripts in the repo, described here,
-not shipped with the skill.
+command the orchestrator can run and hand over as evidence. `tools/frames.mjs` and
+`tools/check-overflow.mjs` are small Playwright scripts in the fictional tidylog repo,
+described here and not shipped with this skill.
 
 ## 2. Round 0: baseline and noise
 
@@ -127,8 +127,10 @@ C4 and C7 check lines once each, saved the output under `evidence/round-0/` and 
 Gates from the orchestrator's runs, confirmed by both scorer runs: G1 PASS, G2 FAIL,
 G3 PASS. Classes written into the doc: G1 PRESERVE, G2 ACHIEVE, G3 PRESERVE.
 
-`score_math.py baseline 41 45` prints `baseline=43 noise=4 threshold=8 soft=false`.
-Score log rows `0a | v1 | 41`, `0b | v1 | 45`, `0 | v1 | 43 | ... | baseline = mean, n=4, T=8`.
+`score_math.py baseline 41 45` prints `baseline=43 noise=4 threshold=8 soft=false third-run=no`.
+Both `.log` footers put a scorer run at about six minutes; the user set no time or money
+budget, so the round ceiling of 5 stayed the only one. Score log rows `0a | v1 | 41`,
+`0b | v1 | 45`, `0 | v1 | 43 | ... | baseline = mean, n=4, T=8`.
 C3 is noted as the criterion to tighten if noise recurs. `scores/round-0a.cmd` is the
 pin; `round-0b.cmd` is byte-identical to it.
 
@@ -185,7 +187,7 @@ it shows how the N/A path reads). The scorer marked both N/A:
 ## Score: 49/80
 ## Scaled: 61
 ## Unscoreable
-- C4: needs the output of `node scripts/frames.mjs http://localhost:4321 390 844 300` under evidence/.
+- C4: needs the output of `node tools/frames.mjs http://localhost:4321 390 844 300` under evidence/.
 - C7: needs the Lighthouse JSON on the served build.
 ```
 
@@ -195,13 +197,14 @@ it shows how the N/A path reads). The scorer marked both N/A:
 prints `CONTINUE` with detail `incomparable: adjusted max changed, no delta; 1 of 5
 rounds used`. The 61 is not compared with 43; the evidence is produced before round 2.
 
-**Amendment.** F8 matters and no criterion covers it. Added C9 "Working example above
+**Amendment** (steps: `references/full-protocol.md` section 5). F8 matters and no criterion covers it. Added C9 "Working example above
 the fold" (8 pts): `0` no example in the first 900px, `4` command visible but output
 below the fold, `8` command and three or more output lines visible. Funded by C6 14 ->
 10 and C8 16 -> 12. Rubric v2, user told in one line. The orchestrator ran the C4 and C7
 check lines once each, logged them in `evidence/round-1/manifest.md`, and rescored
 `snapshots/round-1` **twice** under rubric v2 with that evidence (full mode re-measures
-the noise after a rubric change): 56 and 60, so the new reference is 58, n=4, T stays 8.
+the noise after a rubric change): 56 and 60 (`third-run=no`), so the new reference is 58,
+n=4, T stays 8.
 Run A's breakdown:
 
 ```
@@ -254,10 +257,10 @@ verbatim):
 | Check | Command | Timestamp (UTC) | Attempts | Note |
 |-------|---------|-----------------|----------|------|
 | G1 | npm run build | 2026-10-20T19:01:30Z | 1 | exit 0 |
-| G2 | node scripts/check-overflow.mjs http://localhost:4321 390 | 2026-10-20T19:01:32Z | 1 | scrollWidth 390 |
+| G2 | node tools/check-overflow.mjs http://localhost:4321 390 | 2026-10-20T19:01:32Z | 1 | scrollWidth 390 |
 | G3 | git diff --quiet a1b2c3d -- site/tokens.css | 2026-10-20T19:01:33Z | 1 | exit 0 |
 | C3 | convert shot.png -blur 0x8 blurred.png | 2026-10-20T19:02:05Z | 1 | shot.png from a 1440x900 capture |
-| C4 | node scripts/frames.mjs http://localhost:4321 390 844 300 | 2026-10-20T19:02:11Z | 1 | 7 frames, none identical, scrollWidth 390 |
+| C4 | node tools/frames.mjs http://localhost:4321 390 844 300 | 2026-10-20T19:02:11Z | 1 | 7 frames, none identical, scrollWidth 390 |
 | C7 | npx lighthouse http://localhost:3000 --only-categories=performance --output=json --quiet | 2026-10-20T19:04:40Z | 1 | performance 0.84 |
 ```
 
@@ -321,8 +324,11 @@ alt text, footer contrast, landmark roles added; font self-hosted. Rejected: F3 
 (invented testimonials, forbidden by Constraints), F14 (false claim). Deferred: F13
 (type scale, folded into C3 work, not rewarded). Reviewer and scorer both ran as a
 separate Codex process (isolated home, read-only sandbox, staged copy); no inline
-grading. C3, C4 and C7 were scored from orchestrator-produced evidence (manifests in
-`evidence/`); the round-1 N/A was the orchestrator's lapse, corrected before round 2.
+grading. 12 child runs (8 scorer, 4 reviewer), about 80 minutes of child wall time by
+the `.log` footers (scorer runs about six minutes each, reviewer runs about eight); spend
+not reported by the CLI. C3, C4 and C7 were scored from orchestrator-produced evidence
+(manifests in `evidence/`); the round-1 N/A was the orchestrator's lapse, corrected
+before round 2.
 
 Remaining gap: C3 at 6/12, C5 at 6/12 and C9 at 6/8 all hinge on one decision, a hero
 image versus a recorded terminal session. That is a taste call for the user, not

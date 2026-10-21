@@ -2,6 +2,7 @@
 """Lint the skill's markdown and scripts, and check that every number in the worked
 example and the fixtures adds up. Runs without spending tokens."""
 
+import json
 import os
 import re
 import stat
@@ -12,8 +13,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.abspath(os.path.join(HERE, ".."))
 SKILL_MD = os.path.join(SKILL, "SKILL.md")
 REFERENCES = os.path.join(SKILL, "references")
+FULL_PROTOCOL = os.path.join(REFERENCES, "full-protocol.md")
 SCRIPTS = os.path.join(SKILL, "scripts")
 FIXTURES = os.path.join(HERE, "fixtures")
+EVALS = os.path.join(SKILL, "evals")
 
 # Built with chr() and concatenation so this file does not itself trip the sweep.
 EM_DASH = chr(0x2014)
@@ -22,8 +25,8 @@ BYPASS_FLAG = "--" + "dangerously"
 YOLO_FLAG = "--" + "yolo"
 ALLOW_FLAG = "--" + "allow"
 EXTERNAL_SKILL = "improve-" + "animations"
-# A Linux home such as /home/<user>/ counts; the stage's own home/ subdirectory
-# (<stage>/home/, $stage/home) does not: it is always preceded by a path character.
+# A Linux home such as /home/<user>/ counts; a placeholder or variable path such as
+# <stage>/x/home/ or $dir/home does not: it is always preceded by a path character.
 MACHINE_PATHS = (re.compile(r"/" + "Users/"), re.compile(r"(?<![\w>$}])/" + r"home/\w"), re.compile(r"C:" + re.escape(chr(92))))
 
 
@@ -67,6 +70,13 @@ def half_up(value):
     return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def lite_card(text):
+    """The SKILL.md text between '## 2. Lite card' and the next top-level section."""
+    start = text.index("## 2. Lite card")
+    end = text.index("\n## 3.", start)
+    return text[start:end]
+
+
 class FrontmatterTests(unittest.TestCase):
     def setUp(self):
         self.text = read(SKILL_MD)
@@ -79,38 +89,72 @@ class FrontmatterTests(unittest.TestCase):
         match = re.search(r'^description:\s*"(.*)"\s*$', self.front, re.M)
         self.assertIsNotNone(match, "description must be one double-quoted line")
         description = match.group(1)
-        self.assertLessEqual(len(description), 600, "description is longer than 600 characters")
+        self.assertLessEqual(len(description), 560, "description is longer than 560 characters")
         self.assertIn("Not for", description)
-        self.assertLess(description.index("Not for"), 300, "exclusions must appear before index 300")
-        for phrase in ("world class", "next level", "this is good but", "iterate on this"):
-            self.assertIn(phrase, description, "description lacks trigger phrase %r" % phrase)
+        self.assertLess(description.index("Not for"), 150, "exclusions must appear before index 150")
+        for phrase in ("world class", "next level", "this is good but", "iterate on this", "audit and fix",
+                       "iterate until", "designs", "pages", "UI", "code", "docs", "copy"):
+            self.assertIn(phrase, description, "description lacks phrase %r" % phrase)
         self.assertNotIn("lite mode", description)
         self.assertNotIn(EXTERNAL_SKILL, self.text)
         self.assertNotIn(ELLIPSIS, description)
 
     def test_size(self):
-        self.assertLessEqual(os.path.getsize(SKILL_MD), 14000)
+        self.assertLessEqual(os.path.getsize(SKILL_MD), 9500)
+
+    def test_full_protocol_size(self):
+        self.assertLessEqual(os.path.getsize(FULL_PROTOCOL), 14000)
 
     def test_required_phrases(self):
-        for phrase in ("lite", "PRESERVE", "ACHIEVE", "T = max(3, 2n)", "zero N/A", "rescore the previous",
-                       "git stash", "REJECT (repeat)", "--rounds-used", "--path", "ROOT", "LOOP",
-                       "restore --dry-run", "UNKNOWN", "cheapest change", "--no-bash", "--preflight",
-                       "Before", "After", "--same-engine", "--evidence"):
+        for phrase in ("## 2. Lite card", "reply ok or edit", "T = 3", "2 rounds max", "full-protocol.md",
+                       "PRESERVE", "ACHIEVE", "REJECT (repeat)", "git stash", "--preflight", "--same-engine",
+                       "--evidence", "restore --dry-run", "UNKNOWN", "not measured", "--rounds-used",
+                       "HALT", "CONFIRM", "BLOCKED", "--path", "ROOT", "LOOP", "cheapest change", "--unsandboxed"):
             self.assertIn(phrase, self.text, "SKILL.md lacks %r" % phrase)
 
+    def test_lite_card_is_self_sufficient(self):
+        """The lite card runs with only the files it names; full-only mechanics stay out."""
+        card = lite_card(self.text)
+        for phrase in ("spawn_child.sh", "snapshot.py", "strip_criteria.py", "score_math.py decide",
+                       "reviewer-brief.md", "scorer-brief.md", "cross-agent.md", "troubleshooting.md",
+                       "--threshold 3", "--max-rounds 2", "--rounds-used 1", "PRIOR FINDINGS", "DERIVED",
+                       "reply ok or edit", "[PRESERVE]", "[ACHIEVE]"):
+            self.assertIn(phrase, card, "lite card lacks %r" % phrase)
+        for phrase in ("T = max", "third-run", "twice"):
+            self.assertNotIn(phrase, card, "lite card carries full-only mechanics: %r" % phrase)
+
+    def test_full_mode_pointer_precedes_lite_card(self):
+        self.assertLess(self.text.index("full-protocol.md"), self.text.index("## 2. Lite card"))
+
     def test_section_numbering_is_consistent(self):
-        subsections = re.findall(r"^### (\d)([a-e])\. ", self.text, re.M)
-        self.assertEqual([s[1] for s in subsections], ["a", "b", "c", "d", "e"])
-        parent = set(s[0] for s in subsections)
-        self.assertEqual(len(parent), 1, "subsections belong to one section")
-        parent = parent.pop()
-        self.assertRegex(self.text, re.compile(r"^## %s\. Phase 3" % parent, re.M))
-        for reference in re.findall(r"\b([3-5][a-e])\b", self.text):
-            self.assertTrue(reference.startswith(parent), "stale subsection reference %r" % reference)
-        for name in os.listdir(REFERENCES):
-            text = read(os.path.join(REFERENCES, name))
-            for reference in re.findall(r"SKILL\.md,? (?:section )?([3-5][a-e])\b", text):
-                self.assertTrue(reference.startswith(parent), "%s points at stale section %r" % (name, reference))
+        """The protocol subsections live in full-protocol.md as 4a to 4e under '## 4. Phase 3';
+        nothing cites the phase-1 SKILL.md subsections any more, and every full-protocol
+        citation names a subsection that exists."""
+        protocol = read(FULL_PROTOCOL)
+        subsections = re.findall(r"^### (\d)([a-e])\. ", protocol, re.M)
+        self.assertEqual([s[0] + s[1] for s in subsections], ["4a", "4b", "4c", "4d", "4e"])
+        self.assertRegex(protocol, re.compile(r"^## 4\. Phase 3", re.M))
+        existing = set(s[0] + s[1] for s in subsections)
+        stale = re.compile(r"SKILL\.md,? (?:section )?[3-6][a-e]\b")
+        citation = re.compile(r"full-protocol\.md,? (?:section )?(4[a-e])")
+        paths = [SKILL_MD]
+        for folder in (REFERENCES, EVALS):
+            paths.extend(os.path.join(folder, n) for n in sorted(os.listdir(folder)) if n.endswith((".md", ".json")))
+        for path in paths:
+            text = read(path)
+            rel = os.path.relpath(path, SKILL)
+            self.assertIsNone(stale.search(text), "%s cites a phase-1 SKILL.md subsection" % rel)
+            for cited in citation.findall(text):
+                self.assertIn(cited, existing, "%s cites full-protocol.md %s, which does not exist" % (rel, cited))
+
+    def test_full_protocol_phrases(self):
+        text = read(FULL_PROTOCOL)
+        for phrase in ("T = max(3, 2n)", "third-run=needed", "zero N/A", "--rounds-used", "HALT", "STOP plateau",
+                       "CONFIRM", "BLOCKED", "CONTINUE", "score_math.py budget", "rounds-affordable=0",
+                       "Never start a round", "ceiling, not a goal", "--scores 58,73 --rounds-used 2",
+                       "## 5. Amending", "## 6. Cost and time"):
+            self.assertIn(phrase, text, "full-protocol.md lacks %r" % phrase)
+        self.assertIn("rescore the previous", text.lower())
 
 
 class SweepTests(unittest.TestCase):
@@ -137,6 +181,17 @@ class SweepTests(unittest.TestCase):
             self.assertNotIn(ALLOW_FLAG + " ", text, "%s still documents %s" % (name, ALLOW_FLAG))
             self.assertNotIn(ALLOW_FLAG + "`", text, "%s still documents %s" % (name, ALLOW_FLAG))
 
+    def test_evals_json_parses(self):
+        """Every evals/*.json parses; the shape checks live in test_evals.py."""
+        names = sorted(n for n in os.listdir(EVALS) if n.endswith(".json"))
+        self.assertTrue(names, "evals/ holds no JSON files")
+        for name in names:
+            with open(os.path.join(EVALS, name), "r", encoding="utf-8") as handle:
+                try:
+                    json.load(handle)
+                except ValueError as exc:
+                    self.fail("evals/%s does not parse: %s" % (name, exc))
+
     def test_cmd_record_path_is_consistent(self):
         for name in ("SKILL.md", "references/criteria-guide.md", "references/example-loop.md", "references/cross-agent.md"):
             text = read(os.path.join(SKILL, name))
@@ -151,6 +206,13 @@ class PointerTests(unittest.TestCase):
         self.assertTrue(mentioned, "SKILL.md mentions no reference files")
         self.assertEqual(mentioned - present, set(), "SKILL.md points at missing references")
         self.assertEqual(present - mentioned, set(), "reference files not mentioned in SKILL.md")
+        for name in sorted(present):
+            cited = set(re.findall(r"references/([\w-]+\.md)", read(os.path.join(REFERENCES, name))))
+            self.assertEqual(cited - present, set(), "references/%s points at missing references" % name)
+
+    def test_evals_dir_mentioned(self):
+        self.assertIn("`evals/`", read(SKILL_MD))
+        self.assertTrue(os.path.isdir(EVALS))
 
     def test_scripts_mentioned_exist_and_are_executable(self):
         text = read(SKILL_MD)
@@ -162,6 +224,30 @@ class PointerTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(path), "SKILL.md mentions missing script %s" % name)
             mode = os.stat(path).st_mode
             self.assertTrue(mode & stat.S_IXUSR, "%s is not executable" % name)
+
+    def test_no_phantom_script_paths(self):
+        """Every `scripts/<name>` token in SKILL.md, the references, the evals and the
+        fixtures names a script the skill ships (the repo validator scans the same files).
+        The worked example's fictional helpers live under tools/ and are never written as
+        scripts/."""
+        paths = [SKILL_MD]
+        for directory in (REFERENCES, os.path.join(SKILL, "evals"), FIXTURES):
+            for dirpath, _dirnames, filenames in os.walk(directory):
+                paths.extend(os.path.join(dirpath, n) for n in filenames if n.endswith((".md", ".json")))
+        self.assertTrue(paths)
+        shipped = set(os.listdir(SCRIPTS))
+        # The lookbehind skips tokens inside a longer path (x/scripts/, .scripts/) or a
+        # longer word (test_scripts.py); a leading backtick does not exempt a token, so
+        # inline code is checked too, as the validator does.
+        token = re.compile(r"(?<![\w/.-])scripts/([\w.-]+)")
+        for path in paths:
+            text = read(path)
+            rel = os.path.relpath(path, SKILL)
+            for name in token.findall(text):
+                self.assertIn(name, shipped, "%s names scripts/%s, which the skill does not ship" % (rel, name))
+            for helper in ("frames.mjs", "check-overflow.mjs"):
+                stray = re.search(r"(?<!tools/)" + re.escape(helper), text)
+                self.assertIsNone(stray, "%s mentions %s without the tools/ prefix" % (rel, helper))
 
 
 class ReferenceContentTests(unittest.TestCase):
@@ -190,8 +276,11 @@ class ReferenceContentTests(unittest.TestCase):
         self.assertNotIn(YOLO_FLAG, text)
         for phrase in ("-s read-only", '--setting-sources ""', "--disable-slash-commands", "--skills-dir", "CODEX_HOME",
                        "project_doc_max_bytes=0", "Edit(//", "< /dev/null", "--same-engine", "--preflight",
-                       "--model", "--no-bash", "keyring", "Verified"):
+                       "--model", "--unsandboxed", "keyring", "Verified", "# duration", "byte-identical",
+                       "Read(//<stage>/**)", "## What each engine enforces", "tokens used"):
             self.assertIn(phrase, text, phrase)
+        for stale in ("--no-bash", "Bash(cat:*)\" ", "stricter variant"):
+            self.assertNotIn(stale, text, stale)
 
     def test_criteria_guide(self):
         text = read(os.path.join(REFERENCES, "criteria-guide.md"))
@@ -204,16 +293,38 @@ class ReferenceContentTests(unittest.TestCase):
     def test_troubleshooting(self):
         text = read(os.path.join(REFERENCES, "troubleshooting.md"))
         self.assertIn("rescore the previous snapshot twice", re.sub(r"\s+", " ", text))
-        self.assertIn("--no-bash", text)
+        self.assertIn("--rounds-used 3", text, "the budget worked line must show a mid-loop call")
+        self.assertIn("lists no files", text)
+        for phrase in ("third-run=needed", "## Budget in money or time", "rounds-affordable", "not measured",
+                       "full-protocol.md", "Budget overrun", "STOP plateau", "STOP regression",
+                       "CONTINUE slow real trend"):
+            self.assertIn(phrase, text, phrase)
 
     def test_example_loop(self):
         path = os.path.join(REFERENCES, "example-loop.md")
         self.assertTrue(os.path.isfile(path))
         self.assertLessEqual(os.path.getsize(path), 24576)
         text = read(path)
-        for phrase in ("rubric v2", "STOP plateau", "REJECT (repeat)", "Unscoreable", "0a", "0b", "--rounds-used", "lapse"):
-            self.assertIn(phrase, text)
+        for phrase in ("rubric v2", "STOP plateau", "REJECT (repeat)", "Unscoreable", "0a", "0b", "--rounds-used", "lapse",
+                       "third-run=no", "tools/frames.mjs", "tools/check-overflow.mjs", "not shipped with this skill",
+                       "12 child runs", "`.log` footers"):
+            self.assertIn(phrase, text, phrase)
         self.assertNotIn("49/74", text)
+
+    def test_example_child_run_count_matches_score_log(self):
+        """The report's child-run figure is derived from the fixture's score log: one scorer
+        run per a/b row, one per plain round row that has no a/b rows under the same rubric
+        (mean rows are not runs), and one reviewer run per numbered round."""
+        rows = table_rows(read(os.path.join(FIXTURES, "criteria-full.md")), "| Round | Rubric |")
+        ids = [(r[0], r[1]) for r in rows]
+        sub_runs = [(rnd, rubric) for rnd, rubric in ids if re.fullmatch(r"\d+[a-z]", rnd)]
+        means = set((rnd[:-1], rubric) for rnd, rubric in sub_runs)
+        single_runs = [(rnd, rubric) for rnd, rubric in ids if rnd.isdigit() and (rnd, rubric) not in means]
+        scorer_runs = len(sub_runs) + len(single_runs)
+        reviewer_runs = len(set(rnd for rnd, _rubric in ids if rnd.isdigit() and int(rnd) >= 1))
+        self.assertEqual((scorer_runs, reviewer_runs), (8, 4))
+        text = read(os.path.join(REFERENCES, "example-loop.md"))
+        self.assertIn("%d child runs (%d scorer, %d reviewer)" % (scorer_runs + reviewer_runs, scorer_runs, reviewer_runs), text)
 
 
 class ArithmeticTests(unittest.TestCase):

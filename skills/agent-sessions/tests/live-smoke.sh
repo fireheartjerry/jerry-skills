@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
-# Live smoke test: real claude and codex, smallest possible prompts. Spends a
-# few cents. Uses a private state root and tmux socket so it cannot touch
-# real children. Requires both CLIs installed and logged in.
+# Live smoke test: real claude and codex (and gemini when it is on PATH),
+# smallest possible prompts. Spends a few cents. Uses a private state root and
+# tmux socket so it cannot touch real children. Requires the CLIs installed and
+# logged in. Never run by tests/run.sh. bash 3.2 compatible.
 #
-#   usage: tests/live-smoke.sh [--codex-model M] [--skip-codex] [--skip-claude]
+#   usage: tests/live-smoke.sh [--codex-model M] [--skip-codex] [--skip-claude] [--skip-judge]
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 as="$here/../scripts/agent-session"
 codex_model=""
 skip_codex=0
 skip_claude=0
+skip_judge=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --codex-model) codex_model="$2"; shift 2 ;;
     --skip-codex) skip_codex=1; shift ;;
     --skip-claude) skip_claude=1; shift ;;
-    -h|--help) sed -n '2,6p' "$0"; exit 0 ;;
+    --skip-judge) skip_judge=1; shift ;;
+    -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -44,6 +47,14 @@ jget() {
 v = json.load(open(sys.argv[1])).get(sys.argv[2])
 print("" if v is None else v)' "$1" "$2"
 }
+# jpath FILE a.b: print a nested JSON field (empty when null or missing).
+jpath() {
+  python3 -c 'import json,sys
+v = json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."):
+    v = v.get(k) if isinstance(v, dict) else None
+print("" if v is None else (json.dumps(v) if isinstance(v, (dict, list)) else v))' "$1" "$2"
+}
 is_uuid() {
   python3 -c 'import sys,uuid
 try: uuid.UUID(sys.argv[1])
@@ -57,6 +68,12 @@ show_result() { "$as" result "$1" || true; }
 
 step "doctor"
 "$as" doctor || fail "doctor did not pass"
+
+step "engines"
+"$as" engines || fail "engines found no engine"
+"$as" engines --json > "$root/engines.json" || fail "engines --json"
+[ "$(jpath "$root/engines.json" claude.verified)" = "True" ] \
+  || fail "engines --json does not mark claude verified"
 
 if [ "$skip_claude" -eq 0 ]; then
   step "claude one-shot"
@@ -190,7 +207,125 @@ if [ "$skip_claude" -eq 0 ]; then
   [ -n "$cost" ] && add_cost "$cost"
 fi
 
+if [ "$skip_claude" -eq 0 ]; then
+  step "claude background task across kill and resume (the first result is not the end of the turn)"
+  # claude -p reports a result, waits for its background task, then reports the
+  # real one. The task outlasts AGENT_SESSIONS_POST_RESULT_WAIT (10 s), so a
+  # runner that ended the turn at the first result would record the wrong answer.
+  "$as" spawn claude bg-claude "$work" --tier cheap \
+    "Use your shell tool with run_in_background set to true to run exactly: sleep 15; echo BG-DONE-42. Do not wait for it in the foreground. Reply 'started' right away. When the background command finishes, reply with only its output line. If you find it was interrupted or killed, start it again the same way and wait for that run instead." \
+    || fail "spawn bg-claude"
+  n=0
+  while [ ! -f "$AGENT_SESSIONS_STATE/bg-claude/engine.pid" ] && [ "$n" -lt 20 ]; do sleep 0.5; n=$((n + 1)); done
+  sleep 4
+  "$as" kill bg-claude || fail "kill bg-claude"
+  [ "$(jget "$AGENT_SESSIONS_STATE/bg-claude/result.json" status)" = "killed" ] || fail "bg-claude not killed"
+  "$as" resume bg-claude || fail "resume bg-claude"
+  "$as" wait bg-claude --timeout 300 || { show_result bg-claude; fail "resumed bg-claude did not finish ok"; }
+  res="$AGENT_SESSIONS_STATE/bg-claude/result.json"
+  answer="$(jget "$res" answer)"
+  # The answer must be the command's output line itself, not a report about it.
+  python3 -c 'import json,sys
+r = json.load(open(sys.argv[1]))
+a = (r.get("answer") or "").strip().strip("`").strip()
+sys.exit(0 if a == "BG-DONE-42" else 1)' "$res" || { show_result bg-claude; fail "resumed bg-claude answer is not BG-DONE-42: $answer"; }
+  grep -q '"type":"task"' "$AGENT_SESSIONS_STATE/bg-claude/events.jsonl" \
+    || fail "bg-claude events show no background task (the prompt did not exercise the multi-result path)"
+  cost="$(jget "$res" cost_usd)"
+  [ -n "$cost" ] && add_cost "$cost"
+fi
+
+printf '%s\n' '{"type":"object","required":["n"],"properties":{"n":{"type":"integer"}},"additionalProperties":false}' > "$root/n.schema.json"
+
+if [ "$skip_codex" -eq 0 ]; then
+  step "codex structured output (--schema through --output-schema)"
+  if [ -n "$codex_model" ]; then
+    "$as" spawn codex schema-codex "$work" --schema "$root/n.schema.json" --model "$codex_model" \
+      'Reply with the JSON object {"n": 7} and nothing else.' || fail "spawn codex --schema"
+  else
+    "$as" spawn codex schema-codex "$work" --schema "$root/n.schema.json" \
+      'Reply with the JSON object {"n": 7} and nothing else.' || fail "spawn codex --schema"
+  fi
+  "$as" wait schema-codex --timeout 240 || { show_result schema-codex; fail "codex --schema child did not finish ok"; }
+  res="$AGENT_SESSIONS_STATE/schema-codex/result.json"
+  [ "$(jpath "$res" structured_output.n)" = "7" ] || { show_result schema-codex; fail "codex structured_output.n != 7"; }
+  [ "$(jget "$res" schema_valid)" = "True" ] || fail "codex schema_valid is not true"
+fi
+
+if [ "$skip_claude" -eq 0 ]; then
+  step "claude structured output (--schema)"
+  "$as" spawn claude schema-claude "$work" --tier cheap --schema "$root/n.schema.json" \
+    'Reply with the JSON object {"n": 7} and nothing else.' || fail "spawn claude --schema"
+  "$as" wait schema-claude --timeout 240 || { show_result schema-claude; fail "claude --schema child did not finish ok"; }
+  res="$AGENT_SESSIONS_STATE/schema-claude/result.json"
+  [ "$(jpath "$res" structured_output.n)" = "7" ] || { show_result schema-claude; fail "structured_output.n != 7"; }
+  [ "$(jget "$res" schema_valid)" = "True" ] || fail "schema_valid is not true"
+  cost="$(jget "$res" cost_usd)"
+  [ -n "$cost" ] && add_cost "$cost"
+
+  step "claude verify gate (--verify passes after the child creates pong.txt)"
+  vrepo="$root/vrepo"
+  mkdir -p "$vrepo"
+  git -C "$vrepo" init -q && printf 'smoke\n' > "$vrepo/README" && git -C "$vrepo" add README \
+    && git -C "$vrepo" -c user.name=smoke -c user.email=smoke@localhost commit -q -m init || fail "git init vrepo"
+  "$as" spawn claude verify-claude "$vrepo" --tier cheap --worktree --verify "test -f pong.txt" \
+    "Create a file named pong.txt containing the word PONG in the current directory using your file tools. Then reply DONE." \
+    || fail "spawn claude --verify"
+  "$as" wait verify-claude --timeout 240 || { show_result verify-claude; fail "claude --verify child did not finish ok"; }
+  res="$AGENT_SESSIONS_STATE/verify-claude/result.json"
+  [ "$(jpath "$res" verify.status)" = "pass" ] || { show_result verify-claude; fail "verify.status != pass"; }
+  cost="$(jget "$res" cost_usd)"
+  [ -n "$cost" ] && add_cost "$cost"
+fi
+
+if [ "$skip_codex" -eq 0 ]; then
+  step "codex token budget (--max-tokens 1 ends as budget after the turn)"
+  if [ -n "$codex_model" ]; then
+    "$as" spawn codex budget-codex "$work" --max-tokens 1 --model "$codex_model" \
+      "Reply with exactly the word PONG and nothing else." || fail "spawn codex --max-tokens"
+  else
+    "$as" spawn codex budget-codex "$work" --max-tokens 1 \
+      "Reply with exactly the word PONG and nothing else." || fail "spawn codex --max-tokens"
+  fi
+  "$as" wait budget-codex --timeout 240
+  rc=$?
+  res="$AGENT_SESSIONS_STATE/budget-codex/result.json"
+  [ "$rc" -eq 1 ] || { show_result budget-codex; fail "codex --max-tokens 1 child exited $rc, expected 1"; }
+  [ "$(jget "$res" failure_class)" = "budget" ] || { show_result budget-codex; fail "failure_class != budget"; }
+  [ -n "$(jget "$res" answer)" ] || fail "budget child lost its answer"
+fi
+
+if [ "$skip_claude" -eq 0 ] && [ "$skip_codex" -eq 0 ] && [ "$skip_judge" -eq 0 ]; then
+  step "judge the verify child with codex (read-only, fixed schema)"
+  "$as" judge verify-claude --timeout 300
+  rc=$?
+  [ "$rc" -eq 0 ] || { show_result verify-claude-judge; fail "judge exited $rc"; }
+  jf="$AGENT_SESSIONS_STATE/verify-claude/judge.json"
+  [ -f "$jf" ] || fail "judge.json missing"
+  case "$(jget "$jf" verdict)" in approve|revise|reject) ;; *) fail "judge verdict invalid: $(jget "$jf" verdict)" ;; esac
+  [ "$(jget "$jf" engine)" = "codex" ] || fail "judge engine != codex"
+  [ "$(jget "$AGENT_SESSIONS_STATE/verify-claude-judge/meta.json" readonly)" = "True" ] || fail "judge was not read-only"
+fi
+
+if command -v gemini >/dev/null 2>&1; then
+  step "gemini one-shot (experimental)"
+  "$as" spawn gemini ping-gemini "$work" \
+    "Reply with exactly the word PONG and nothing else." || fail "spawn gemini"
+  "$as" wait ping-gemini --timeout 240 || { show_result ping-gemini; fail "gemini one-shot did not finish ok"; }
+  answer="$(jget "$AGENT_SESSIONS_STATE/ping-gemini/result.json" answer)"
+  case "$answer" in *PONG*) ;; *) fail "gemini answer was not PONG: $answer" ;; esac
+else
+  step "gemini not on PATH; gemini steps skipped"
+fi
+
 step "reap"
+if [ -d "$AGENT_SESSIONS_STATE/verify-claude" ]; then
+  # Its worktree holds the uncommitted pong.txt: --force must snapshot it first.
+  # Its judge child (if any) is reaped with it.
+  out="$("$as" reap verify-claude --force)" || fail "reap --force verify-claude"
+  echo "$out"
+  echo "$out" | grep -Eq 'snapshot +: refs/agent-sessions/verify-claude/snapshot-' || fail "reap --force wrote no snapshot"
+fi
 "$as" reap --all || fail "reap --all"
 "$as" list | grep -q '(no sessions)' || fail "list is not empty after reap"
 

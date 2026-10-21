@@ -13,7 +13,8 @@ out .git, .iterative-improvement, any *-criteria.md, any *-rounds.md, symlinks,
 secret-shaped files (.env, .env.*, *.pem, id_*) and, when ROOT is inside a git work
 tree (including worktrees and submodules, where .git is a file), every gitignored
 file. It writes DIR.manifest.json next to DIR with a sha256 per file. Exit 2 when
-ROOT is missing or DIR is non-empty.
+ROOT is missing, DIR is non-empty, or no file survives the exclusions (an empty
+snapshot would have the children grade nothing).
 
 verify re-hashes DIR against the manifest (DIR.manifest.json, or --manifest FILE).
 Prints "unchanged" and exits 0, or one line per difference (modified:, added:,
@@ -227,6 +228,12 @@ def cmd_create(args):
         if not os.path.exists(os.path.join(root, *covered.split("/"))):
             die("path not found under root: %s" % covered)
     files = file_list(root, paths, args.exclude or [])
+    if not files:
+        die("no files to snapshot under %s%s. Likely causes: ROOT sits under a gitignored "
+            "path of an enclosing repo (git ls-files lists nothing), every file is ignored, "
+            "secret-shaped or excluded, or --path names the wrong place. Check with "
+            "'git -C ROOT ls-files --cached --others --exclude-standard'"
+            % (args.root, (" (paths: %s)" % ", ".join(paths)) if paths else ""))
     os.makedirs(out, exist_ok=True)
     manifest = {
         "root": root,

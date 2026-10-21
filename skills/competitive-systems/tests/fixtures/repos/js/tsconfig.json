@@ -1,0 +1,13 @@
+{
+  // JSON with comments, as TypeScript allows.
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+    },
+  },
+  "include": ["src"]
+}

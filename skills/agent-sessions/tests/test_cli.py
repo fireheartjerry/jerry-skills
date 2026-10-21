@@ -3,36 +3,17 @@
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 
-from helpers import FAKE_DIR, SessionTest
+from helpers import FAKE_DIR, FAST, SCRIPT, SessionTest, script_module
 
-SUBCOMMANDS = ["spawn", "list", "wait", "result", "send", "turn", "log", "peek", "stop", "kill", "reap", "doctor"]
+SUBCOMMANDS = ["spawn", "list", "status", "wait", "result", "events", "send", "turn", "log", "peek", "stop",
+               "kill", "reap", "engines", "schema", "doctor"]
 
 
 class CliTests(SessionTest):
-    def restricted_path(self, tmux=False, engines=("claude", "codex")):
-        """A PATH with python3, ps, git, bash and the chosen fake engines."""
-        bindir = os.path.join(self.box, "bin-%s-%s" % ("tmux" if tmux else "notmux", "-".join(engines) or "none"))
-        if os.path.isdir(bindir):
-            return bindir
-        os.makedirs(bindir)
-        tools = ["ps", "git", "sh", "sleep", "uname"] + (["tmux"] if tmux else [])
-        for tool in tools:
-            found = shutil.which(tool)
-            if found:
-                os.symlink(found, os.path.join(bindir, tool))
-        # find_binary falls back to `bash -lc 'command -v ...'`, and a login shell
-        # would restore the developer's PATH. This stand-in keeps the test PATH.
-        with open(os.path.join(bindir, "bash"), "w") as fh:
-            fh.write('#!/bin/sh\nif [ "$1" = -lc ]; then shift; exec /bin/sh -c "$@"; fi\nexec /bin/bash "$@"\n')
-        os.chmod(os.path.join(bindir, "bash"), 0o755)
-        os.symlink(sys.executable, os.path.join(bindir, "python3"))
-        for engine in engines:
-            os.symlink(os.path.join(FAKE_DIR, engine), os.path.join(bindir, engine))
-        return bindir
-
     def no_tmux_path(self):
         return self.restricted_path(tmux=False)
 
@@ -64,6 +45,60 @@ class CliTests(SessionTest):
         self.assertEqual(cp.returncode, 1, cp.stdout)
         fails = [l for l in cp.stdout.splitlines() if l.startswith("FAIL")]
         self.assertEqual(len(fails), 2, cp.stdout)
+        gemini = [l for l in cp.stdout.splitlines() if "gemini" in l]
+        self.assertTrue(gemini[0].startswith("warn"), gemini)
+
+    def test_doctor_gemini_is_experimental(self):
+        """A missing gemini is a warning, never a FAIL, unless asked for by name."""
+        path = self.restricted_path(tmux=True, engines=("claude", "codex"))
+        cp = self.run_as("doctor", env={"PATH": path})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        line = [l for l in cp.stdout.splitlines() if l.split(":")[0].endswith("gemini")][0]
+        self.assertTrue(line.startswith("warn"), line)
+        self.assertIn("experimental", line)
+        self.assertIn("fine if you only use claude or codex", line)
+        cp = self.run_as("doctor", "--engine", "gemini", env={"PATH": path})
+        self.assertEqual(cp.returncode, 1, cp.stdout)
+        self.assertTrue([l for l in cp.stdout.splitlines() if l.startswith("FAIL") and "gemini" in l], cp.stdout)
+        cp = self.run_as("doctor", "--json")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("experimental", json.loads(cp.stdout)["gemini"]["detail"])
+        cp = self.run_as("doctor", "--engine", "bogus")
+        self.assertEqual(cp.returncode, 2)
+
+    def test_module_split_reexports(self):
+        mod = script_module()
+        for name in ("ps_parent", "ps_lstart", "engine_alive", "ClaudeParser", "CodexParser", "GeminiParser",
+                     "validate", "RESULT_SCHEMA", "EVENT_SCHEMA", "JUDGE_SCHEMA", "engine_for", "build_result",
+                     "state_lock", "Runner", "COMMANDS", "HELP", "main", "cmd_spawn", "worktree_summary"):
+            self.assertTrue(hasattr(mod, name), name)
+        self.assertEqual(mod.VERSION, "3.1.0")
+        self.assertEqual(self.run_as("--version").stdout.strip(), "3.1.0")
+        for sub in SUBCOMMANDS:
+            self.assertIn(sub, mod.COMMANDS)
+        cp = subprocess.run([sys.executable, "-I", SCRIPT, "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True, env=self.environ())
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn("agent-session 3.1.0", cp.stdout)
+        with open(SCRIPT, encoding="utf-8") as fh:
+            entry = fh.read()
+        self.assertLess(len(entry.splitlines()), 40, "the entry script must stay thin")
+        self.assertIn("agent_sessions.cli", entry)
+        pkg = os.path.join(os.path.dirname(SCRIPT), "agent_sessions")
+        for module in ("__init__", "common", "procs", "backend", "state", "engines", "schema", "gitops", "runner",
+                       "commands", "cli"):
+            self.assertTrue(os.path.exists(os.path.join(pkg, module + ".py")), module)
+        self.assertFalse(os.path.exists(os.path.join(pkg, "__pycache__")), "the entry sets dont_write_bytecode")
+
+    def test_fast_subset(self):
+        """tests/run.sh --fast runs only the quick classes and marks the run."""
+        with open(os.path.join(os.path.dirname(SCRIPT), "..", "tests", "run.sh"), encoding="utf-8") as fh:
+            runner = fh.read()
+        self.assertIn("-k Cli -k Contract -k Parser -k Schema", runner)
+        self.assertIn("export AGENT_SESSIONS_TEST_FAST=1", runner)
+        self.assertIn('if [ "${1:-}" = "--fast" ]; then', runner, "run.sh must accept --fast first")
+        if FAST:
+            self.assertTrue(any(marker in self.__class__.__name__ for marker in ("Cli", "Contract", "Parser", "Schema")))
 
     def test_help_without_tmux(self):
         cp = self.run_as("--help", env={"PATH": self.no_tmux_path()})
@@ -82,13 +117,18 @@ class CliTests(SessionTest):
         self.assertIn("tmux not found", cp.stderr)
 
     def test_doctor_reports_missing_tmux(self):
+        # Without tmux the process backend is used: a warning, not a failure.
         cp = self.run_as("doctor", env={"PATH": self.no_tmux_path()})
-        self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
-        fail_lines = [l for l in cp.stdout.splitlines() if l.startswith("FAIL")]
-        self.assertTrue(fail_lines, cp.stdout)
-        tmux_line = [l for l in fail_lines if "tmux" in l]
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        tmux_line = [l for l in cp.stdout.splitlines() if l.startswith("warn  tmux")]
         self.assertTrue(tmux_line, cp.stdout)
         self.assertTrue("brew install tmux" in tmux_line[0] or "apt install tmux" in tmux_line[0], tmux_line[0])
+        self.assertIn("backend: process (tmux not found)", cp.stdout)
+        # Forcing tmux makes its absence a failure.
+        cp = self.run_as("doctor", "--backend", "tmux", env={"PATH": self.no_tmux_path()})
+        self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
+        fail_lines = [l for l in cp.stdout.splitlines() if l.startswith("FAIL") and "tmux" in l]
+        self.assertTrue(fail_lines, cp.stdout)
 
     def test_doctor_passes_with_stubs(self):
         cp = self.run_as("doctor")
@@ -105,12 +145,15 @@ class CliTests(SessionTest):
 
     def test_spawn_rejects_bad_engine_name_tier_timeout(self):
         cases = [
-            (["Codex", "x", self.work, "hi"], "engine must be claude or codex"),
+            (["Codex", "x", self.work, "hi"], "engine must be claude, codex or gemini"),
             (["claude", "a.b", self.work, "hi"], "name must match"),
             (["claude", "x", self.work, "hi", "--tier", "high"], "unknown tier 'high'"),
             (["claude", "x", self.work, "hi", "--timeout", "abc"], "--timeout"),
             (["claude", "x", self.work, "hi", "--timeout", "2"], "at least 5"),
             (["claude", "x", self.work, "hi", "--bogus"], "unknown option"),
+            (["claude", "x", self.work, "hi", "--budget-usd", "nan"], "finite"),
+            (["claude", "x", self.work, "hi", "--budget-usd", "inf"], "finite"),
+            (["claude", "x", self.work, "hi", "--tree-budget-usd", "-inf"], "finite"),
         ]
         for args, message in cases:
             cp = self.run_as("spawn", *args)
@@ -168,4 +211,6 @@ class CliTests(SessionTest):
             elapsed = time.time() - start
             self.assertEqual(cp.returncode, 2, "%r: %s%s" % (args, cp.stdout, cp.stderr))
             self.assertIn("no session 'nope'", cp.stderr, args)
-            self.assertLess(elapsed, 2.0, args)
+            # Fails fast: never the 240 s budget. The bound is loose because the
+            # host may be running other suites at the same time.
+            self.assertLess(elapsed, 5.0, args)

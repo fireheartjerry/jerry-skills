@@ -160,7 +160,7 @@ has no `.git`, and the loop's own commits would pollute the sample.
 ### C5. Mobile scroll integrity (8 pts)
 **What it means:** Every screen of scroll on a phone shows something. No dead
 stretches, no horizontal overflow.
-**How to check it:** `node scripts/frames.mjs http://localhost:4321 390 844 300`
+**How to check it:** `node tools/frames.mjs http://localhost:4321 390 844 300`
 writes a screenshot every 300px to `frames/` and prints the document scrollWidth and
 the indices of identical consecutive frames.
 **Anchors:**
@@ -168,6 +168,10 @@ the indices of identical consecutive frames.
 - `4`: no overflow, one dead stretch under a screen
 - `8`: no overflow, no dead stretch, every frame carries content
 ```
+
+`tools/frames.mjs` is a helper in the fictional project this example is drawn from; the
+skill ships no such tool. Your check line names whatever your repo has, or the exact
+`npx` command.
 
 The check names a command rather than "take screenshots" because the scorer has no
 browser: the orchestrator runs exactly that command once and hands over the frames.
@@ -213,7 +217,7 @@ passing. The report always shows each gate's class and status.
 measurement, a count, or a quoted line lets the scorer cite something. A check that
 yields only an opinion invites inflation. If the check needs tooling the scorer lacks,
 write the exact command; "take screenshots every 300px" cannot be run once and logged,
-`node scripts/frames.mjs ... 300` can. A check that reads git history must pin its
+`node tools/frames.mjs ... 300` can. A check that reads git history must pin its
 range to commits before the baseline, with the literal SHA in the check line (as the
 example's G3 does); otherwise the loop scores its own activity.
 
@@ -233,7 +237,7 @@ surfaces something genuinely important that no criterion covers:
    in `.iterative-improvement/<slug>/snapshots/round-N/`. Run the pinned scorer on it
    with the v2 criteria (stripped as usual). Full mode: run it twice, take the mean as
    the new reference and recompute `n` and `T` with `score_math.py baseline`, because
-   the rubric is a new instrument. Lite: once. Log it as `58 -> 54 (rubric v2,
+   the rubric is a new instrument. Lite: once. Log it as `61 -> 58 (rubric v2,
    rescored)` and use the v2 series for every later comparison, passing the real round
    number to `score_math.py decide --rounds-used`. Do not re-tally by hand: re-weighting
    non-linear anchors has no defined arithmetic, and scoring the new criterion yourself
@@ -241,7 +245,8 @@ surfaces something genuinely important that no criterion covers:
 
    Adding a criterion the work fails, funded by shaving points off criteria near full
    marks, lowers the total mechanically. That drop is bookkeeping, never a regression;
-   the rescored v2 number is the new reference point.
+   the rescored v2 number is the new reference point. The score log rows, the new
+   series and a worked instance are in `references/full-protocol.md` section 5.
 
 Do **not** amend criteria to make a change you already made look better. That is
 moving the goalposts, and it is the fastest way to turn the score into decoration.

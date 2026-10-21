@@ -384,6 +384,9 @@ class OneShotTests(SessionTest):
         self.wait_until(lambda: self.has("x", "engine.pid"))
         info = self.read("x", "engine.pid")
         self.assertEqual(info["lstart"], ps_lstart_under("C", info["pid"]))
+        # engine.pid is written as soon as the engine is started; the fake
+        # records its call a few milliseconds later.
+        self.wait_until(lambda: self.calls("x"), timeout=10, message="fake engine did not record its call")
         self.assertEqual(self.calls("x")[0]["env"]["LC_ALL"], loc)
         cp = self.ok("kill", "x", env={"LC_ALL": "C", "LANG": "C"})
         self.assertIn("terminated", cp.stdout)
@@ -431,6 +434,7 @@ class OneShotTests(SessionTest):
         self.spawn("claude", "x", "@@sleep:6", env=probe)
         self.wait_until(lambda: self.has("x", "engine.pid"))
         self.wait_until(lambda: not self.has("x", "env.json"), timeout=5, message="env.json not deleted")
+        self.wait_until(lambda: self.calls("x"), timeout=10, message="fake engine did not record its call")
         call = self.calls("x")[0]["env"]
         for key, value in probe.items():
             if key != "AGENT_SESSIONS_PASS_ENV":
@@ -444,6 +448,20 @@ class OneShotTests(SessionTest):
         self.spawn("claude", "y", "hi", env={"UNRELATED_SECRET": "stay-home"})
         self.assertEqual(self.wait("x", "y").returncode, 0)
         self.assertIsNone(self.calls("y")[0]["env"]["UNRELATED_SECRET"])
+
+    def test_tmux_server_environment_does_not_reach_engine(self):
+        # A tmux server someone else started (the user's default server) holds
+        # whatever was exported when it started. None of it may reach the engine.
+        env = self.environ({"UNRELATED_SECRET": "server-secret", "ANTHROPIC_API_KEY": "sk-server-stale"})
+        cp = subprocess.run(["tmux", "-L", self.sock, "-f", "/dev/null", "new-session", "-d", "-s", "user"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.spawn("claude", "x", "hi", env={"ANTHROPIC_API_KEY": None})
+        self.assertEqual(self.wait("x").returncode, 0)
+        call = self.calls("x")[0]["env"]
+        self.assertIsNone(call["UNRELATED_SECRET"])
+        self.assertIsNone(call["ANTHROPIC_API_KEY"])
+        self.assertEqual(call["AGENT_SESSION_NAME"], "x")
 
     def test_remain_on_exit_config_does_not_keep_dead_sessions(self):
         conf = os.path.join(self.box, "tmux.conf")

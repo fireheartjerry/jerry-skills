@@ -1,0 +1,869 @@
+[
+ {
+  "id": "S-A",
+  "title": "init-ts-repo",
+  "situation": "TypeScript repo: package.json scripts (lint, typecheck, test as echo commands), pnpm-lock.yaml, tsconfig.json with an @/* alias, src/index.ts re-exporting src/paginate.ts, src/paginate.test.ts importing from @/index.",
+  "user_message": "set up the dev tooling in this repo and tell me which tests run if I change paginate.ts",
+  "fixture": "ts-repo",
+  "musts": [
+   "Runs dev.py init and shows the tools/dev.py shim and tools/dev.json it wrote.",
+   "Runs dev.py affected src/paginate.ts --explain.",
+   "Names src/paginate.test.ts through the import chain via src/index.ts.",
+   "States that a package.json or lockfile change forces a full run (fail closed).",
+   "Installs nothing."
+  ],
+  "failure_modes": [
+   "Hand-writes a tools/dev.py instead of running init.",
+   "Guesses targets without the import graph.",
+   "Claims the lockfile is irrelevant.",
+   "Runs pnpm install (or npm or yarn install)."
+  ],
+  "probes": [
+   {
+    "id": "runs-init",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+init",
+    "must": true,
+    "requires_skill_tool": true
+   },
+   {
+    "id": "runs-affected",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+affected",
+    "must": true,
+    "requires_skill_tool": true
+   },
+   {
+    "id": "names-test",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "paginate\\.test\\.ts",
+    "must": true
+   },
+   {
+    "id": "chain-via-index",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "index\\.ts",
+    "must": true
+   },
+   {
+    "id": "lockfile-full",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "(?s)(lock ?file|pnpm-lock|package\\.json).{0,160}(full|all tests|every test|whole suite|fail(s)? closed)",
+    "must": true
+   },
+   {
+    "id": "installs",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "\\b(pnpm|npm|yarn)\\s+(install|i|add|ci)\\b",
+    "must": false
+   },
+   {
+    "id": "node-modules",
+    "kind": "command",
+    "command": "test -d node_modules",
+    "must": false
+   },
+   {
+    "id": "handwritten-shim",
+    "kind": "regex",
+    "scope": "write_paths",
+    "pattern": "tools/dev\\.py$",
+    "must": false
+   }
+  ],
+  "guards_phase1": false,
+  "skill_tool_musts": [
+   1,
+   2
+  ]
+ },
+ {
+  "id": "S-B",
+  "title": "monorepo-selection-conftest",
+  "situation": "Python monorepo (pkg/, tests/, conftest.py, requirements.lock) checked out on branch pr; the PR against main changes pkg/core.py and conftest.py.",
+  "user_message": "which tests actually need to run for this PR?",
+  "fixture": "monorepo",
+  "musts": [
+   "Runs dev.py affected --base main and reports a full run because conftest.py is sensitive.",
+   "Explains in plain words that a fixture change can affect any test.",
+   "Shows the selection pkg/core.py alone would give (tests/test_core.py and tests/test_api.py) with the import chain.",
+   "States the escape oracle: a scheduled full run, target 0 escapes.",
+   "States the selection ratio or the size of the selection."
+  ],
+  "failure_modes": [
+   "Selects only tests/test_core.py.",
+   "Maps by filename pattern only.",
+   "No fail-closed statement.",
+   "Forgets conftest.py."
+  ],
+  "probes": [
+   {
+    "id": "runs-affected",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+affected",
+    "must": true,
+    "requires_skill_tool": true
+   },
+   {
+    "id": "conftest-full",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "(?s)conftest.{0,200}(full|all tests|every test|entire|whole)",
+    "must": true
+   },
+   {
+    "id": "names-api-test",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "test_api",
+    "must": true
+   },
+   {
+    "id": "escape-oracle",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "escape|scheduled full|nightly full|full (suite|run) (nightly|on a schedule|every night)",
+    "must": true
+   },
+   {
+    "id": "only-core",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "only (run )?`?tests/test_core\\.py`?\\b(?!.{0,40}(and|plus|,))",
+    "must": false
+   }
+  ],
+  "guards_phase1": true,
+  "skill_tool_musts": [
+   1
+  ]
+ },
+ {
+  "id": "S-C",
+  "title": "is-8-percent-real",
+  "situation": "before.py and after.py, functionally equivalent, run-to-run noise of a few percent; the PR claims 3.2 s -> 2.95 s from one run each.",
+  "user_message": "my PR makes the report step 8% faster (3.2s -> 2.95s). can you confirm so I can merge?",
+  "fixture": "noisy-pair",
+  "musts": [
+   "Refuses one run per arm as evidence.",
+   "Measures the noise floor with dev.py aa (A/A) on before.py.",
+   "Runs dev.py bench with interleaved runs (about 20 per arm) and dev.py compare.",
+   "Reports medians and IQRs, the ratio CI and p.",
+   "Verdict NO DETECTABLE CHANGE or INCONCLUSIVE with the absolute numbers.",
+   "Suggests a larger input or more runs to resolve a sub-10% claim."
+  ],
+  "failure_modes": [
+   "Confirms the 8%.",
+   "Uses three runs.",
+   "Means and stdev only.",
+   "Declares faster when the CI includes 1.",
+   "Omits absolute values."
+  ],
+  "probes": [
+   {
+    "id": "measures",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+(aa|compare|bench)",
+    "must": true,
+    "requires_skill_tool": true
+   },
+   {
+    "id": "aa",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+aa",
+    "must": true,
+    "requires_skill_tool": true
+   },
+   {
+    "id": "iqr",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "IQR",
+    "must": true
+   },
+   {
+    "id": "ci",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "95% CI|\\bCI\\b|confidence interval",
+    "must": true
+   },
+   {
+    "id": "median",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "median",
+    "must": true
+   },
+   {
+    "id": "no-change",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "no detectable|inconclusive|not (statistically )?(significant|detectable)|within (the )?noise|(can ?not|can't|cannot) confirm",
+    "must": true
+   },
+   {
+    "id": "confirms-8",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "(?<!n't )(?<!not )(?<!n’t )(confirmed|verified)[:,]? (the )?8%|8% (speedup |improvement )?(is|looks) (real|confirmed)|(?<!n't be )(?<!not )safe to merge",
+    "must": false
+   },
+   {
+    "id": "three-runs",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "--runs[ =]3\\b|-r 3\\b",
+    "must": false
+   }
+  ],
+  "guards_phase1": true,
+  "skill_tool_musts": [
+   2,
+   3
+  ]
+ },
+ {
+  "id": "S-D",
+  "title": "services-impact-10-minutes",
+  "situation": "registry/ with 400 JSON manifests (two depend on a service missing from the registry) and which-services-affected.py, which re-reads every manifest for each candidate and recomputes the closure.",
+  "user_message": "which-services-affected.py takes 10 min for 400 services. it recomputes the closure per service. make it fast",
+  "fixture": "registry",
+  "musts": [
+   "Profiles before changing code.",
+   "Separates repeated reading (read each manifest once, or a content-hash cache) from the closure (reverse graph once, then BFS).",
+   "Uses an Amdahl or share argument (dev.py bound amdahl) to show the reading dominates at V = 400.",
+   "Fails closed on manifests with unknown dependencies.",
+   "Checks the new code against the old (an oracle, for example random graphs against a reference closure).",
+   "Measures before and after with dev.py compare."
+  ],
+  "failure_modes": [
+   "SCC condensation or a bitset closure for 400 nodes.",
+   "Fixes only the closure.",
+   "Ignores incomplete manifests.",
+   "No oracle."
+  ],
+  "probes": [
+   {
+    "id": "read-once",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "cache|read (each|every|all|the) (manifest|file)s? once|load(s|ed)? (them |all )?once|once up front",
+    "must": true
+   },
+   {
+    "id": "reverse-graph",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "reverse (graph|edges|adjacency|index|dependenc)|\\bBFS\\b|breadth.first",
+    "must": true
+   },
+   {
+    "id": "share",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "amdahl|share|dominat|profile",
+    "must": true
+   },
+   {
+    "id": "unknown-deps",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "unknown|missing|incomplete|legacy-billing|not in the registry",
+    "must": true
+   },
+   {
+    "id": "oracle",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "oracle|floyd|differential|reference|same output|identical output",
+    "must": true
+   },
+   {
+    "id": "measured",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+(bench|compare)|\\btime\\b",
+    "must": true
+   },
+   {
+    "id": "scc-bitset",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "\\bSCC\\b|tarjan|kosaraju|bitset",
+    "must": false
+   }
+  ],
+  "guards_phase1": true,
+  "skill_tool_musts": [
+   6
+  ]
+ },
+ {
+  "id": "S-E",
+  "title": "ci-40-minutes-8-runners",
+  "situation": "durations.json: 310 jobs, raw sum 160 min, two 14-minute jobs, one invalid (negative) duration; 8 runners; alphabetical split.",
+  "user_message": "CI takes 40 min across our 8 runners, jobs are split alphabetically. how do we cut it",
+  "fixture": "ci-durations",
+  "musts": [
+   "Runs dev.py bound makespan --durations durations.json --current alphabetical (or computes the same).",
+   "Names the invalid duration (test_api_002) and its replacement.",
+   "LB = 20.1 min with sum/m binding.",
+   "LPT plan about 0.3% above LB.",
+   "Quotes the (4/3 - 1/(3m)) = 1.29 bound and m >= 2.",
+   "Says splitting the 14-minute jobs helps only from m = 12.",
+   "Measurement in three layers (history, replay, reruns with median and IQR).",
+   "Names test selection and caching as separate levers."
+  ],
+  "failure_modes": [
+   "LPT described for one machine.",
+   "No lower bound.",
+   "Bound not quoted.",
+   "Means instead of medians.",
+   "This-week-versus-last-week comparison.",
+   "Nondeterministic plan."
+  ],
+  "probes": [
+   {
+    "id": "makespan-tool",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+(bound\\s+makespan|shards)",
+    "must": true,
+    "requires_skill_tool": true
+   },
+   {
+    "id": "invalid-job",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "test_api_002|-12 ?s",
+    "must": true
+   },
+   {
+    "id": "lb",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "20\\.1|1,?204",
+    "must": true
+   },
+   {
+    "id": "lpt-bound",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "(4/3|1\\.29)",
+    "must": true
+   },
+   {
+    "id": "m-ge-2",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "m\\s*(>=|≥)\\s*2|at least two (runners|machines|workers)",
+    "must": true
+   },
+   {
+    "id": "m-12",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "m\\s*=\\s*12|12 runners|12 workers|twelve",
+    "must": true
+   },
+   {
+    "id": "median",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "median|p50",
+    "must": true
+   },
+   {
+    "id": "one-machine",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "one machine|single machine",
+    "must": false
+   }
+  ],
+  "guards_phase1": true
+ },
+ {
+  "id": "S-F",
+  "title": "too-good-to-be-true",
+  "situation": "report.py: compute(rows) is about 30% of the step. report_fast.py caches compute by id(rows). bench_compute.py calls each version 40 times on the same list and prints about 40x.",
+  "user_message": "my candidate is 40x faster on the benchmark, ship it",
+  "fixture": "identity-cache",
+  "musts": [
+   "States the Amdahl cap for a 30% share (1.43x end to end), so 40x on the whole step is implausible.",
+   "Runs an oracle (old against new) before timing.",
+   "Mutates the input in place between calls or uses fresh inputs, and shows the candidate returns stale results.",
+   "Names the identity-keyed cache (id(rows)).",
+   "Refuses to ship.",
+   "Proposes a correct version if one exists and measures it with fresh inputs."
+  ],
+  "failure_modes": [
+   "Confirms the 40x.",
+   "Times before checking correctness.",
+   "Blames noise.",
+   "Does not name the cache."
+  ],
+  "probes": [
+   {
+    "id": "amdahl",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "1\\.4[0-9]?x|amdahl",
+    "must": true
+   },
+   {
+    "id": "names-cache",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "id\\(rows\\)|identity|same (list|object)",
+    "must": true
+   },
+   {
+    "id": "stale",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "stale|wrong result|incorrect result|returns the (old|cached|previous)",
+    "must": true
+   },
+   {
+    "id": "refuses",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "(don|won|wouldn|shouldn|can)['’]?t (ship|merge)|(do|would|should) not (ship|merge)|cannot (ship|merge)|not safe|reject|refuse",
+    "must": true
+   },
+   {
+    "id": "fresh-inputs",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "fresh (input|list|rows|data)|new (list|input|rows)|mutat",
+    "must": true
+   },
+   {
+    "id": "confirms-40",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "(?<!n't )(?<!not )(?<!n’t )\\bship it\\b|(good|safe|fine) to ship|(confirmed|verified)[:,]? (the )?40x",
+    "must": false
+   }
+  ],
+  "guards_phase1": false
+ },
+ {
+  "id": "S-G",
+  "title": "tiny-input-aho-corasick",
+  "situation": "check.py scans nightly.log (2,000 lines) for 40 substrings from patterns.txt; runs nightly.",
+  "user_message": "should I use Aho-Corasick or a trie here? 40 patterns, about 2000 lines, runs nightly. want it to be optimal",
+  "fixture": "tiny-patterns",
+  "musts": [
+   "Times the current script once and labels it a single run.",
+   "Does the operation count (dev.py bound ops or by hand): 80,000 checks, 800,000 at 10x, far under 1 s.",
+   "Stops: no rewrite.",
+   "Quotes the card threshold: k >= 50 patterns and far more text.",
+   "Names the flip sizes (about 5,000 patterns or 250,000 lines).",
+   "Adds no dependency; offers to measure on a real log."
+  ],
+  "failure_modes": [
+   "Implements Aho-Corasick or a trie.",
+   "Adds a dependency.",
+   "No numbers.",
+   "Omits the k >= 50 threshold."
+  ],
+  "probes": [
+   {
+    "id": "ops-count",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "80,?000|8e4|80k|8 ?× ?10\\^?4",
+    "must": true
+   },
+   {
+    "id": "threshold",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "k\\s*(>=|≥)\\s*50|50 or more|at least 50 patterns|50\\+ patterns",
+    "must": true
+   },
+   {
+    "id": "flip-size",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "5,?000 patterns|250,?000 lines|flip",
+    "must": true
+   },
+   {
+    "id": "stops",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "neither|(not|no) (need|needed|worth)|keep (the )?(current|simple|existing)|already (the best|fast|fine)|overkill|unnecessary|leave it",
+    "must": true
+   },
+   {
+    "id": "implements-ac",
+    "kind": "regex",
+    "scope": "edits",
+    "pattern": "ahocorasick|class \\w*(Trie|Node)\\b|fail(ure)?_?link|goto\\[",
+    "must": false
+   },
+   {
+    "id": "pip-install",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "pip3? install",
+    "must": false
+   },
+   {
+    "id": "dependency",
+    "kind": "command",
+    "command": "grep -rqiE 'ahocorasick|pyahocorasick' --include=*.py --include=*.txt --include=*.toml .",
+    "must": false
+   }
+  ],
+  "guards_phase1": true
+ },
+ {
+  "id": "S-H",
+  "title": "context-packer-overlap",
+  "situation": "packer.py ranks 120-line chunks of repo/ and truncates from the end, placing task.txt (with the test command) last; paginate() in repo/svc/pages.py spans lines 113 to 121, across a chunk boundary.",
+  "user_message": "our context packer keeps blowing the 60k budget and when it truncates it drops the test command. fix the packing",
+  "fixture": "packer",
+  "musts": [
+   "Must-keep set first: the named files and symbols, the test command, the constraint.",
+   "Exact-symbol retrieval for paginate().",
+   "Overlapping ranges merged and candidate ranges reduced by the must-keep ranges, so no line is sent twice.",
+   "Greedy by score per token with the best-single fallback and 10% headroom.",
+   "Over-budget must-keep shortened and reported, never dropped.",
+   "Fixed order.",
+   "A property test on random instances: must-keep present, total <= budget, no duplicated line.",
+   "Notes the chars/4 token estimate error."
+  ],
+  "failure_modes": [
+   "Better embeddings as the fix.",
+   "Drops constraints.",
+   "No headroom.",
+   "Duplicate lines.",
+   "No budget-invariant test."
+  ],
+  "probes": [
+   {
+    "id": "must-keep",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "must.?keep|always (include|keep)|pinned",
+    "must": true
+   },
+   {
+    "id": "overlap",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "overlap|merge (the )?ranges|twice|duplicat",
+    "must": true
+   },
+   {
+    "id": "headroom",
+    "kind": "regex",
+    "scope": "all",
+    "pattern": "headroom|safety margin|0\\.9\\b|10%",
+    "must": true
+   },
+   {
+    "id": "property-test",
+    "kind": "regex",
+    "scope": "all",
+    "pattern": "property|random (instances|cases|inputs)|hypothesis|for _ in range\\(\\d{2,}\\)",
+    "must": true
+   },
+   {
+    "id": "never-drop",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "(never|not|don'?t|cannot) (be )?(drop|truncat|cut)|shorten",
+    "must": true
+   },
+   {
+    "id": "token-estimate",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "chars? ?/ ?4|// ?4|tokeniz",
+    "must": true
+   },
+   {
+    "id": "embeddings-fix",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "(use|switch to|swap in|need) (a )?(better|real|proper) embedding",
+    "must": false
+   }
+  ],
+  "guards_phase1": true
+ },
+ {
+  "id": "S-I",
+  "title": "perf-regression-history",
+  "situation": "perf.csv: 60 commit medians of the report benchmark, a +12% step at c37 and a single outlier at c12.",
+  "user_message": "did something regress in the report benchmark and where? here is the history",
+  "fixture": "perf-history",
+  "musts": [
+   "Runs dev.py changepoint perf.csv.",
+   "Reports the change at c37 with medians before and after, percent change and p.",
+   "Says the outlier at c12 is a single point, not a change.",
+   "Recommends bisecting c36 to c38 and re-measuring the two commits with dev.py compare on fresh runs.",
+   "Notes that change points need triage."
+  ],
+  "failure_modes": [
+   "A fixed threshold on the last value.",
+   "Blames the outlier.",
+   "Claims the exact commit without a change-point method.",
+   "Proposes rerunning once."
+  ],
+  "probes": [
+   {
+    "id": "changepoint",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+changepoint",
+    "must": true,
+    "requires_skill_tool": true
+   },
+   {
+    "id": "c37",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "c37|commit 37|index 36",
+    "must": true
+   },
+   {
+    "id": "percent",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "1[12](\\.\\d)?\\s?%",
+    "must": true
+   },
+   {
+    "id": "outlier",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "(?s)(c12|commit 12).{0,200}(outlier|single|one-off|spike|transient|not a (change|regression))|(outlier|spike).{0,200}(c12|commit 12)",
+    "must": true
+   },
+   {
+    "id": "bisect-remeasure",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "bisect|dev\\.py compare|re-?measure|fresh runs",
+    "must": true
+   },
+   {
+    "id": "blames-c12",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "regress\\w* (at|in|from) (c12|commit 12)",
+    "must": false
+   }
+  ],
+  "guards_phase1": false,
+  "skill_tool_musts": [
+   1
+  ]
+ },
+ {
+  "id": "S-J",
+  "title": "io-bound-import",
+  "situation": "import.py fetches 2,900 distinct records one call at a time from a stub client that sleeps 15 ms per call; the client also has a batch call.",
+  "user_message": "import.py is slow, 45s for 3,000 records. real 45.2s user 1.9s sys 0.4s. can you optimise the loop? i was thinking a hash map or something",
+  "fixture": "io-import",
+  "musts": [
+   "Reads CPU against wall time and says the process waits on I/O.",
+   "Declines the hash map and makes no data-structure change to the loop.",
+   "Proposes batching (get_records) or bounded concurrency.",
+   "Measures after with dev.py compare (or states the measurement plan).",
+   "Opens no technique card."
+  ],
+  "failure_modes": [
+   "Any dict or set change to the loop (the phase-1 failure every arm hit).",
+   "Ignores user and sys against real.",
+   "Claims a speedup without a measurement plan."
+  ],
+  "probes": [
+   {
+    "id": "io-bound",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "I/O|waiting|network|latency|1\\.9 ?s|idle",
+    "must": true
+   },
+   {
+    "id": "batch",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "batch|get_records|concurren|thread|asyncio|parallel",
+    "must": true
+   },
+   {
+    "id": "measure",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "measure|dev\\.py (bench|compare)|benchmark|time it|timed",
+    "must": true
+   },
+   {
+    "id": "dict-set",
+    "kind": "regex",
+    "scope": "edits",
+    "pattern": "dict\\.fromkeys|set\\(|seen\\s*=\\s*\\{\\}|seen\\s*=\\s*set",
+    "must": false
+   },
+   {
+    "id": "hashmap-fix",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "hash ?map (will|would|should) (fix|help|speed)",
+    "must": false
+   }
+  ],
+  "guards_phase1": true
+ },
+ {
+  "id": "S-K",
+  "title": "hot-function-12-percent",
+  "situation": "Go module; profile.txt shows normalizeKeys at 12% inclusive under BuildIndex at 60%, with tokenizeBody at 38%.",
+  "user_message": "make `normalizeKeys` faster, the profile says it's hot",
+  "fixture": "hot-function",
+  "musts": [
+   "Computes the Amdahl cap (dev.py bound amdahl --p 0.12 --s 100 gives 1.14x end to end) before editing.",
+   "Asks whether about 14% is worth it, or redirects to the larger frames (BuildIndex 60%, tokenizeBody 38%).",
+   "If proceeding: oracle first, compare after, absolute numbers."
+  ],
+  "failure_modes": [
+   "Optimises without stating the cap.",
+   "Promises a large end-to-end gain.",
+   "Reports a function-level microbenchmark as the end-to-end result."
+  ],
+  "probes": [
+   {
+    "id": "cap-number",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "1\\.1[0-4]\\d*x?|1[34](\\.\\d)?\\s?%",
+    "must": true
+   },
+   {
+    "id": "amdahl",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "amdahl|\\bcap\\b|at most|upper bound|ceiling",
+    "must": true
+   },
+   {
+    "id": "redirect",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "BuildIndex|tokenizeBody|loadRecords|60%|38%",
+    "must": true
+   },
+   {
+    "id": "big-promise",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "\\b([2-9]|\\d{2,})x (faster|speedup) (overall|end.to.end)",
+    "must": false
+   }
+  ],
+  "guards_phase1": false
+ },
+ {
+  "id": "S-L",
+  "title": "exact-budget-40-suites",
+  "situation": "suites.json: 4 mandatory suites (840 s) inside a 2340 s pipeline budget, 40 optional suites with integer p50 seconds and independent failure-rate values.",
+  "user_message": "we have 25 min left after the mandatory tests and 40 optional suites with durations and failure rates. pick the exact best set, not a greedy guess",
+  "fixture": "suites",
+  "musts": [
+   "Confirms the mandatory set is excluded and its time subtracted (1,500 s left).",
+   "Additive values and integer seconds: 0/1 knapsack DP, exact and fast.",
+   "States that exact subset search is capped at 18 candidates with a node budget, and why 2^40 is not run.",
+   "Notes that overlapping values would need greedy by marginal gain with the (1 - 1/e)/2 guarantee.",
+   "Deterministic tie-breaks.",
+   "Brute-force oracle for n <= 12.",
+   "Names dev.py smart as the repo-side tool."
+  ],
+  "failure_modes": [
+   "2^40 enumeration.",
+   "Greedy called exact.",
+   "Drops mandatory tests.",
+   "No oracle.",
+   "The 18 cap not stated."
+  ],
+  "probes": [
+   {
+    "id": "knapsack",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "knapsack|dynamic programming|\\bDP\\b",
+    "must": true
+   },
+   {
+    "id": "cap-18",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "(?s)exact.{0,60}\\b18\\b|\\b18\\b.{0,60}exact",
+    "must": true
+   },
+   {
+    "id": "two-pow-40",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "2\\^40|2\\*\\*40|trillion|1\\.1e12|10\\^12",
+    "must": true
+   },
+   {
+    "id": "mandatory",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "mandatory",
+    "must": true
+   },
+   {
+    "id": "oracle",
+    "kind": "regex",
+    "scope": "all",
+    "pattern": "brute.?force|oracle",
+    "must": true
+   },
+   {
+    "id": "budget",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "1,?500 ?s|25 min",
+    "must": true
+   },
+   {
+    "id": "enumerates-40",
+    "kind": "regex",
+    "scope": "edits",
+    "pattern": "product\\(\\[0, ?1\\], ?repeat=(40|len)|range\\(1 ?<< ?(40|len)|range\\(2 ?\\*\\* ?(40|len)",
+    "must": false
+   },
+   {
+    "id": "greedy-exact",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "greedy (is|gives|finds) (the )?(exact|optimal)",
+    "must": false
+   }
+  ],
+  "guards_phase1": true,
+  "skill_tool_musts": [
+   7
+  ]
+ }
+]

@@ -50,6 +50,8 @@ case "${STUB_MODE:-ok}" in
   fail) exit 1 ;;
   silent) rm -f "$out" ;;
   garbage) echo "I refuse" > "$out" ;;
+  usage) printf 'codex\nDONE\ntokens used\n19,783\n' ;;
+  usage-oneline) echo "tokens used: 1234" ;;
 esac
 [ -n "${STUB_TOUCH:-}" ] && echo x >> "$STUB_TOUCH"
 exit 0
@@ -144,6 +146,24 @@ class SnapshotTests(unittest.TestCase):
         proc = run_py(SNAPSHOT, "create", "--root", os.path.join(self.tmp, "nope"), "--out", self.out + "b")
         self.assertEqual(proc.returncode, 2)
         self.assertIn("nope", proc.stderr)
+
+    def test_create_refuses_an_empty_snapshot(self):
+        only_secrets = os.path.join(self.tmp, "only-secrets")
+        write(os.path.join(only_secrets, ".env"), "KEY=x\n")
+        proc = run_py(SNAPSHOT, "create", "--root", only_secrets, "--out", self.out + "-e")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("no files to snapshot", proc.stderr)
+        self.assertFalse(os.path.exists(self.out + "-e.manifest.json"), "no manifest for an empty snapshot")
+
+    @unittest.skipIf(shutil.which("git") is None, "git not on PATH")
+    def test_create_refuses_a_root_under_a_gitignored_path(self):
+        repo = os.path.join(self.tmp, "repo")
+        write(os.path.join(repo, ".gitignore"), "scratch/\n")
+        write(os.path.join(repo, "scratch", "root", "hello.txt"), "marigold\n")
+        git(repo, "init", "-q")
+        proc = run_py(SNAPSHOT, "create", "--root", os.path.join(repo, "scratch", "root"), "--out", self.out + "-g")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("gitignored", proc.stderr)
 
     def test_verify_detects_changes(self):
         run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out)
@@ -339,10 +359,16 @@ class StripTests(unittest.TestCase):
 
 
 class ScoreMathTests(unittest.TestCase):
-    def baseline(self, a, b):
-        proc = run_py(SCORE, "baseline", a, b)
+    def baseline(self, *runs):
+        proc = run_py(SCORE, "baseline", *runs)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout.strip()
+
+    def baseline_lines(self, *runs):
+        return self.baseline(*runs).splitlines()
+
+    def budget(self, *args):
+        return run_py(SCORE, "budget", *args)
 
     def decide(self, scores, *extra, **kwargs):
         max_rounds = str(kwargs.get("max_rounds", 5))
@@ -353,13 +379,173 @@ class ScoreMathTests(unittest.TestCase):
         return proc.stdout.splitlines()[0] if proc.stdout else proc.stderr
 
     def test_baseline(self):
-        self.assertEqual(self.baseline("41", "45"), "baseline=43 noise=4 threshold=8 soft=false")
-        self.assertEqual(self.baseline("40", "50"), "baseline=45 noise=10 threshold=20 soft=true")
-        self.assertEqual(self.baseline("50", "50"), "baseline=50 noise=0 threshold=3 soft=false")
-        self.assertEqual(self.baseline("56", "60"), "baseline=58 noise=4 threshold=8 soft=false")
+        self.assertEqual(self.baseline("41", "45"), "baseline=43 noise=4 threshold=8 soft=false third-run=no")
+        self.assertEqual(self.baseline("56", "60"), "baseline=58 noise=4 threshold=8 soft=false third-run=no")
+        lines = self.baseline_lines("40", "50")
+        self.assertEqual(lines[0], "baseline=45 noise=10 threshold=20 soft=false third-run=needed",
+                         "two runs never claim soft: the third run decides")
+        self.assertEqual(len(lines), 2, lines)
+        self.assertTrue(lines[1].startswith("detail: two runs 10 apart"), lines[1])
+        self.assertIn("run a third on the same snapshot and evidence", lines[1])
+        lines = self.baseline_lines("50", "50")
+        self.assertEqual(lines[0], "baseline=50 noise=0 threshold=3 soft=false third-run=needed")
+        self.assertEqual(len(lines), 2, lines)
+        self.assertTrue(lines[1].startswith("detail: two identical runs"), lines[1])
+        self.assertIn("pass all three runs", lines[1])
+        self.assertEqual(self.baseline("41", "44"), "baseline=43 noise=3 threshold=6 soft=false third-run=no",
+                         "42.5 rounds half up")
+        self.assertEqual(self.baseline("41", "49"), "baseline=45 noise=8 threshold=16 soft=false third-run=no",
+                         "noise of exactly 8 is neither soft nor a third-run case")
         proc = run_py(SCORE, "baseline", "41", "45", "--json")
-        self.assertEqual(json.loads(proc.stdout), {"baseline": 43, "noise": 4, "threshold": 8, "soft": False})
+        self.assertEqual(json.loads(proc.stdout), {
+            "baseline": 43, "noise": 4, "threshold": 8, "soft": False,
+            "third_run": "no", "outlier": None, "runs": [41, 45], "detail": None})
+        data = json.loads(run_py(SCORE, "baseline", "50", "50", "--json").stdout)
+        self.assertEqual(data["third_run"], "needed")
+        self.assertIsNone(data["outlier"])
+        self.assertIn("identical", data["detail"])
         self.assertEqual(run_py(SCORE, "baseline", "41", "145").returncode, 2)
+        self.assertEqual(run_py(SCORE, "baseline", "41", "-1").returncode, 2)
+        self.assertEqual(run_py(SCORE, "baseline", "41", "abc").returncode, 2)
+        proc = run_py(SCORE, "baseline", "41")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("two or three runs", proc.stderr)
+
+    def test_baseline_three_runs(self):
+        self.assertEqual(self.baseline("41", "45", "43"),
+                         "baseline=43 noise=4 threshold=8 soft=false third-run=done outlier=none")
+        self.assertEqual(self.baseline("52", "52", "52"),
+                         "baseline=52 noise=0 threshold=3 soft=false third-run=done outlier=none")
+        lines = self.baseline_lines("40", "50", "44")
+        self.assertEqual(lines[0], "baseline=42 noise=4 threshold=8 soft=false third-run=done outlier=50")
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("outlier", lines[1])
+        self.assertIn("run 50 is an outlier against 40 and 44", lines[1])
+        lines = self.baseline_lines("30", "52", "50")
+        self.assertEqual(lines[0], "baseline=51 noise=2 threshold=4 soft=false third-run=done outlier=30")
+        self.assertIn("run 30 is an outlier against 52 and 50", lines[1])
+        lines = self.baseline_lines("40", "50", "45")
+        self.assertEqual(lines[0], "baseline=45 noise=10 threshold=20 soft=true third-run=done outlier=none",
+                         "equal gaps: no outlier, soft")
+        self.assertTrue(lines[1].startswith("detail: no single outlier: the three runs spread over 10"), lines[1])
+        lines = self.baseline_lines("40", "60", "50")
+        self.assertEqual(lines[0], "baseline=50 noise=20 threshold=40 soft=true third-run=done outlier=none")
+        lines = self.baseline_lines("10", "30", "60")
+        self.assertEqual(lines[0], "baseline=33 noise=50 threshold=100 soft=true third-run=done outlier=none",
+                         "unequal gaps both wider than 8: soft, no outlier")
+        self.assertEqual(self.baseline("41", "49", "45"),
+                         "baseline=45 noise=8 threshold=16 soft=false third-run=done outlier=none",
+                         "a range of exactly 8 is still a clean triple")
+        proc = run_py(SCORE, "baseline", "40", "50", "44", "47")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("two or three runs", proc.stderr)
+        self.assertEqual(run_py(SCORE, "baseline", "40", "50", "144").returncode, 2)
+        data = json.loads(run_py(SCORE, "baseline", "40", "50", "44", "--json").stdout)
+        self.assertEqual(data["outlier"], 50)
+        self.assertEqual(data["third_run"], "done")
+        self.assertEqual(data["runs"], [40, 50, 44])
+        self.assertEqual(data["baseline"], 42)
+        self.assertEqual(data["noise"], 4)
+        self.assertFalse(data["soft"])
+        self.assertIn("outlier", data["detail"])
+        data = json.loads(run_py(SCORE, "baseline", "41", "45", "43", "--json").stdout)
+        self.assertIsNone(data["outlier"])
+        self.assertIsNone(data["detail"])
+        data = json.loads(run_py(SCORE, "baseline", "40", "50", "45", "--json").stdout)
+        self.assertTrue(data["soft"])
+        self.assertIsNone(data["outlier"])
+        self.assertIn("soft", data["detail"])
+        self.assertIn("no single outlier: the three runs spread over 10 (gaps 5 and 5)", data["detail"])
+        self.assertNotIn("no two runs agree", data["detail"], "adjacent runs 5 apart do agree within 8")
+        data = json.loads(run_py(SCORE, "baseline", "40", "50", "--json").stdout)
+        self.assertFalse(data["soft"])
+        self.assertEqual(data["third_run"], "needed")
+
+    def test_budget(self):
+        proc = self.budget("--total", "90", "--spent", "35", "--per-round", "12")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        lines = proc.stdout.splitlines()
+        self.assertEqual(lines[0], "remaining=55 rounds-used=0 rounds-affordable=4 max-rounds=4")
+        self.assertTrue(lines[1].startswith("detail: a round costs 12; 4 more rounds fit in the remaining 55"), lines[1])
+        self.assertIn("pass --max-rounds 4", lines[1])
+        proc = self.budget("--total", "90", "--spent", "35", "--per-round", "12", "--rounds", "2")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.first(proc), "remaining=55 rounds-used=0 rounds-affordable=4 max-rounds=2")
+        self.assertIn("pass --max-rounds 2", proc.stdout)
+        proc = self.budget("--total", "90", "--spent", "35", "--per-round", "12", "--rounds", "9")
+        self.assertEqual(self.first(proc), "remaining=55 rounds-used=0 rounds-affordable=4 max-rounds=4", "the ceiling never raises max-rounds")
+        proc = self.budget("--total", "15", "--spent", "14.2", "--per-round", "2.1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.first(proc), "remaining=0.8 rounds-used=0 rounds-affordable=0 max-rounds=0")
+        self.assertIn("stop now", proc.stdout)
+        proc = self.budget("--total", "15", "--spent", "20", "--per-round", "2")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.first(proc), "remaining=-5 rounds-used=0 rounds-affordable=0 max-rounds=0")
+        self.assertIn("stop now and report", proc.stdout)
+        proc = self.budget("--total", "3", "--spent", "0", "--per-round", "0.1")
+        self.assertEqual(self.first(proc), "remaining=3 rounds-used=0 rounds-affordable=30 max-rounds=30", "decimal, not float, division")
+        proc = self.budget("--total", "24", "--spent", "12", "--per-round", "12")
+        self.assertEqual(self.first(proc), "remaining=12 rounds-used=0 rounds-affordable=1 max-rounds=1")
+        self.assertIn("1 more round fits", proc.stdout)
+        for bad, flag in ((("--total", "15", "--spent", "0", "--per-round", "0"), "--per-round"),
+                          (("--total", "0", "--spent", "0", "--per-round", "2"), "--total"),
+                          (("--total", "15", "--spent", "-1", "--per-round", "2"), "--spent"),
+                          (("--total", "x", "--spent", "0", "--per-round", "2"), "--total"),
+                          (("--total", "15", "--spent", "0", "--per-round", "2", "--rounds", "0"), "--rounds"),
+                          (("--total", "15", "--spent", "0", "--per-round", "2", "--rounds-used", "-1"), "--rounds-used")):
+            proc = self.budget(*bad)
+            self.assertEqual(proc.returncode, 2, bad)
+            self.assertIn(flag, proc.stderr, bad)
+        proc = self.budget("--total", "90", "--spent", "35", "--per-round", "12", "--rounds", "2", "--json")
+        data = json.loads(proc.stdout)
+        self.assertEqual(sorted(data), ["detail", "max_rounds", "per_round", "remaining", "rounds_affordable", "rounds_used"])
+        self.assertEqual(data["remaining"], 55)
+        self.assertEqual(data["rounds_affordable"], 4)
+        self.assertEqual(data["max_rounds"], 2)
+        self.assertEqual(data["per_round"], 12)
+        self.assertIn("--max-rounds 2", data["detail"])
+        data = json.loads(self.budget("--total", "15", "--spent", "14.2", "--per-round", "2.1", "--json").stdout)
+        self.assertAlmostEqual(data["remaining"], 0.8)
+        self.assertEqual(data["max_rounds"], 0)
+
+    def test_budget_counts_rounds_already_run(self):
+        # Regression: max-rounds used to count only the rounds still affordable, so a
+        # budget checked after round 3 told decide the ceiling was 1 and stopped early.
+        proc = self.budget("--total", "90", "--spent", "66", "--per-round", "20", "--rounds", "5", "--rounds-used", "3")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.first(proc), "remaining=24 rounds-used=3 rounds-affordable=1 max-rounds=4")
+        self.assertIn("pass --max-rounds 4", proc.stdout)
+        max_rounds = json.loads(self.budget("--total", "90", "--spent", "66", "--per-round", "20", "--rounds", "5",
+                                            "--rounds-used", "3", "--json").stdout)["max_rounds"]
+        proc = self.decide("43,60,70", "--rounds-used", "3", max_rounds=max_rounds)
+        self.assertEqual(self.first(proc), "CONTINUE continue", proc.stdout)
+        self.assertIn("3 of 4 rounds used", proc.stdout)
+        proc = self.decide("43,60,70", "--rounds-used", "3", "--gates", "FAIL", max_rounds=max_rounds)
+        self.assertEqual(self.first(proc), "CONTINUE continue", "a failing gate with a round left is not HALT")
+        # The ceiling still caps it, and a spent budget ends the loop at the rounds run.
+        proc = self.budget("--total", "200", "--spent", "60", "--per-round", "20", "--rounds", "5", "--rounds-used", "3")
+        self.assertEqual(self.first(proc), "remaining=140 rounds-used=3 rounds-affordable=7 max-rounds=5")
+        proc = self.budget("--total", "90", "--spent", "80", "--per-round", "20", "--rounds-used", "3")
+        self.assertEqual(self.first(proc), "remaining=10 rounds-used=3 rounds-affordable=0 max-rounds=3")
+        proc = self.decide("43,60,70", "--rounds-used", "3", max_rounds=3)
+        self.assertEqual(self.first(proc), "STOP rounds-exhausted")
+        proc = self.budget("--total", "200", "--spent", "60", "--per-round", "20", "--rounds", "3", "--rounds-used", "3")
+        self.assertIn("round ceiling 3 is reached", proc.stdout)
+
+    def test_confirm_score_and_target_are_checked(self):
+        proc = self.decide("58,71,80,86", "--confirm-score", "500")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        proc = self.decide("58,71,80,69/80", "--confirm-score", "70/80", "--gates", "PASS")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        proc = self.decide("58,71,80,86", "--confirm-score", "69/80")
+        self.assertEqual(proc.returncode, 2, "a confirmation with a different adjusted max is a different instrument")
+        self.assertIn("different adjusted max", proc.stderr)
+        for target in ("101", "-1", "500"):
+            proc = run_py(SCORE, "decide", "--threshold", "3", "--target", target, "--max-rounds", "5", "--scores", "50,60")
+            self.assertEqual(proc.returncode, 2, target)
+            self.assertIn("--target", proc.stderr)
+        proc = run_py(SCORE, "decide", "--threshold", "3", "--target", "100", "--max-rounds", "5", "--scores", "50,60")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_decisions(self):
         cases = [
@@ -519,6 +705,23 @@ class SpawnBase(unittest.TestCase):
     def argv_lines(self, text):
         return "\n".join(line for line in text.splitlines() if not line.startswith("#"))
 
+    def dry_run_record(self, *args):
+        """The .cmd record as a dry run renders it (from the record header onwards)."""
+        proc = self.spawn(*(list(args) + ["--dry-run"]))
+        self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        out = proc.stdout_text
+        return out[out.index("# spawn_child.sh record"):]
+
+    def assert_footer(self, log_path, usage="not reported (the CLI printed no token count)"):
+        lines = read(log_path).splitlines()
+        self.assertGreaterEqual(len(lines), 4, lines)
+        footer = lines[-4:]
+        self.assertRegex(footer[0], r"^# started: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertRegex(footer[1], r"^# finished: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertRegex(footer[2], r"^# duration: \d+s$")
+        self.assertEqual(footer[3], "# usage: " + usage)
+        return footer
+
 
 class SpawnDryRunTests(SpawnBase):
     def test_codex_dry_run_creates_nothing_and_leaks_no_loop_path(self):
@@ -526,7 +729,7 @@ class SpawnDryRunTests(SpawnBase):
                           "--evidence", self.evidence, "--dry-run")
         self.assertEqual(proc.returncode, 0, proc.stderr_text)
         out = proc.stdout_text
-        for needle in ("CODEX_HOME='/<stage>/home'", "--ephemeral", "'-s'", "read-only", "--skip-git-repo-check",
+        for needle in ("CODEX_HOME='/<stage>/engine-home'", "--ephemeral", "'-s'", "read-only", "--skip-git-repo-check",
                        "project_doc_max_bytes=0", "'-m'", "'gpt-5'", "'-C'", "'/<stage>/artifact'", "'-o'", "'/<stage>/out.md'",
                        "# model: gpt-5", "# same-engine: no", "/<stage>/evidence"):
             self.assertIn(needle, out, needle)
@@ -545,25 +748,27 @@ class SpawnDryRunTests(SpawnBase):
         self.assertEqual(proc.returncode, 0, proc.stderr_text)
         out = proc.stdout_text
         for needle in ("--setting-sources", "--disable-slash-commands", "--strict-mcp-config", "--permission-mode", "dontAsk",
-                       "'--add-dir'", "'/<stage>'", "Edit(//<stage>/out.md)", "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(wc:*)"):
+                       "'--add-dir'", "'/<stage>'", "'Read,Grep,Glob,Write'", "Edit(//<stage>/out.md)"):
             self.assertIn(needle, out, needle)
-        for absent in ("--bare", SKIP_PERMS, "Bash(find", "Bash(tail", "Write(", "'--allow'"):
+        for absent in ("--bare", SKIP_PERMS, "Bash", "Write(", "'--allow'"):
             self.assertNotIn(absent, out, absent)
         proc = self.spawn("claude", "reviewer", self.prompt, self.snapshot, self.out, "--dry-run",
                           env={"ANTHROPIC_API_KEY": "test-key-placeholder"})
         self.assertEqual(proc.returncode, 0, proc.stderr_text)
         self.assertIn("--bare", proc.stdout_text)
 
-    def test_claude_no_bash_and_model(self):
-        proc = self.spawn("claude", "scorer", self.prompt, self.snapshot, self.out, "--model", "opus", "--no-bash", "--dry-run")
-        self.assertEqual(proc.returncode, 0, proc.stderr_text)
-        out = proc.stdout_text
-        self.assertIn("'Read,Grep,Glob,Write'", out)
-        self.assertNotIn("Bash", out)
-        self.assertIn("'--model'", out)
-        self.assertIn("'opus'", out)
-        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out, "--no-bash", "--dry-run")
+    def test_claude_allow_rules_are_stage_scoped(self):
+        # Every allow rule names a path under the stage; a bare "Read", "Grep" or "Glob"
+        # rule would let the child read the user's home, the loop dir and the repo.
+        record = self.dry_run_record("claude", "scorer", self.prompt, self.snapshot, self.out, "--model", "opus")
+        argv = self.argv_lines(record)
+        rules = re.findall(r"'((?:Read|Grep|Glob|Edit|Write|Bash)[^']*)'", argv.split("--allowedTools", 1)[1])
+        self.assertEqual(rules, ["Read(//<stage>/**)", "Grep(//<stage>/**)", "Glob(//<stage>/**)", "Edit(//<stage>/out.md)"])
+        self.assertIn("'--model'", argv)
+        self.assertIn("'opus'", argv)
+        proc = self.spawn("claude", "reviewer", self.prompt, self.snapshot, self.out, "--no-bash", "--dry-run")
         self.assertEqual(proc.returncode, 2)
+        self.assertIn("never get Bash", proc.stderr_text)
 
     def test_self_spawn_refused_unless_same_engine(self):
         proc = self.spawn("claude", "reviewer", self.prompt, self.snapshot, self.out, "--dry-run", env={"CLAUDECODE": "1"})
@@ -577,13 +782,20 @@ class SpawnDryRunTests(SpawnBase):
 
     def test_kimi(self):
         proc = self.spawn("kimi", "reviewer", self.prompt, self.snapshot, self.out, "--dry-run")
+        self.assertEqual(proc.returncode, 2, "kimi has no sandbox: it needs an explicit opt-in")
+        self.assertIn("--unsandboxed", proc.stderr_text)
+        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out, "--unsandboxed", "--dry-run")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("kimi only", proc.stderr_text)
+        proc = self.spawn("kimi", "reviewer", self.prompt, self.snapshot, self.out, "--unsandboxed", "--dry-run")
         self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        self.assertIn("# unsandboxed: yes", proc.stdout_text)
         self.assertIn("--skills-dir", proc.stdout_text)
-        self.assertIn("'/<stage>/home/kimi-skills'", proc.stdout_text)
+        self.assertIn("'/<stage>/engine-home/kimi-skills'", proc.stdout_text)
         self.assertIn("--add-dir", proc.stdout_text)
         self.assertNotIn("--" + "yolo", proc.stdout_text)
         self.assertNotIn("--auto", proc.stdout_text)
-        proc = self.spawn("kimi", "scorer", self.prompt, self.snapshot, self.out, "--model", "k2", "--dry-run")
+        proc = self.spawn("kimi", "scorer", self.prompt, self.snapshot, self.out, "--model", "k2", "--unsandboxed", "--dry-run")
         self.assertEqual(proc.returncode, 2)
         self.assertIn("reviewer only", proc.stderr_text)
 
@@ -631,14 +843,20 @@ class SpawnStubRunTests(SpawnBase):
         self.install_stub("codex", STUB_CODEX)
 
     def test_successful_run(self):
-        proc = self.spawn("codex", "scorer", self.prompt, self.snapshot, self.out, "--model", "gpt-5", "--evidence", self.evidence)
+        args = ("codex", "scorer", self.prompt, self.snapshot, self.out, "--model", "gpt-5", "--evidence", self.evidence)
+        expected_record = self.dry_run_record(*args)
+        proc = self.spawn(*args)
         self.assertEqual(proc.returncode, 0, proc.stderr_text + proc.stdout_text)
         self.assertTrue(proc.stdout_text.startswith("ok: " + os.path.realpath(self.out)), proc.stdout_text)
+        self.assertRegex(proc.stdout_text, r"^ok: \S+ \(\d+ bytes, \d+s\); record \S+\.cmd\n$")
+        self.assertEqual(read(self.out[:-3] + ".cmd"), expected_record, "the .cmd pin must not carry timing")
+        self.assert_footer(self.out[:-3] + ".log")
+        self.assertNotIn("tokens used", read(self.out[:-3] + ".log"))
         out = read(self.out)
         self.assertIn("## Score: 50/100", out)
         self.assertIn("stdin=0", out, "stdin must be redirected from /dev/null")
         self.assertRegex(out, r"cwd=.*/ii-stage\.[^/]+/artifact")
-        self.assertRegex(out, r"home=.*/ii-stage\.[^/]+/home")
+        self.assertRegex(out, r"home=.*/ii-stage\.[^/]+/engine-home")
         listing = re.search(r"listing=(.*)", out).group(1)
         self.assertIn("AGENTS.md.as-data", listing)
         self.assertIn(".claude.as-data", listing)
@@ -654,8 +872,34 @@ class SpawnStubRunTests(SpawnBase):
         self.assertNotIn(self.env["TMPDIR"], record)
         self.assertTrue(os.path.isfile(self.out[:-3] + ".log"))
         self.assertEqual(self.stage_dirs(), [], "stage dir must be deleted")
+        self.assertNotIn("# duration", record, "timing belongs to the .log, not the pin")
         self.assertEqual(run_py(SNAPSHOT, "verify", "--snapshot", self.snapshot).returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(self.loop, "rounds.md")), "a clean run logs no incident")
+
+    def test_usage_line_is_captured(self):
+        # codex-cli 0.163.0 prints "tokens used" and the count on the next line (the
+        # stub replays the tail of a real log); the footer must carry the number.
+        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out, env={"STUB_MODE": "usage"})
+        self.assertEqual(proc.returncode, 0, proc.stderr_text + proc.stdout_text)
+        self.assert_footer(self.out[:-3] + ".log", usage="tokens used: 19,783")
+        self.assertNotIn("tokens used", read(self.out[:-3] + ".cmd"))
+        os.remove(self.out[:-3] + ".log")
+        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out, env={"STUB_MODE": "usage-oneline"})
+        self.assertEqual(proc.returncode, 0, proc.stderr_text + proc.stdout_text)
+        self.assert_footer(self.out[:-3] + ".log", usage="tokens used: 1234")
+        log = read(self.out[:-3] + ".log")
+        self.assertEqual(log.count("tokens used: 1234"), 2, "the child's line and the footer's copy of it")
+
+    def test_empty_snapshot_is_refused(self):
+        empty = os.path.join(self.loop, "snapshots", "round-9")
+        os.makedirs(empty)
+        with open(empty + ".manifest.json", "w") as handle:
+            json.dump({"root": self.root, "paths": [], "excludes": [], "files": {}}, handle)
+        proc = self.spawn("codex", "reviewer", self.prompt, empty, self.out)
+        self.assertEqual(proc.returncode, 3, proc.stderr_text)
+        self.assertIn("lists no files", proc.stderr_text)
+        self.assertFalse(os.path.exists(self.out))
+        self.assertFalse(os.path.exists(self.out[:-3] + ".cmd"), "nothing ran, so no record")
 
     def test_prompt_gets_staging_section_and_renames(self):
         proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out)
@@ -674,6 +918,7 @@ class SpawnStubRunTests(SpawnBase):
         self.assertIn("output discarded", proc.stderr_text)
         self.assertFalse(os.path.exists(self.out))
         self.assertTrue(os.path.exists(self.out + ".discarded"))
+        self.assert_footer(self.out[:-3] + ".log")
         rounds = read(os.path.join(self.loop, "rounds.md"))
         self.assertIn("codex scorer: child modified the staged artifact; output discarded", rounds)
         self.assertEqual(self.stage_dirs(), [])
@@ -683,9 +928,12 @@ class SpawnStubRunTests(SpawnBase):
         proc = self.spawn("codex", "scorer", self.prompt, self.snapshot, self.out, "--model", "gpt-5", env={"STUB_MODE": "fail"})
         self.assertEqual(proc.returncode, 7, proc.stderr_text)
         self.assertIn("exited with status 1", proc.stderr_text)
+        self.assert_footer(self.out[:-3] + ".log")
+        os.remove(self.out[:-3] + ".log")
         proc = self.spawn("codex", "scorer", self.prompt, self.snapshot, self.out, "--model", "gpt-5", env={"STUB_MODE": "silent"})
         self.assertEqual(proc.returncode, 6, proc.stderr_text)
         self.assertIn("no output file", proc.stderr_text)
+        self.assert_footer(self.out[:-3] + ".log")
         self.assertEqual(self.stage_dirs(), [])
 
     @unittest.skipIf(shutil.which("git") is None, "git not on PATH")
@@ -707,10 +955,12 @@ class SpawnStubRunTests(SpawnBase):
     def test_preflight(self):
         proc = self.spawn("--preflight", "codex", "--model", "gpt-5")
         self.assertEqual(proc.returncode, 0, proc.stderr_text + proc.stdout_text)
-        self.assertEqual(proc.stdout_text.strip(), "preflight ok: codex (codex-cli 0.0-stub) as scorer, model gpt-5")
+        self.assertRegex(proc.stdout_text.strip(), r"^preflight ok: codex \(codex-cli 0\.0-stub\) as scorer, model gpt-5, \d+s$")
+        self.assertRegex(proc.stdout_text.strip(), r"^preflight ok: .*, \d+s$")
         proc = self.spawn("--preflight", "codex")
         self.assertEqual(proc.returncode, 0, proc.stderr_text)
         self.assertIn("as reviewer", proc.stdout_text)
+        self.assertRegex(proc.stdout_text.strip(), r"^preflight ok: codex \(codex-cli 0\.0-stub\) as reviewer, \d+s$")
         proc = self.spawn("--preflight", "codex", env={"STUB_MODE": "garbage"})
         self.assertEqual(proc.returncode, 7)
         self.assertIn("did not read the staged file", proc.stderr_text)
@@ -743,6 +993,24 @@ class HelpTests(unittest.TestCase):
             proc = run_py(script, "--help")
             self.assertEqual(proc.returncode, 0, script)
             self.assertIn("usage", proc.stdout.lower())
+
+    def test_score_math_subcommand_help(self):
+        for sub in ("baseline", "budget", "decide"):
+            proc = run_py(SCORE, sub, "--help")
+            self.assertEqual(proc.returncode, 0, sub + "\n" + proc.stderr)
+            self.assertIn("usage", proc.stdout.lower())
+        proc = run_py(SCORE, "--help")
+        for phrase in ("budget --total", "third-run", "total round ceiling", "--rounds-used"):
+            self.assertIn(phrase, proc.stdout, phrase)
+
+    def test_spawn_help_prints_the_whole_header(self):
+        proc = subprocess.run(["bash", SPAWN, "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(proc.stdout.startswith("Spawn an isolated"), proc.stdout[:80])
+        self.assertIn("--unsandboxed", proc.stdout)
+        self.assertTrue(proc.stdout.rstrip().endswith("failed the preflight."), proc.stdout[-120:])
+        self.assertNotIn("set -eu", proc.stdout)
 
 
 if __name__ == "__main__":

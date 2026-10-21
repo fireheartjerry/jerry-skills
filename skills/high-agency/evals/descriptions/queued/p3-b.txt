@@ -1,0 +1,1 @@
+Not for pure explain, brainstorm or discuss requests. Use automatically for multi-step execution: builds, repairs, investigations, plans or briefs to execute, jobs that outlive a turn; and when the user says "high agency", "handle it", "keep going", "take ownership", or asks "does X work?", "is it fixed?". Grants no new permission to send, publish, delete or spend.

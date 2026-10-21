@@ -25,7 +25,7 @@ Class is set at round 0: PRESERVE passes at baseline and must stay passing; ACHI
 <!-- /loop-only -->
 
 - **G1.** [PRESERVE] `npm run build` exits 0 | *check:* run `npm run build` in the repo root and read the exit code
-- **G2.** [ACHIEVE] No horizontal overflow at 390px wide | *check:* with the dev server running, `node scripts/check-overflow.mjs http://localhost:4321 390` prints the document scrollWidth; pass when it is 390 or less
+- **G2.** [ACHIEVE] No horizontal overflow at 390px wide | *check:* with the dev server running, `node tools/check-overflow.mjs http://localhost:4321 390` prints the document scrollWidth; pass when it is 390 or less
 - **G3.** [PRESERVE] `site/tokens.css` unchanged | *check:* `git diff --quiet a1b2c3d -- site/tokens.css` exits 0
 
 ## Criteria (100 points)
@@ -56,7 +56,7 @@ Class is set at round 0: PRESERVE passes at baseline and must stay passing; ACHI
 
 ### C4. Mobile scroll integrity at 390x844 (10 pts)
 **What it means:** Every screen of scroll on a phone shows something. No dead stretches, no horizontal overflow.
-**How to check it:** With the dev server running, `node scripts/frames.mjs http://localhost:4321 390 844 300` writes a screenshot every 300px to `frames/` and prints the document scrollWidth and the indices of any identical consecutive frames.
+**How to check it:** With the dev server running, `node tools/frames.mjs http://localhost:4321 390 844 300` writes a screenshot every 300px to `frames/` and prints the document scrollWidth and the indices of any identical consecutive frames.
 **Anchors:**
 - `0`: any horizontal overflow, or more than 2 screens of identical frames
 - `5`: no overflow, one dead stretch under a screen

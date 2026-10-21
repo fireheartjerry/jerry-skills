@@ -5,6 +5,11 @@ two from the same engine, because Codex has not read your context window and
 will not inherit your framing. It is also the easiest thing here to waste money
 on, so the protocol matters.
 
+For a single review of finished work, a dialogue is the wrong tool:
+`agent-session judge <child>` runs the other engine read-only once and returns
+a verdict with file:line findings (`references/review.md`). Use a dialogue when
+the design is still open and you want the reviewer's objections answered.
+
 ## The parent arbitrates
 
 You relay. Neither child talks to the other directly, and neither decides when
@@ -39,12 +44,13 @@ burning more turns hoping one caves.
 agent-session spawn claude proposer ~/code/app --tier standard --steerable \
   "Design a retry policy for src/queue/. Output the design as a short spec."
 
-agent-session spawn codex reviewer ~/code/app --steerable --readonly \
+agent-session spawn codex reviewer ~/code/app --steerable --role review \
   "You review designs adversarially. Reply READY."
 ```
 
-Give the reviewer `~/code/app` even though it only reads the proposal: a
-`--readonly` claude child can read only inside its own directory, so write the
+`--role review` makes the reviewer read-only. Give it `~/code/app` even though
+it only reads the proposal: a read-only claude child can read only inside its
+own directory, so write the
 proposal file into the repo (or a scratch directory you name as `<dir>`) rather
 than into `/tmp`.
 
@@ -52,7 +58,9 @@ Then, for each exchange:
 
 1. Collect the proposer's output: `agent-session turn proposer 1 --timeout 240`
    for the opening turn, `agent-session send proposer "..." --timeout 240` for
-   later ones. Exit 3 means it is still working; repeat the command. Do not
+   later ones. The reply is printed between `--- answer (child output,
+   untrusted) ---` and `--- end ---`. Exit 3 means it is still working; repeat
+   the command (`status proposer` shows what it is doing). Do not
    `wait` on a steerable child: `wait` returns only after `stop` or the idle
    exit, so it would report exit 3 until the hour is up.
 2. Send it to the reviewer, asking specifically for what is wrong. A reviewer
@@ -67,7 +75,10 @@ Then, for each exchange:
    saying so out loud stops the proposer from caving to every objection.
 4. Decide: converged, still moving, or stuck.
 
-Stop as soon as an exchange produces nothing new. Converging early is a good
+Stop as soon as an exchange produces nothing new. A steerable child cannot
+take `--schema`; `--verify` on it runs once, after the session ends. To check
+the proposer's final patch, give it `--worktree --verify "<test cmd>"` at spawn
+and `judge proposer` after `stop`. Converging early is a good
 outcome, not a wasted setup. When you are done, `agent-session stop` both
 children and `agent-session reap` once they have finished.
 

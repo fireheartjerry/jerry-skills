@@ -6,7 +6,9 @@ verification commands, hard boundaries) is never dropped; everything else compet
 remaining budget. Gate 1 evidence for this file is tokens, not timing: must-keep tokens plus
 candidate tokens against B. If the packer's time is spent re-indexing on every call rather
 than ranking, go to `cards-repeated-work.md`; if the graph it expands is stale or incomplete,
-see `cards-graphs-impact.md`.
+see `cards-graphs-impact.md`. On a repository, `dev.py context "<task>" --budget N` runs
+all four cards (exact names, BM25, two-hop import expansion, this pack) and lists every
+chunk with its line range, tokens and reason (`tooling.md`, `context`).
 
 ## Exact-first retrieval
 
@@ -178,7 +180,7 @@ the end or drops items at random; constraints or test commands get cut.
 **Precondition test:** A token estimate per chunk (a real tokenizer if available, otherwise
 chars/4 with about 20% error acknowledged); the must-keep set is identified; a budget B.
 
-**Complexity:** O(c log c) for c candidates.
+**Complexity:** O(c log c + c x k log k) for c candidates and k must-keep ranges.
 
 **Sketch:**
 
@@ -203,6 +205,18 @@ def shorten(chunk):
     # other body lines. Never drops the chunk itself.
     ...
 
+def subtract_ranges(c, chosen):                # parts of c not covered by a chosen range
+    parts, start = [], c.start
+    for k in sorted((k for k in chosen if k.path == c.path), key=lambda k: k.start):
+        if k.end < start or k.start > c.end:
+            continue
+        if k.start > start:
+            parts.append(Chunk(c.path, start, k.start - 1, score=c.score))
+        start = max(start, k.end + 1)
+    if start <= c.end:
+        parts.append(Chunk(c.path, start, c.end, score=c.score))
+    return parts                               # each part keeps the candidate's score
+
 def pack(must_keep, candidates, B, tokens, headroom=0.10):
     limit = int(B * (1 - headroom))            # room for system text and the reply
     chosen = merge_ranges(must_keep)           # no duplicated text inside the must-keep set
@@ -216,29 +230,41 @@ def pack(must_keep, candidates, B, tokens, headroom=0.10):
             note = "must-keep set alone is %d tokens over budget" % (used - limit)
             chosen.sort(key=lambda c: (c.path, c.start))
             return chosen, used, note          # over budget by construction: say so, add nothing
-    ranked = sorted(merge_ranges(candidates),
-                    key=lambda c: (-c.score / max(1, tokens(c)), c.path, c.start))
-    for c in ranked:
-        if used + tokens(c) <= limit:
-            chosen.append(c)
-            used += tokens(c)
-    chosen.sort(key=lambda c: (c.path, c.start))   # fixed order: prompt caching
-    return chosen, used, note
+    room = limit - used
+    pool = [p for c in merge_ranges(candidates) for p in subtract_ranges(c, chosen)]
+    pool = [c for c in pool if tokens(c) <= room]   # no line sent twice; each fits alone
+    pool.sort(key=lambda c: (-c.score / max(1, tokens(c)), c.path, c.start))
+    picked, spent = [], 0
+    for c in pool:                             # ratio greedy, skipping what does not fit
+        if spent + tokens(c) <= room:
+            picked.append(c)
+            spent += tokens(c)
+    best = min(pool, key=lambda c: (-c.score, c.path, c.start), default=None)
+    if best is not None and best.score > sum(c.score for c in picked):
+        picked, spent = [best], tokens(best)   # better of the two: at least half the optimum
+    chosen = sorted(chosen + picked, key=lambda c: (c.path, c.start))   # fixed order
+    return chosen, used + spent, note
 ```
 
-Emit every chunk with its path and line numbers.
+Emit every chunk with its path and line numbers. Ratio greedy alone has no constant
+guarantee (one cheap chunk can block a large valuable one); returning the better of the
+greedy set and the best single chunk is guaranteed at least half the optimum for additive
+scores.
 
-**Oracle:** For c <= 15 candidates brute-force the knapsack optimum and report the greedy gap
-on 200 random instances; the must-keep set is present in every output; total tokens <= B in
-every output, except when the must-keep set alone exceeds B, in which case the output carries
-the "over budget" note and contains no candidate.
+**Oracle:** The must-keep set is present in every output; total tokens <= B in every output,
+except when the must-keep set alone exceeds B, in which case the output carries the "over
+budget" note and contains no candidate; no line of any path appears in two output chunks;
+on 200 random instances with c <= 12 candidates the output score is at least half the
+knapsack optimum; two runs give the same chunks in the same order.
 
 **Traps:**
 - No headroom: the model's own output and system text need room; keep about 10%.
 - Dropping must-keep items silently.
 - Reporting "bodies trimmed" when the trimmed must-keep set is still over budget: the caller
   must see the overrun, so the note states the token count.
-- Duplicated overlapping chunks: merge ranges on both the must-keep set and the candidates.
+- Duplicated overlapping chunks: merge ranges within the must-keep set and within the
+  candidates, then subtract the must-keep ranges from every candidate; merging alone still
+  sends a candidate's overlap with a must-keep range twice.
 - Order that changes between runs breaks prompt caching.
 - Counting tokens with one tokenizer and sending to another model.
 

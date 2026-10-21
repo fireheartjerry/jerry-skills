@@ -88,7 +88,7 @@ output).
 - Measuring the gain as "this week against last week": different commits are different
   inputs. Before comes from the recorded history under the current plan; the plan number
   comes from the replay; the verdict comes from reruns of the same commit under both plans,
-  stopping when the noise rule passes (`measurement.md`, section 5, expensive runs).
+  stopping when the noise rule passes (`measurement.md`, section 4, expensive runs).
 
 **Not when:**
 - Jobs have dependencies: Critical-path list scheduling.
@@ -114,11 +114,9 @@ wrong: detect and report it first.
 def critical_path(dur, preds, topo):   # topo from cards-graphs-impact.md
     finish, back = {}, {}
     for v in topo:
-        best, arg = 0.0, None
-        for u in sorted(preds.get(v, ())):
-            if finish[u] > best:
-                best, arg = finish[u], u
-        finish[v] = dur[v] + best
+        ps = sorted(preds.get(v, ()))
+        arg = max(ps, key=lambda u: (finish[u], u)) if ps else None   # ties: largest name
+        finish[v] = dur[v] + (finish[arg] if arg is not None else 0.0)
         back[v] = arg
     end = max(topo, key=lambda v: (finish[v], v))
     path = []
@@ -128,7 +126,9 @@ def critical_path(dur, preds, topo):   # topo from cards-graphs-impact.md
     return finish[path[0]], list(reversed(path))
 ```
 
-**Oracle:** Enumerate all paths on DAGs with V <= 12 and take the longest.
+**Oracle:** Enumerate all paths on DAGs with V <= 12 and take the longest; include
+zero-duration stages and ties, and assert the returned path is a real path through `preds`
+whose durations sum to the returned length.
 
 **Traps:**
 - Cycles: detect and report, do not loop.
@@ -136,6 +136,8 @@ def critical_path(dur, preds, topo):   # topo from cards-graphs-impact.md
   input size.
 - Shortening a non-critical stage changes nothing, so always report the path, not just the
   length.
+- Zero-duration stages (gates, approvals) still sit on the path: pick the predecessor by
+  finish time, never by "finish time > 0", or the path loses its start.
 
 **Not when:**
 - No dependencies: LPT across workers.

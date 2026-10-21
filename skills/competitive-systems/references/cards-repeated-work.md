@@ -75,7 +75,10 @@ def item_key(content, tool_version, flags, env):   # env: {name: value} the step
     return h.hexdigest()
 
 def process_all(items, manifest_path, compute, tool_version, flags, env):
-    manifest = json.load(open(manifest_path)) if os.path.exists(manifest_path) else {}
+    manifest = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
     out, hits = {}, 0
     for name, content in sorted(items.items()):
         key = item_key(content, tool_version, flags, env)

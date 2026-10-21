@@ -4,45 +4,60 @@
 #
 # usage: spawn_child.sh ENGINE ROLE PROMPT_FILE SNAPSHOT_DIR OUT_FILE
 #                       [--evidence DIR] [--model M] [--loop-dir DIR]
-#                       [--timeout SECONDS] [--no-bash] [--same-engine] [--dry-run]
-#        spawn_child.sh --preflight ENGINE [--model M] [--same-engine] [--timeout SECONDS]
+#                       [--timeout SECONDS] [--same-engine] [--unsandboxed] [--dry-run]
+#        spawn_child.sh --preflight ENGINE [--model M] [--same-engine] [--unsandboxed]
+#                       [--timeout SECONDS]
 #
-#   ENGINE  codex | claude | kimi      (kimi has no sandbox: reviewer only)
+#   ENGINE  codex | claude | kimi      (kimi: reviewer only, needs --unsandboxed)
 #   ROLE    reviewer | scorer          (a scorer requires --model: the pin)
 #
 # Every run is staged in a fresh temporary directory outside any git work tree and
 # outside the loop dir:
-#   <stage>/artifact/   copy of SNAPSHOT_DIR (verified against its manifest), with
-#                       agent instruction files renamed *.as-data; the child's cwd
+#   <stage>/artifact/   copy of SNAPSHOT_DIR (verified against its manifest; refused
+#                       when the manifest lists no files), with agent instruction
+#                       files renamed *.as-data; the child's cwd
 #   <stage>/prompt.md   copy of PROMPT_FILE plus a STAGING section naming these paths
 #   <stage>/evidence/   copy of --evidence DIR, when given
 #   <stage>/out.md      the only file the child may write; moved to OUT_FILE after
-#   <stage>/home/       isolated CODEX_HOME (auth.json symlink only) or kimi skills dir
-# The child gets no path under the loop dir or the repo, so round numbers, prior
-# scores, the changelog and commit history are not reachable. The child loads no
-# user config, memory, skills, MCP servers or project instruction files. After the
-# run the staged artifact is re-hashed and the artifact root's git status is
-# compared with the pre-run fingerprint; any change discards the output (exit 4).
+#   <stage>/engine-home/ isolated CODEX_HOME (auth.json symlink only) or kimi skills dir
+# The prompt names only stage paths, and the child loads no user config, memory,
+# skills, MCP servers or project instruction files. What each engine can reach:
+#   claude  Read, Grep and Glob allowed only under <stage>, Write only to out.md, no
+#           Bash; anything else is denied by --permission-mode dontAsk. Enforced by
+#           the CLI's permission rules.
+#   codex   -s read-only: writes and network are blocked by the sandbox, but reads
+#           are not scoped, so the child can read any file the user can, including
+#           the loop dir and the repo if it goes looking. Independence of codex runs
+#           rests on the prompt naming no such path.
+#   kimi    no sandbox and no allowlist: the child can read, write and run anything
+#           as the user. Refused unless --unsandboxed is passed; recorded in .cmd.
+# After the run the staged artifact is re-hashed and the artifact root's git status
+# is compared with the pre-run fingerprint; any change discards the output (exit 4).
+# These checks cannot see writes anywhere else (for example a kimi child editing a
+# shell rc file).
 #
-# --no-bash      claude only: drop the Bash tool entirely (the stricter rerun variant)
 # --same-engine  allow spawning the CLI you are running (disclosed in the .cmd record
 #                and the report; it is more isolated than a harness subagent)
+# --unsandboxed  required for kimi; acknowledges it runs without any sandbox
 # --timeout      default 900 when a timeout binary exists; 0 disables
 # --dry-run      print the staging plan and the exact argv; creates nothing
 # --preflight    run a one-file smoke test through the full path and report ok/failure
 #
 # Records: OUT_FILE minus .md plus .cmd (argv with <stage> placeholders, engine
-# version, model) and .log (child stdout and stderr).
+# version, model) and .log (child stdout and stderr, then a footer: # started,
+# # finished, # duration: <N>s and # usage: the token count codex prints after
+# "tokens used", or "not reported"; claude -p in text mode and kimi print no usage).
+# The .cmd record never carries timing, so it stays byte-identical across rounds.
 #
-# Exit codes: 0 ok, 2 bad argument or missing file, 3 staging failed, 4 child modified
-# the staged artifact or the artifact root changed during the run (output discarded),
-# 5 refused to spawn the engine you are running, 6 child produced no output, 7 child
-# exited non-zero or failed the preflight.
+# Exit codes: 0 ok, 2 bad argument or missing file, 3 staging failed (including an
+# empty snapshot), 4 child modified the staged artifact or the artifact root changed
+# during the run (output discarded), 5 refused to spawn the engine you are running,
+# 6 child produced no output, 7 child exited non-zero or failed the preflight.
 
 set -eu
 
 usage() {
-  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -114,6 +129,7 @@ if [ "$#" -ge 1 ] && [ "$1" = "--preflight" ]; then
     case "$1" in
       --model) [ "$#" -ge 2 ] || die "--model needs a value"; P_MODEL="$2"; P_ARGS+=(--model "$2"); shift 2 ;;
       --same-engine) P_ARGS+=(--same-engine); shift ;;
+      --unsandboxed) P_ARGS+=(--unsandboxed); shift ;;
       --timeout) [ "$#" -ge 2 ] || die "--timeout needs seconds"; P_TIMEOUT="$2"; shift 2 ;;
       *) die "unknown preflight option: $1" ;;
     esac
@@ -140,7 +156,8 @@ if [ "$#" -ge 1 ] && [ "$1" = "--preflight" ]; then
     die "preflight failed for $P_ENGINE (spawn exit $P_STATUS); fix access before round 0" 7
   fi
   if grep -q 'PREFLIGHT OK' "$P_TMP/loop/scores/preflight.md" && grep -q 'marigold' "$P_TMP/loop/scores/preflight.md"; then
-    printf 'preflight ok: %s (%s) as %s%s\n' "$P_ENGINE" "$(engine_version "$P_ENGINE")" "$P_ROLE" "${P_MODEL:+, model $P_MODEL}"
+    P_DURATION="$(grep '^# duration: ' "$P_TMP/loop/scores/preflight.log" 2>/dev/null | tail -n 1 | sed 's/^# duration: //')"
+    printf 'preflight ok: %s (%s) as %s%s, %s\n' "$P_ENGINE" "$(engine_version "$P_ENGINE")" "$P_ROLE" "${P_MODEL:+, model $P_MODEL}" "${P_DURATION:-unknown duration}"
     exit 0
   fi
   printf '%s\n' "--- child output ---" >&2
@@ -159,16 +176,18 @@ TIMEOUT_S=""
 LOOP_DIR=""
 MODEL=""
 EVIDENCE_ARG=""
-NO_BASH=0
 SAME_ENGINE=0
+UNSANDBOXED=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --evidence) [ "$#" -ge 2 ] || die "--evidence needs a directory"; EVIDENCE_ARG="$2"; shift 2 ;;
     --model) [ "$#" -ge 2 ] || die "--model needs a value"; MODEL="$2"; shift 2 ;;
     --loop-dir) [ "$#" -ge 2 ] || die "--loop-dir needs a directory"; LOOP_DIR="$2"; shift 2 ;;
     --timeout) [ "$#" -ge 2 ] || die "--timeout needs seconds"; TIMEOUT_S="$2"; shift 2 ;;
-    --no-bash) NO_BASH=1; shift ;;
     --same-engine) SAME_ENGINE=1; shift ;;
+    --unsandboxed) UNSANDBOXED=1; shift ;;
+    --no-bash)
+      die "--no-bash was removed: claude children never get Bash; Read, Grep and Glob are limited to the stage" ;;
     --dry-run) DRY_RUN=1; shift ;;
     --allow|--allow-scorer-commands)
       die "$1 was removed: children never run write-dependent commands; run the check line yourself and pass the output with --evidence" ;;
@@ -188,15 +207,18 @@ esac
 if [ "$ENGINE" = "kimi" ] && [ "$ROLE" = "scorer" ]; then
   die "kimi has no sandbox and no tool allowlist; use it as reviewer only"
 fi
+if [ "$ENGINE" = "kimi" ] && [ "$UNSANDBOXED" -eq 0 ]; then
+  die "kimi runs with no sandbox and no allowlist: an artifact that injects instructions can run any command as you. Prefer codex, claude --same-engine or a harness subagent; pass --unsandboxed to run it anyway"
+fi
+if [ "$UNSANDBOXED" -eq 1 ] && [ "$ENGINE" != "kimi" ]; then
+  die "--unsandboxed applies to kimi only"
+fi
 if [ "$ROLE" = "scorer" ] && [ -z "$MODEL" ]; then
   if [ "$DRY_RUN" -eq 1 ]; then
     printf 'spawn_child: warning: a scorer needs --model M on a real run (the model is part of the pin)\n' >&2
   else
     die "a scorer needs --model M: the model is part of the pin and the CLI default can change mid-loop"
   fi
-fi
-if [ "$NO_BASH" -eq 1 ] && [ "$ENGINE" != "claude" ]; then
-  die "--no-bash applies to claude only (codex is sandboxed read-only; kimi has no allowlist)"
 fi
 case "$TIMEOUT_S" in
   "") ;;
@@ -220,6 +242,11 @@ PROMPT_FILE="$(abs_file "$PROMPT_ARG")"
 SNAPSHOT_DIR="$(abs_dir "$SNAPSHOT_ARG")"
 MANIFEST="${SNAPSHOT_DIR}.manifest.json"
 [ -r "$MANIFEST" ] || die "snapshot manifest not found: $MANIFEST"
+MANIFEST_FILES="$(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("files") or {}))' "$MANIFEST" 2>/dev/null || printf 'unreadable')"
+case "$MANIFEST_FILES" in
+  unreadable) die "snapshot manifest is not valid JSON: $MANIFEST" ;;
+  0) die "snapshot manifest lists no files: $MANIFEST. The child would grade an empty artifact. Recreate the snapshot (a root under a gitignored path, or a wrong --path, gives an empty snapshot)" 3 ;;
+esac
 OUT_PARENT="$(dirname "$OUT_ARG")"
 [ -d "$OUT_PARENT" ] || die "output directory not found: $OUT_PARENT"
 OUT_FILE="$(abs_file "$OUT_ARG")"
@@ -278,7 +305,7 @@ build_cmd() {  # $1 = stage dir
   case "$ENGINE" in
     codex)
       PROMPT_LINE="Read and follow the instructions in $stage/prompt.md. Your final message must be your complete output and nothing else; it is saved to a file automatically."
-      ENV_PREFIX=("CODEX_HOME=$stage/home")
+      ENV_PREFIX=("CODEX_HOME=$stage/engine-home")
       cmd=(codex exec --ephemeral -s read-only --skip-git-repo-check
            -c 'model_reasoning_effort="high"' -c project_doc_max_bytes=0)
       [ -n "$MODEL" ] && cmd+=(-m "$MODEL")
@@ -293,17 +320,14 @@ build_cmd() {  # $1 = stage dir
       cmd+=(--setting-sources "" --disable-slash-commands --strict-mcp-config
             --permission-mode dontAsk --add-dir "$stage")
       [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
-      if [ "$NO_BASH" -eq 1 ]; then
-        cmd+=(--tools "Read,Grep,Glob,Write" --allowedTools "Read" "Grep" "Glob" "Edit(/$stage/out.md)")
-      else
-        cmd+=(--tools "Read,Grep,Glob,Write,Bash"
-              --allowedTools "Read" "Grep" "Glob" "Edit(/$stage/out.md)"
-              "Bash(ls:*)" "Bash(cat:*)" "Bash(head:*)" "Bash(wc:*)")
-      fi
+      # Permission rules take //absolute paths. Everything outside the stage, and
+      # every other tool, falls to dontAsk and is denied.
+      cmd+=(--tools "Read,Grep,Glob,Write"
+            --allowedTools "Read(/$stage/**)" "Grep(/$stage/**)" "Glob(/$stage/**)" "Edit(/$stage/out.md)")
       ;;
     kimi)
       PROMPT_LINE="Read and follow the instructions in $stage/prompt.md. Write your complete output to $stage/out.md. Print only a one-line confirmation to stdout."
-      cmd=(kimi -p "$PROMPT_LINE" --skills-dir "$stage/home/kimi-skills" --add-dir "$stage")
+      cmd=(kimi -p "$PROMPT_LINE" --skills-dir "$stage/engine-home/kimi-skills" --add-dir "$stage")
       [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
       ;;
   esac
@@ -319,7 +343,10 @@ render() {  # $1 = stage dir to replace with the placeholder in the output
   printf '# role: %s\n' "$ROLE"
   printf '# model: %s\n' "${MODEL:-cli default (not pinned)}"
   printf '# same-engine: %s\n' "$([ "$SAME_ENGINE" -eq 1 ] && printf yes || printf no)"
-  printf '# stage: artifact/ prompt.md out.md%s home/ (fresh temp dir outside any repo)\n' "${EVIDENCE_DIR:+ evidence/}"
+  if [ "$ENGINE" = "kimi" ]; then
+    printf '# unsandboxed: yes (no sandbox, no allowlist)\n'
+  fi
+  printf '# stage: artifact/ prompt.md out.md%s engine-home/ (fresh temp dir outside any repo)\n' "${EVIDENCE_DIR:+ evidence/}"
   printf '# cwd: %s/artifact\n' "$PLACEHOLDER"
   for arg in ${ENV_PREFIX[@]+"${ENV_PREFIX[@]}"}; do
     shown="${arg//"$stage"/$PLACEHOLDER}"
@@ -346,7 +373,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '#   %s/evidence   <- copy of the evidence dir\n' "$PLACEHOLDER"
   fi
   printf '#   %s/out.md     <- the only file the child may write; moved to the output path afterwards\n' "$PLACEHOLDER"
-  printf '#   %s/home       <- isolated engine home (codex: auth.json symlink; kimi: empty skills dir)\n' "$PLACEHOLDER"
+  printf '#   %s/engine-home <- isolated engine home (codex: auth.json symlink; kimi: empty skills dir)\n' "$PLACEHOLDER"
   printf '# record: %s and %s\n' "$CMD_FILE" "$LOG_FILE"
   render "$PLACEHOLDER"
   exit 0
@@ -366,7 +393,7 @@ case "$STAGE" in
   "$LOOP_DIR"/*) die "temp dir $STAGE is inside the loop dir; set TMPDIR elsewhere" 3 ;;
 esac
 
-mkdir -p "$STAGE/artifact" "$STAGE/home"
+mkdir -p "$STAGE/artifact" "$STAGE/engine-home"
 cp -R "$SNAPSHOT_DIR/." "$STAGE/artifact/"
 COPY_CHECK="$(python3 -I "$SCRIPT_DIR/snapshot.py" verify --snapshot "$STAGE/artifact" --manifest "$MANIFEST" 2>&1)" || {
   printf '%s\n' "$COPY_CHECK" >&2
@@ -411,8 +438,8 @@ esac
 } >> "$STAGE/prompt.md"
 
 case "$ENGINE" in
-  codex) ln -s "$SRC_AUTH" "$STAGE/home/auth.json" ;;
-  kimi) mkdir -p "$STAGE/home/kimi-skills" ;;
+  codex) ln -s "$SRC_AUTH" "$STAGE/engine-home/auth.json" ;;
+  kimi) mkdir -p "$STAGE/engine-home/kimi-skills" ;;
 esac
 
 SEAL_OUT="$(python3 -I "$SCRIPT_DIR/snapshot.py" seal --dir "$STAGE/artifact" 2>&1)" || {
@@ -425,6 +452,8 @@ ROOT_BEFORE="$(root_fingerprint "$ROOT")"
 build_cmd "$STAGE"
 render "$STAGE" > "$CMD_FILE"
 STATUS=0
+START_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+START_S="$(date +%s)"
 (
   cd "$STAGE/artifact"
   if [ "${#ENV_PREFIX[@]}" -gt 0 ]; then
@@ -433,23 +462,44 @@ STATUS=0
     "${cmd[@]}"
   fi
 ) > "$LOG_FILE" 2>&1 < /dev/null || STATUS=$?
+FINISH_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+FINISH_S="$(date +%s)"
+DURATION_S=$((FINISH_S - START_S))
 
 # ---------------------------------------------------------------------------- verify
 VERIFY_STATUS=0
 VERIFY_OUT="$(python3 -I "$SCRIPT_DIR/snapshot.py" verify --snapshot "$STAGE/artifact" 2>&1)" || VERIFY_STATUS=$?
 ROOT_AFTER="$(root_fingerprint "$ROOT")"
 
-if [ "$ENGINE" = "codex" ] && [ -e "$STAGE/home/auth.json" ] && [ ! -L "$STAGE/home/auth.json" ]; then
+# Timing footer on every path that keeps the .log. codex prints "tokens used" and the
+# count on the next line (older builds: on the same line); take the last such pair.
+# The footer is appended after this scan so it can never match itself.
+USAGE_LINE="$(awk '
+  { sub(/\r$/, "") }
+  want && NF { if ($0 ~ /[0-9]/) found = "tokens used: " $0; want = 0; next }
+  tolower($0) ~ /tokens used/ {
+    if ($0 ~ /[0-9]/) { found = $0; want = 0 } else { want = 1 }
+  }
+  END { if (found != "") print found }
+' "$LOG_FILE" 2>/dev/null || true)"
+{
+  printf '# started: %s\n' "$START_TS"
+  printf '# finished: %s\n' "$FINISH_TS"
+  printf '# duration: %ss\n' "$DURATION_S"
+  printf '# usage: %s\n' "${USAGE_LINE:-not reported (the CLI printed no token count)}"
+} >> "$LOG_FILE"
+
+if [ "$ENGINE" = "codex" ] && [ -e "$STAGE/engine-home/auth.json" ] && [ ! -L "$STAGE/engine-home/auth.json" ]; then
   # Codex replaced the symlink with a file: a rotated token that must not be lost.
   cp "$SRC_AUTH" "$SRC_AUTH.bak"
-  cp "$STAGE/home/auth.json" "$SRC_AUTH"
+  cp "$STAGE/engine-home/auth.json" "$SRC_AUTH"
   printf 'spawn_child: codex rewrote auth.json in the isolated home; copied it back to %s (previous copy at %s.bak)\n' "$SRC_AUTH" "$SRC_AUTH" >&2
 fi
 
 discard() {
   [ -e "$STAGE/out.md" ] && mv "$STAGE/out.md" "$OUT_FILE.discarded"
   log_incident "$1; output discarded"
-  die "$1; output discarded (see $LOOP_DIR/rounds.md and $LOG_FILE); rerun with the stricter variant" 4
+  die "$1; output discarded (see $LOOP_DIR/rounds.md and $LOG_FILE); rerun once, and on a second discard switch engine" 4
 }
 if [ "$VERIFY_STATUS" -eq 3 ]; then
   printf '%s\n' "$VERIFY_OUT"
@@ -470,5 +520,5 @@ if [ -s "$STAGE/out.md" ]; then
 else
   die "child produced no output file; see $LOG_FILE" 6
 fi
-printf 'ok: %s (%s bytes); record %s\n' "$OUT_FILE" "$(wc -c < "$OUT_FILE" | tr -d ' ')" "$CMD_FILE"
+printf 'ok: %s (%s bytes, %ss); record %s\n' "$OUT_FILE" "$(wc -c < "$OUT_FILE" | tr -d ' ')" "$DURATION_S" "$CMD_FILE"
 exit 0

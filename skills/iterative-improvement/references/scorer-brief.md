@@ -147,7 +147,8 @@ triage row (`DO`, source: scorer notes), not a footnote.
 **Watch for a scorer that stops discriminating.** If several criteria return the
 same points every round regardless of what changed, those criteria are not
 measuring anything; their "How to check it" is too soft. Tighten them, bump the rubric
-version, and rescore the previous snapshot (see criteria-guide.md, Amending criteria).
+version, and rescore the previous snapshot (`references/criteria-guide.md`, Amending
+criteria; loop mechanics in `references/full-protocol.md` section 5).
 A criterion that cannot move is dead weight in the total and it dilutes every real gain.
 
 **Watch for scorer notes flagging the same ambiguity repeatedly.** That is the

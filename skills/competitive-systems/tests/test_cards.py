@@ -1,78 +1,15 @@
-"""Deterministic checks of the arithmetic the cards and worked examples state.
+"""Deterministic checks of the arithmetic and cross-references the documentation states.
 
-Runs the LPT sketch from cards-scheduling.md against brute force, and checks the numbers
-quoted in worked-example.md (Examples B and D) and the binding-term rule in the LPT card.
-Standard library only; no network; no timing.
+The numbers quoted in worked-example.md (Examples A, B and D), the binding-term rule in the
+LPT card, the Gate 2 flip sizes, and prose cross-references between SKILL.md and the
+references. The card sketches themselves are executed in test_sketches.py. Standard library
+only; no network; no timing.
 """
-import itertools
-import math
 import os
-import random
-import re
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REFS = os.path.join(os.path.dirname(HERE), "references")
-
-
-def card_blocks(fname, heading):
-    """Python fenced blocks inside one `## heading` card."""
-    with open(os.path.join(REFS, fname), encoding="utf-8") as f:
-        src = f.read()
-    start = src.index("## " + heading)
-    card = src[start:]
-    nxt = card.find("\n## ", 3)
-    card = card if nxt == -1 else card[:nxt]
-    return re.findall(r"```python\n(.*?)```", card, re.S)
-
-
-def brute_makespan(durations, m):
-    best = math.inf
-    for assign in itertools.product(range(m), repeat=len(durations)):
-        loads = [0.0] * m
-        for d, w in zip(durations, assign):
-            loads[w] += d
-        best = min(best, max(loads))
-    return best
-
-
-class LptSketchTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        ns = {}
-        exec(card_blocks("cards-scheduling.md", "LPT across workers")[0], ns)
-        cls.lpt = staticmethod(ns["lpt"])
-        cls.lower_bound = staticmethod(ns["lower_bound"])
-
-    def test_against_brute_force(self):
-        rng = random.Random(3)
-        for _ in range(200):
-            m = rng.randint(2, 3)
-            n = rng.randint(0, 6)
-            jobs = [(float(rng.randint(1, 30)), "j%d" % i) for i in range(n)]
-            plan = self.lpt(jobs, m)
-            names = sorted(x for _, bucket in plan for x in bucket)
-            self.assertEqual(names, sorted(name for _, name in jobs))
-            makespan = max(load for load, _ in plan)
-            self.assertAlmostEqual(makespan, max(sum(d for d, n2 in jobs if n2 in b) for _, b in plan)
-                                   if n else 0.0)
-            opt = brute_makespan([d for d, _ in jobs], m) if n else 0.0
-            self.assertLessEqual(makespan, (4.0 / 3 - 1.0 / (3 * m)) * opt + 1e-9)
-            self.assertGreaterEqual(makespan + 1e-9, self.lower_bound(jobs, m))
-
-    def test_deterministic_regardless_of_input_order(self):
-        rng = random.Random(5)
-        jobs = [(float(rng.randint(1, 50)), "job%02d" % i) for i in range(12)]
-        shuffled = list(jobs)
-        rng.shuffle(shuffled)
-        self.assertEqual(self.lpt(jobs, 4), self.lpt(shuffled, 4))
-
-    def test_pinned_jobs_share_worker_zero(self):
-        jobs = [(10.0, "a"), (9.0, "b"), (1.0, "c"), (1.0, "d")]
-        plan = self.lpt(jobs, 2, pinned={"a", "b"})
-        self.assertEqual(sorted(plan[0][1]), ["a", "b"])
-        self.assertEqual(self.lower_bound(jobs, 2, pinned={"a", "b"}), 19.0)
-        self.assertEqual(self.lower_bound(jobs, 2), 10.5)
 
 
 class BindingTermTests(unittest.TestCase):
@@ -94,10 +31,32 @@ class BindingTermTests(unittest.TestCase):
         self.assertAlmostEqual(lb / 60, 20.07, places=2)
         self.assertEqual(self.smallest_m_where_longest_binds(total, longest), 12)
         self.assertAlmostEqual(4.0 / 3 - 1.0 / (3 * m), 1.29, places=2)
-        self.assertAlmostEqual(42.5 / (lb / 60), 2.1, places=1)
-        self.assertAlmostEqual(20.6 / (lb / 60), 1.03, places=2)
-        before, after, iqr_before, iqr_after = 40.4, 20.6, 2.3, 0.8
-        self.assertGreater(before - after, 2 * max(iqr_before, iqr_after))   # noise rule
+        replay, plan = 2538.0, 1208.0                 # dev.py bound makespan output
+        self.assertAlmostEqual(replay / 60, 42.3, places=1)
+        self.assertAlmostEqual(replay / lb, 2.11, places=2)
+        self.assertAlmostEqual(plan / lb - 1, 0.003, places=3)  # "0.3% above LB"
+        self.assertAlmostEqual(replay / plan, 2.10, places=2)
+        before, after = 2424.0, 1236.0                # compare medians: history, reruns
+        self.assertAlmostEqual(before / 60, 40.4, places=1)
+        self.assertAlmostEqual(after / 60, 20.6, places=1)
+        self.assertAlmostEqual(before / lb, 2.01, places=2)
+        self.assertAlmostEqual(after / lb, 1.03, places=2)
+        self.assertAlmostEqual(before / after, 1.96, places=2)
+
+
+class ExampleAArithmeticTests(unittest.TestCase):
+    """Example A: the budget model against the measured times, Gate 2 and Gate 3."""
+
+    def test_budget_matches_measurement_and_report(self):
+        ops = lambda n: 0.0085 * n * n
+        self.assertAlmostEqual(ops(80000) / 1e7, 5.44, places=2)     # measured 5.08 s
+        self.assertAlmostEqual(ops(1.2e6) / 1e7, 1224.0, places=0)   # "1,224 s", ~19 min
+        self.assertAlmostEqual(ops(1.2e7) / 1e7 / 3600, 34.0, places=0)
+        self.assertAlmostEqual(5.08 * 15 ** 1.91 / 60, 15.0, delta=0.2)
+        cap = 1 / (1 - 0.98)
+        self.assertAlmostEqual(cap, 50.0)
+        self.assertLess(28.78, cap)                                  # within the Amdahl cap
+        self.assertAlmostEqual(1.37 / 0.0476, 28.78, delta=0.1)
 
 
 class StopAnswerArithmeticTests(unittest.TestCase):
@@ -138,7 +97,27 @@ class ProseCrossReferenceTests(unittest.TestCase):
     def test_measurement_covers_expensive_runs(self):
         text = self.read("measurement.md")
         self.assertIn("Expensive runs", text)
-        self.assertIn("flips", text)
+        self.assertIn("Hand rule", text)
+        self.assertNotIn("## 2. Gate 1", text, "gate text lives once, in SKILL.md")
+        with open(os.path.join(os.path.dirname(REFS), "SKILL.md"), encoding="utf-8") as f:
+            skill = f.read()
+        self.assertIn("flip size", skill)
+
+    def test_guards_state_the_correctness_rule_and_tests(self):
+        text = self.read("guards.md")
+        self.assertIn("the oracle runs before the timing", text)
+        self.assertNotRegex(text, r"\d+ to\s+\d+%", "uncited statistic")
+        self.assertIn("mutate the input in place", text)
+        self.assertIn("swap the run order", text)
+        self.assertEqual(text.count("\n1. "), 2)       # oracle stack and checklist both numbered
+        for n in range(1, 10):
+            self.assertIn("\n%d. " % n, text)
+
+    def test_example_b_oracle_line_matches_the_instance(self):
+        text = self.read("worked-example.md")
+        self.assertIn("brute force m^n for n <= 8, m <= 3 on 200 random cases, seed 3: pass "
+                      "(checks the algorithm); the m = 8 plan itself is checked against LB (0.3% "
+                      "above) and the (4/3 - 1/24) = 1.29 bound.", text)
 
 
 if __name__ == "__main__":

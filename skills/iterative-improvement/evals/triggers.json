@@ -1,0 +1,257 @@
+{
+  "description_under_test": "SKILL.md frontmatter description",
+  "should_trigger": [
+    {
+      "message": "improve this landing page",
+      "domain": "page",
+      "note": "\"improve this\" on a page with no oracle"
+    },
+    {
+      "message": "polish this settings screen before the demo",
+      "domain": "ui",
+      "note": "\"polish this\" on one screen; lite mode"
+    },
+    {
+      "message": "make the pricing page world class",
+      "domain": "page",
+      "note": "\"world class\"; full mode by the table"
+    },
+    {
+      "message": "take our onboarding flow to the next level",
+      "domain": "design",
+      "note": "\"next level\" on a multi-screen design"
+    },
+    {
+      "message": "this is good but the hero section still feels flat, can you work on it",
+      "domain": "page",
+      "note": "\"this is good but\"; open-ended quality"
+    },
+    {
+      "message": "audit and fix the docs site",
+      "domain": "docs",
+      "note": "\"audit and fix it\" on docs"
+    },
+    {
+      "message": "iterate on this dashboard layout",
+      "domain": "ui",
+      "note": "\"iterate on this\" with no test to pass"
+    },
+    {
+      "message": "run 3 rounds on the checkout page",
+      "domain": "page",
+      "note": "\"run N rounds\"; round count means full mode"
+    },
+    {
+      "message": "keep going on the API reference until it is great",
+      "domain": "docs",
+      "note": "\"keep going until it is great\"; no numeric target"
+    },
+    {
+      "message": "make our README better",
+      "domain": "docs",
+      "note": "short docs request relying on the fit test"
+    },
+    {
+      "message": "tighten this launch email",
+      "domain": "copy",
+      "note": "\"tighten this\" on copy"
+    },
+    {
+      "message": "can you make this component nicer",
+      "domain": "ui",
+      "note": "short one-file request with none of the trigger words"
+    },
+    {
+      "message": "improve the CLI error messages so users know what to do next",
+      "domain": "copy",
+      "note": "copy inside code, judged on clarity not tests"
+    },
+    {
+      "message": "the module boundaries in src/billing bother me, polish them",
+      "domain": "architecture",
+      "note": "architecture with no oracle; two people could disagree"
+    },
+    {
+      "message": "the service layer works but the architecture is messy, iterate on it until it is clean",
+      "domain": "architecture",
+      "note": "\"works but\" plus iterate, no measure named"
+    },
+    {
+      "message": "run 5 rounds on our package structure and stop at 85",
+      "domain": "architecture",
+      "note": "round count and target score on architecture"
+    },
+    {
+      "message": "audit and fix the code quality of the auth module",
+      "domain": "code",
+      "note": "\"audit and fix\" on code quality, not a defect"
+    },
+    {
+      "message": "refactor utils.py so it reads well, a few rounds",
+      "domain": "code",
+      "note": "readability is open-ended; rounds asked"
+    },
+    {
+      "message": "improve this function",
+      "domain": "code",
+      "note": "short code request with no failing test"
+    },
+    {
+      "message": "the colours and spacing across the app feel inconsistent, make the visual design coherent",
+      "domain": "design",
+      "note": "design coherence with no single right answer"
+    },
+    {
+      "message": "make the empty states in the mobile app look less generic",
+      "domain": "design",
+      "note": "visual design, open-ended"
+    },
+    {
+      "message": "take the marketing site design to the next level, you have about $20 of API spend",
+      "domain": "design",
+      "note": "\"next level\" plus a money budget"
+    },
+    {
+      "message": "polish the onboarding modal, I need it in an hour",
+      "domain": "ui",
+      "note": "\"polish\" plus a time budget"
+    },
+    {
+      "message": "tighten the product description copy on the homepage",
+      "domain": "copy",
+      "note": "\"tighten\" on marketing copy"
+    },
+    {
+      "message": "this is good but the tagline and subheads read like filler",
+      "domain": "copy",
+      "note": "\"this is good but\" on copy"
+    },
+    {
+      "message": "make the contributor guide world class",
+      "domain": "docs",
+      "note": "\"world class\" on docs"
+    },
+    {
+      "message": "keep going until the settings page feels great",
+      "domain": "page",
+      "note": "\"keep going until\" with a feeling, not a number"
+    }
+  ],
+  "should_not_trigger": [
+    {
+      "message": "the signup button does nothing in Safari, fix it",
+      "exclusion": "debugging",
+      "note": "one wrong behaviour"
+    },
+    {
+      "message": "why does the cart total show NaN after I remove an item",
+      "exclusion": "debugging",
+      "note": "one defect to diagnose"
+    },
+    {
+      "message": "the nightly job crashes with a KeyError on line 88, fix it",
+      "exclusion": "debugging",
+      "note": "a stack trace names the defect"
+    },
+    {
+      "message": "users get logged out every 5 minutes, find out why",
+      "exclusion": "debugging",
+      "note": "one wrong behaviour to trace"
+    },
+    {
+      "message": "the dark mode toggle stopped persisting after the last deploy",
+      "exclusion": "debugging",
+      "note": "regression to locate, not quality to raise"
+    },
+    {
+      "message": "add a logout button to the navbar that clears the session",
+      "exclusion": "definite-done",
+      "note": "a feature with a clear done state"
+    },
+    {
+      "message": "add a login page with email and password",
+      "exclusion": "definite-done",
+      "note": "build it; done when it works"
+    },
+    {
+      "message": "create a CSV export endpoint for orders",
+      "exclusion": "definite-done",
+      "note": "a feature with a clear done state"
+    },
+    {
+      "message": "rename getUser to fetchUser everywhere",
+      "exclusion": "definite-done",
+      "note": "mechanical change, done when no old name remains"
+    },
+    {
+      "message": "add a dark mode option to the settings page",
+      "exclusion": "definite-done",
+      "note": "a feature, even though it touches design"
+    },
+    {
+      "message": "iterate on the parser until pytest passes",
+      "exclusion": "oracle",
+      "note": "the test suite is the measure"
+    },
+    {
+      "message": "keep going until the benchmark hits 95",
+      "exclusion": "oracle",
+      "note": "a named numeric threshold is the measure"
+    },
+    {
+      "message": "make the lint pass",
+      "exclusion": "oracle",
+      "note": "the linter is the measure"
+    },
+    {
+      "message": "iterate on the API client until npm test is green, keep going until it passes",
+      "exclusion": "oracle",
+      "note": "iterate wording, test oracle"
+    },
+    {
+      "message": "get the type checker down to zero errors",
+      "exclusion": "oracle",
+      "note": "the type checker is the measure"
+    },
+    {
+      "message": "improve the model until validation accuracy is above 0.9",
+      "exclusion": "oracle",
+      "note": "\"improve\" with a numeric threshold the user names"
+    },
+    {
+      "message": "keep tuning the query until it runs under 200 ms",
+      "exclusion": "oracle",
+      "note": "a timing threshold is the measure"
+    },
+    {
+      "message": "explain how the snapshot script works",
+      "exclusion": "out-of-domain",
+      "note": "an explanation, no edits"
+    },
+    {
+      "message": "write a plan for migrating the database to Postgres",
+      "exclusion": "out-of-domain",
+      "note": "a plan, not an artifact to improve"
+    },
+    {
+      "message": "deploy the site to production",
+      "exclusion": "out-of-domain",
+      "note": "an operation, not an improvement"
+    },
+    {
+      "message": "fix this typo in the README",
+      "exclusion": "out-of-domain",
+      "note": "a one-off edit; nothing to judge"
+    },
+    {
+      "message": "brainstorm a few names for the CLI",
+      "exclusion": "out-of-domain",
+      "note": "discussion, not iteration on an artifact"
+    },
+    {
+      "message": "what does this regex match",
+      "exclusion": "out-of-domain",
+      "note": "a question"
+    }
+  ]
+}

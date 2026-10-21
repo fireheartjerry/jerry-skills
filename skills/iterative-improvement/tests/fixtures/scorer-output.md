@@ -5,7 +5,7 @@
 | Gate | Result | Evidence |
 |------|--------|----------|
 | G1   | PASS   | evidence/g1-build.log: `npm run build` exit code 0 (14 lines, ends "built in 412ms") |
-| G2   | FAIL   | evidence/g2-overflow.txt: `node scripts/check-overflow.mjs http://localhost:4321 390` printed scrollWidth 412 |
+| G2   | FAIL   | evidence/g2-overflow.txt: `node tools/check-overflow.mjs http://localhost:4321 390` printed scrollWidth 412 |
 | G3   | PASS   | evidence/g3-tokens-diff.txt is empty, exit 0 |
 
 ## Per-criterion
@@ -21,7 +21,7 @@
 | C8 | Accessibility | 8 | 16 | evidence/c8-axe.json: 0 critical, 2 serious (color-contrast on footer links, label missing on the newsletter input at index.html:120); matches the 8 anchor |
 
 ## Unscoreable
-- C4: needs the output of `node scripts/frames.mjs http://localhost:4321 390 844 300` (frame files plus the printed scrollWidth and identical-frame indices) under evidence/.
+- C4: needs the output of `node tools/frames.mjs http://localhost:4321 390 844 300` (frame files plus the printed scrollWidth and identical-frame indices) under evidence/.
 - C7: needs the JSON from `npx lighthouse http://localhost:3000 --only-categories=performance --output=json --quiet` on the served build.
 
 ## Notes

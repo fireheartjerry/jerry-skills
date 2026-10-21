@@ -1,4 +1,5 @@
-"""worktree subdir, branch handling, reap scoping and safety, owner token."""
+"""worktree subdir, branch handling, reap scoping and safety, owner token,
+roles (read-only by default for review and research), --base and --copy."""
 
 import os
 import shutil
@@ -63,21 +64,32 @@ class IsolationTests(SessionTest):
         self.assertTrue(self.branch_exists(repo, "agent-session/wt"))
         self.assertEqual(self.wait("wt").returncode, 0)
         self.assertEqual(len(self.git(repo, "worktree", "list").stdout.strip().splitlines()), 2)
-        # Unmerged commits: the branch is kept and the error says what to do.
+        # Unmerged commits: --replace is refused before anything is removed,
+        # and the error names both ways out (collect, or discard by tip sha).
         wt = self.meta("wt")["worktree"]["path"]
         with open(os.path.join(wt, "NEW.md"), "w") as fh:
             fh.write("child work\n")
         self.assertEqual(self.git(wt, "add", "NEW.md").returncode, 0)
         self.assertEqual(self.git(wt, "commit", "-q", "-m", "child work").returncode, 0)
+        tip = self.head(wt)
         cp = self.run_as("spawn", "claude", "wt", repo, "third", "--worktree", "--replace")
         self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
         self.assertIn("agent-session/wt", cp.stderr)
-        self.assertIn("branch -D", cp.stderr)
-        self.assertIn("kept", cp.stderr)
+        self.assertIn("not merged", cp.stderr)
+        self.assertIn("collect wt --merge", cp.stderr)
+        self.assertIn("--discard %s" % tip[:12], cp.stderr)
         self.assertTrue(self.branch_exists(repo, "agent-session/wt"))
-        self.assertFalse(os.path.exists(self.sdir("wt")))
-        self.assertEqual(len(self.git(repo, "worktree", "list").stdout.strip().splitlines()), 1)
-        self.assertEqual(self.git(repo, "branch", "-D", "agent-session/wt").returncode, 0)
+        self.assertTrue(self.has("wt", "result.json"))
+        self.assertEqual(len(self.git(repo, "worktree", "list").stdout.strip().splitlines()), 2)
+        # A dirty worktree is refused the same way.
+        with open(os.path.join(wt, "DIRTY.md"), "w") as fh:
+            fh.write("uncommitted\n")
+        cp = self.run_as("spawn", "claude", "wt", repo, "third", "--worktree", "--replace")
+        self.assertEqual(cp.returncode, 2)
+        self.assertIn("uncommitted changes", cp.stderr)
+        os.unlink(os.path.join(wt, "DIRTY.md"))
+        self.ok("reap", "wt", "--discard", tip)
+        self.assertFalse(self.branch_exists(repo, "agent-session/wt"))
         self.spawn("claude", "wt", "fourth", "--worktree", directory=repo)
         self.assertEqual(self.wait("wt").returncode, 0)
 
@@ -197,11 +209,19 @@ class IsolationTests(SessionTest):
         self.assertEqual(self.git(wt_b, "add", "NEW.md").returncode, 0)
         cp = self.git(wt_b, "commit", "-q", "-m", "child work")
         self.assertEqual(cp.returncode, 0, cp.stderr)
+        # A dry run reports the branch the real reap would keep.
+        cp = self.ok("reap", "--dry-run")
+        self.assertIn("would keep branch agent-session/b", cp.stdout)
+        self.assertIn("kept-branches 1", cp.stdout)
+        self.assertTrue(os.path.exists(self.sdir("b")))
         cp = self.ok("reap")
         self.assertIn("reaped a", cp.stdout)
         self.assertIn("reaped b", cp.stdout)
         self.assertIn("kept branch agent-session/b", cp.stdout)
         self.assertIn("branch -D agent-session/b", cp.stdout)
+        # The child's state is gone, so the hint is plain git, not `collect`.
+        self.assertIn("merge agent-session/b", cp.stdout)
+        self.assertNotIn("collect", cp.stdout)
         self.assertIn("kept-branches 1", cp.stdout)
         self.assertFalse(self.branch_exists(repo, "agent-session/a"))
         self.assertTrue(self.branch_exists(repo, "agent-session/b"))
@@ -248,3 +268,94 @@ class IsolationTests(SessionTest):
         self.assertTrue(owner.startswith("proc:claude:%s:" % bashpid), owner)
         listing = self.ok("list", env={"AGENT_SESSIONS_OWNER": None}).stdout
         self.assertIn("claude:%s" % bashpid, listing)
+
+    def test_role_defaults_readonly(self):
+        self.spawn("claude", "rv", "look", "--role", "review")
+        self.spawn("claude", "rw", "look", "--role", "review", "--write")
+        self.spawn("gemini", "rs", "look", "--role", "research")
+        self.spawn("codex", "rc", "look", "--role", "research")
+        self.spawn("claude", "im", "build")
+        for name in ("rv", "rw", "rs", "rc", "im"):
+            self.wait_result(name)
+        argv = self.calls("rv")[0]["argv"]
+        self.assertIn("dontAsk", argv)
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+        self.assertIn("--dangerously-skip-permissions", self.calls("rw")[0]["argv"])
+        self.assertIn("--dangerously-skip-permissions", self.calls("im")[0]["argv"])
+        argv = self.calls("rs")[0]["argv"]
+        self.assertEqual(argv[argv.index("--approval-mode") + 1], "plan")
+        argv = self.calls("rc")[0]["argv"]
+        self.assertIn('sandbox_mode="read-only"', argv)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+        for name, role, readonly in (("rv", "review", True), ("rw", "review", False), ("rs", "research", True),
+                                     ("rc", "research", True), ("im", "implementation", False)):
+            self.assertEqual(self.meta(name)["role"], role)
+            self.assertEqual(self.meta(name)["readonly"], readonly)
+            self.assertEqual(self.result(name)["role"], role)
+        cp = self.run_as("spawn", "claude", "bad", self.work, "x", "--role", "boss")
+        self.assertEqual(cp.returncode, 2)
+        self.assertIn("unknown role", cp.stderr)
+        cp = self.run_as("spawn", "claude", "bad", self.work, "x", "--readonly", "--write")
+        self.assertEqual(cp.returncode, 2)
+        # A reviewer has nothing to verify unless it may write.
+        cp = self.run_as("spawn", "claude", "bad", self.work, "x", "--role", "review", "--verify", "true")
+        self.assertEqual(cp.returncode, 2)
+        self.assertIn("--write", cp.stderr)
+
+    def test_base_and_copy(self):
+        repo = self.repo()
+        with open(os.path.join(repo, ".gitignore"), "w") as fh:
+            fh.write(".env\nnode_modules/\n")
+        self.commit_all(repo, "ignore")
+        self.assertEqual(self.git(repo, "checkout", "-q", "-b", "feature").returncode, 0)
+        with open(os.path.join(repo, "feature.txt"), "w") as fh:
+            fh.write("feature\n")
+        self.commit_all(repo, "feature")
+        feature_tip = self.head(repo)
+        self.assertEqual(self.git(repo, "checkout", "-q", "main").returncode, 0)
+        with open(os.path.join(repo, ".env"), "w") as fh:
+            fh.write("SECRET=1\n")
+        os.makedirs(os.path.join(repo, "node_modules", "pkg"))
+        with open(os.path.join(repo, "node_modules", "x.js"), "w") as fh:
+            fh.write("x\n")
+        with open(os.path.join(repo, "node_modules", "pkg", "index.js"), "w") as fh:
+            fh.write("pkg\n")
+        os.symlink("pkg/index.js", os.path.join(repo, "node_modules", "link.js"))
+        self.spawn("claude", "b", "hi", "--worktree", "--base", "feature",
+                   "--copy", ".env,node_modules,nope,../outside,.git/config", directory=repo)
+        res = self.wait_result("b")
+        wt = self.meta("b")["worktree"]
+        self.assertEqual(wt["base_commit"], feature_tip)
+        self.assertEqual(wt["base_ref"], "feature")
+        self.assertEqual(res["git"]["base_commit"], feature_tip)
+        self.assertTrue(os.path.exists(os.path.join(wt["path"], "feature.txt")))
+        with open(os.path.join(wt["path"], ".env")) as fh:
+            self.assertEqual(fh.read(), "SECRET=1\n")
+        self.assertTrue(os.path.exists(os.path.join(wt["path"], "node_modules", "pkg", "index.js")))
+        self.assertTrue(os.path.islink(os.path.join(wt["path"], "node_modules", "link.js")))
+        warnings = res["warnings"]
+        self.assertTrue(any("nope" in w and "not found" in w for w in warnings), warnings)
+        self.assertTrue(any("../outside" in w for w in warnings), warnings)
+        self.assertTrue(any(".git/config" in w for w in warnings), warnings)
+        self.assertFalse(os.path.exists(os.path.join(self.box, "outside")))
+        # The copied, ignored files do not make the worktree dirty.
+        self.assertFalse(res["git"]["dirty"])
+        self.assertEqual(self.run_as("spawn", "claude", "c", repo, "hi", "--base", "main").returncode, 2)
+        self.assertEqual(self.run_as("spawn", "claude", "c", repo, "hi", "--copy", ".env").returncode, 2)
+        cp = self.run_as("spawn", "claude", "c", repo, "hi", "--worktree", "--base", "nosuch")
+        self.assertEqual(cp.returncode, 2)
+        self.assertIn("nosuch", cp.stderr)
+
+    def test_base_resolved_at_start_for_stacked_children(self):
+        """--after a --base agent-session/a stacks on a's finished branch: the
+        base is resolved when the child starts, not when it is spawned."""
+        repo = self.repo()
+        self.spawn("claude", "a", "@@sleep:1 @@edit:a.txt=from_a @@commit:a_work", "--worktree", directory=repo)
+        self.spawn("claude", "b", "build on a", "--worktree", "--after", "a", "--base", "agent-session/a",
+                   directory=repo)
+        res = self.wait_result("b", timeout=30)
+        self.assertEqual(res["status"], "ok", res.get("reason"))
+        a_tip = self.git(repo, "rev-parse", "agent-session/a").stdout.strip()
+        wt = self.meta("b")["worktree"]
+        self.assertEqual(wt["base_commit"], a_tip)
+        self.assertTrue(os.path.exists(os.path.join(wt["path"], "a.txt")))

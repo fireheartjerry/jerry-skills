@@ -1,0 +1,14 @@
+{
+  "name": "fixture-js",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "echo lint ok",
+    "typecheck": "echo typecheck ok",
+    "test": "echo test ok"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5",
+    "vitest": "1.6.0"
+  }
+}

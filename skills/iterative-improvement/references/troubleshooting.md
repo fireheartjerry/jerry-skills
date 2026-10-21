@@ -41,16 +41,23 @@ never masquerade as an approved one.
 
 ## Noise: what n and T mean
 
-`n` is the gap between two scorer runs on the identical baseline snapshot; it measures
-the instrument, not the work. `T = max(3, 2n)` is the smallest movement the loop treats
-as real. `n > 8` means the check lines are soft: find the criteria where runs 0a and 0b
-disagree most (the per-criterion tables make this a subtraction) and rewrite their
-"How to check it" into a procedure with a count, a measurement or a quoted line. Then
-run both baseline runs again. After any rubric change in full mode, rescore the
-previous snapshot twice and recompute `n` and `T` with `score_math.py baseline` from
-that pair; the rubric is a new instrument (lite: once, `T` stays 3). Never compare
-numbers from different scorer pins; a changed engine, model or CLI version is a new
-instrument, and the previous snapshot must be rescored under it first (`.cmd` files
+`n` is the gap between two scorer runs on the identical baseline snapshot and evidence;
+it measures the instrument, not the work. `T = max(3, 2n)` is the smallest movement the
+loop treats as real. Two identical runs are not proof of a stable instrument, and two
+runs more than 8 apart may be one aberrant run; in both cases `score_math.py baseline A B`
+prints `third-run=needed`. Run the scorer a third time on the same snapshot and evidence
+and pass all three (`baseline A B C`). The script keeps the two runs that agree within 8
+and names the outlier; log the outlier in the score log with its per-criterion diff
+against the kept pair, and tighten the criteria where it disagreed at the next
+amendment. If no two runs agree within 8 the script prints `soft=true`: the check lines
+do not discriminate. Find the criteria with the largest per-criterion disagreement (the
+tables make this a subtraction), rewrite their "How to check it" into a procedure with a
+count, a measurement or a quoted line, and take two fresh baseline runs. After any
+rubric change in full mode, rescore the previous snapshot twice and recompute `n` and
+`T` with `score_math.py baseline` from that pair, adding a third run when it says
+`third-run=needed`; the rubric is a new instrument (lite: once, `T` stays 3). Never
+compare numbers from different scorer pins; a changed engine, model or CLI version is a
+new instrument, and the previous snapshot must be rescored under it first (`.cmd` files
 make the pin diff mechanical: they must be byte-identical).
 
 ## Gate stuck at FAIL
@@ -74,8 +81,29 @@ criterion's "How to check it" line yourself, once, save the output under
 reason for any retake). Pass the directory with `spawn_child.sh --evidence` on the
 next run. If the check line is prose that cannot be run as a command, that is the
 defect: amend the criterion so its check line names a command, bump the rubric
-version and rescore. Do not read a `/80` number against a `/100` one, and do not
+version and rescore (`references/full-protocol.md` section 5). Do not read a `/80` number against a `/100` one, and do not
 declare target hit while any criterion is N/A.
+
+## Budget in money or time
+
+The user said "about 90 minutes" or "around 15 dollars" and you need a round ceiling.
+Measure, do not guess: every child run's `.log` ends with `# started`, `# finished`,
+`# duration: Ns` and `# usage:` (codex's token count, or `not reported`: claude and kimi
+print none). Spent time is the sum of those durations plus your own work between them.
+Money is not measured by either supported engine (codex reports tokens, not dollars), so
+agree a time or round equivalent with the user and call any dollar figure "estimated".
+After each round convert with `score_math.py budget --total <budget> --spent <measured
+so far> --per-round <measured cost of the last round> --rounds <round ceiling>
+--rounds-used <rounds run>`. Before round 1, `--total 90 --spent 35 --per-round 12
+--rounds 5` prints `remaining=55 rounds-used=0 rounds-affordable=4 max-rounds=4`; after
+round 3, `--total 90 --spent 66 --per-round 20 --rounds 5 --rounds-used 3` prints
+`max-rounds=4` (3 run plus 1 affordable). That `max-rounds` is a total, the same scale
+as `decide --rounds-used`, so pass it to `decide --max-rounds` unchanged. Never start a round the
+remaining budget cannot finish: `rounds-affordable=0` means stop now and report, even
+with rounds left on the ceiling. Before round 1 has run there is no measured per-round
+cost; use the round 0 scorer durations as the estimate and say "estimated" until round 1
+replaces it. The report quotes measured numbers
+only, taken from the footers; never an invented duration or spend.
 
 ## Decision rule questions
 
@@ -83,16 +111,18 @@ declare target hit while any criterion is N/A.
   rescored reference, so `len(series) - 1` undercounts. Pass `--rounds-used N` with the
   real round number every time; the detail line prints `N of R rounds used` so you can
   check it.
-- **Two small drops were not called a regression.** Correct: a single drop inside `T`
-  is noise, up or down. Regression needs one drop of `T` or two drops summing to `T`.
-  Two small moves in either direction trip the plateau rule instead.
-- **Two decent rounds were called a plateau.** Plateau means two consecutive deltas
-  each inside `T` whose total does not exceed `T`. If `+5, +3` against `T=8` stops you,
-  check `n`: a noise floor of 4 means a move of 5 or of 3 is indistinguishable from
-  nothing, and the two together have not shown more than one `T`. Budget left is not a
-  counter-argument; the report tells the user what is left and they can ask for more.
-  Two sub-T deltas that add up past `T` (`+6, +6`) are a slow real trend and the script
-  says `CONTINUE`.
+- **`STOP regression` did not fire on two small drops.** Correct: a single drop inside
+  `T` is noise, up or down. Regression needs one drop of `T` or two drops summing to
+  `T`. Two small moves in either direction trip the plateau rule instead.
+- **`STOP plateau` fired after two decent rounds.** Plateau means two consecutive
+  deltas each inside `T` whose total does not exceed `T`. If `+5, +3` against `T=8`
+  stops you, check `n`: a noise floor of 4 means a move of 5 or of 3 is
+  indistinguishable from nothing, and the two together have not shown more than one
+  `T`. Budget left is not a counter-argument; the report tells the user what is left and
+  they can ask for more.
+- **`CONTINUE slow real trend` after two moves inside `T`.** Two sub-T deltas that add
+  up past `T` (`+6, +6` against `T=8`) are a slow real trend, not a plateau; the script
+  says `CONTINUE` and names the trend in its detail line. Keep going.
 
 ## Failure modes
 
@@ -110,9 +140,14 @@ declare target hit while any criterion is N/A.
 - **Death by round count.** Five rounds is a ceiling. If round 3 hits the target or
   round 4 plateaus, stop and say so.
 - **The child changed the staged copy (exit 4).** `spawn_child.sh` discards the output
-  and logs the incident. Rerun with the stricter variant: Claude with `--no-bash`, kimi
-  replaced by another engine. Codex is already read-only, so a Codex exit 4 means the
-  artifact root changed during the run: find out who edited it, then rerun.
+  and logs the incident. Claude and Codex children cannot write to the stage, so their
+  exit 4 almost always means ROOT changed during the run: find out who edited it (you, a
+  watcher, a formatter), then rerun once; a second discard means switch engine. A kimi
+  exit 4 means kimi wrote: replace it.
+- **"no files to snapshot" (snapshot.py, exit 2) or "snapshot manifest lists no files"
+  (spawn_child.sh, exit 3).** ROOT sits under a gitignored path of an enclosing repo,
+  every file is ignored or secret-shaped, or `--path` is wrong. Check with `git -C ROOT ls-files --cached --others
+  --exclude-standard`, move the artifact or pass the right `--path`, and snapshot again.
 - **The child hangs.** Both `codex exec` and `claude -p` wait on an open stdin when
   launched from an agent's shell tool; the script redirects stdin from `/dev/null` and
   applies a 900 second default timeout. A hang despite that is an auth prompt: run the
@@ -125,11 +160,19 @@ declare target hit while any criterion is N/A.
   reason is probably not convincing: write a better one, or reconsider the finding.
 - **The scorer's Notes keep naming the same defect.** Nobody triaged it because no
   reviewer raised it. Notes are findings; give them a row.
+- **Budget overrun.** A round was started that the time or money budget could not
+  finish. Before every round run `score_math.py budget --rounds-used <rounds run>` and
+  pass its `max-rounds` to `decide`.
 
 ## Lite mode escalation
 
-Escalate to full when the lite review returns 3 or more `major` or `critical` findings,
-or the user asks for more rounds or a target. Move the criteria doc to its full-mode
+Escalate to full when lite triage verifies 3 or more DO NOW or DO rows that need a file
+outside the one file or component lite was scoped to, or the user asks for more rounds, a
+target or a budget. The reviewer's severity labels never escalate by themselves: the
+brief tells the reviewer to be hostile, so an ordinary README routinely draws several
+`major` findings that lite fixes in place (three of three live runs did before this rule
+changed). Read `references/full-protocol.md` first; the lite
+card does not contain the full rules. Move the criteria doc to its full-mode
 location, add criteria up to 6 to 12 and rebalance to 100, run the two-run baseline on
 the current state (this becomes the new row 0 with `n` and `T`), classify gates, and
 continue under the full rules. Say in the report that the loop started lite and why it

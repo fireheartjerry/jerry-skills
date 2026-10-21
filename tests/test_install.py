@@ -68,7 +68,8 @@ class InstallCase(unittest.TestCase):
         self.assertEqual(os.path.realpath(d), os.path.realpath(self.src(name)))
 
     def backups(self, target, name):
-        return sorted(glob.glob(self.dest(target, name) + ".bak-*"))
+        d = self.dest(target, name)
+        return sorted(glob.glob(os.path.join(os.path.dirname(d) + ".bak", name + "-*")))
 
     def tree(self, root):
         out = []

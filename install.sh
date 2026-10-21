@@ -4,7 +4,8 @@
 #
 # Works on macOS bash 3.2 and Linux. Idempotent: re-running changes nothing that
 # is already correct. Never overwrites: an existing directory or file in the way
-# is moved to <path>.bak-<timestamp> first (a copy this script made earlier is
+# is moved to <skills-dir>.bak/<name>-<timestamp> first, outside the directory
+# agents scan, so a backup never loads as a duplicate skill (a copy this script made earlier is
 # recognised by its .install-source marker and refreshed in place).
 #
 #   ./install.sh                      symlink every skill into all three targets
@@ -128,7 +129,7 @@ n_linked=0; n_copied=0; n_unchanged=0; n_backed_up=0; n_removed=0; n_skipped=0
 
 backup_path() {
   local base cand n
-  base="$1.bak-$(date +%Y%m%d-%H%M%S)"
+  base="$(dirname "$1").bak/$(basename "$1")-$(date +%Y%m%d-%H%M%S)"
   cand="$base"; n=1
   while [ -e "$cand" ] || [ -L "$cand" ]; do
     cand="$base-$n"; n=$((n + 1))
@@ -144,6 +145,7 @@ move_aside() { # target name dest what
   local bak
   bak="$(backup_path "$3")"
   say "$1" "backup" "$2: existing $4 moved to $bak"
+  run mkdir -p "$(dirname "$bak")"
   run mv "$3" "$bak"
   n_backed_up=$((n_backed_up + 1))
 }
@@ -230,7 +232,7 @@ uninstall_one() { # target name
     say "$target" "absent" "$name: not installed"
   fi
 
-  backups="$(ls -d "$dest".bak-* 2>/dev/null || true)"
+  backups="$(ls -d "$(dirname "$dest").bak/$name"-* 2>/dev/null || true)"
   if [ -n "$backups" ]; then
     say "$target" "note" "$name: backups present, restore or delete by hand: $(printf '%s' "$backups" | tr '\n' ' ')"
   fi

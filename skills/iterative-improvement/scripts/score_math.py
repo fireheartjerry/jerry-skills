@@ -1,14 +1,39 @@
 #!/usr/bin/env python3
-"""Arithmetic for the improvement loop: baseline, noise floor and the stop rules.
+"""Arithmetic for the improvement loop: baseline, noise floor, budget and the stop rules.
 
-usage: score_math.py baseline A B [--json]
+usage: score_math.py baseline A B [C] [--json]
+       score_math.py budget --total X --spent Y --per-round Z [--rounds R]
+                            [--rounds-used N] [--json]
        score_math.py decide --threshold T --target X --max-rounds R --scores S0,S1,...
                             [--rounds-used N | --first-round K]
                             [--gates PASS|FAIL] [--confirm-score C] [--json]
 
-baseline A B   A and B are two scorer runs on the same unmodified snapshot. Prints
+baseline A B   Two scorer runs on the same unmodified snapshot and evidence. Prints
                baseline=<mean, half up> noise=<|A-B|> threshold=<max(3, 2*noise)>
-               soft=<true when noise > 8>. Lite mode skips this and uses T=3.
+               soft=false third-run=<needed|no>. A third run is needed when the two
+               agree exactly (no information about spread) or differ by more than 8
+               (one run may be aberrant); softness is judged only once the third run
+               is in. Lite mode skips this and uses T=3.
+
+baseline A B C Three runs. Sorted lo <= mid <= hi with gaps g1 = mid-lo, g2 = hi-mid:
+                 range <= 8                   mean of three, noise = range
+                 one gap <= 8, gaps unequal   the run on the wide side is the outlier;
+                                              baseline and noise come from the other
+                                              two, log the outlier in the score log
+                 otherwise (no single outlier: mean of three, noise = range, soft=true:
+                 equal gaps, or both > 8)     tighten the criteria and rebaseline
+               Line 1 ends third-run=done outlier=<value|none>; a detail line follows
+               when there is an outlier or the check lines are soft.
+
+budget         Units are the caller's (minutes or dollars) and must be consistent.
+               remaining = total - spent (may be negative); rounds-affordable =
+               max(0, floor(remaining / per-round)), the rounds still to come;
+               max-rounds = rounds-used + rounds-affordable, capped at --rounds when
+               given. max-rounds is a total ceiling on the same scale as decide's
+               rounds used, so pass it to decide as --max-rounds unchanged.
+               --rounds-used is the number of real rounds already run (default 0,
+               right only before round 1). Exit 2 when --total or --per-round is not
+               positive, or --spent or --rounds-used is negative.
 
 decide         --scores is the comparable series, first entry the baseline (or the
                rescored reference after a rubric change), last entry the latest
@@ -16,6 +41,10 @@ decide         --scores is the comparable series, first entry the baseline (or t
                compared on the scaled value round(raw*100/max) and a round whose
                adjusted max differs from the previous one is incomparable (no
                delta). Raw must satisfy 0 <= raw <= max (exit 2 otherwise).
+               --max-rounds is the total round ceiling: the one the user agreed to,
+               or budget's max-rounds (already capped by that ceiling). --target is
+               0 to 100; --confirm-score takes the same forms as --scores and must
+               have the same adjusted max as the last entry.
 
                Rounds used is NOT the series length. After a rubric amendment the
                series restarts from the rescored reference, so pass --rounds-used N
@@ -46,7 +75,7 @@ decide         --scores is the comparable series, first entry the baseline (or t
 import argparse
 import json
 import sys
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
 
 
 def round_half_up(value):
@@ -87,26 +116,159 @@ def parse_score(token):
     return {"raw": float(raw), "max": float(adjusted), "scaled": scaled, "na": adjusted < 100}
 
 
-def cmd_baseline(args):
+def fmt(value):
+    """Render a Decimal for text output: whole numbers without a decimal point."""
+    value = Decimal(str(value))
+    if value == value.to_integral_value():
+        return str(int(value))
+    return format(value.normalize(), "f")
+
+
+def parse_decimal(text, what):
     try:
-        a = Decimal(args.a)
-        b = Decimal(args.b)
-    except Exception:
-        fail("baseline takes two numeric scores, got %r %r" % (args.a, args.b))
-    if a < 0 or b < 0 or a > 100 or b > 100:
-        fail("baseline scores must be between 0 and 100, got %s %s" % (args.a, args.b))
+        value = Decimal(text)
+    except (InvalidOperation, ValueError, TypeError):
+        fail("%s is not numeric: %r" % (what, text))
+    if not value.is_finite():
+        fail("%s is not numeric: %r" % (what, text))
+    return value
+
+
+THIRD_RUN_ZERO = ("two identical runs say nothing about spread; run the scorer a third time "
+                  "on the same snapshot and evidence and pass all three runs")
+THIRD_RUN_WIDE = ("two runs %s apart may be one aberrant run or soft check lines; run a third "
+                  "on the same snapshot and evidence before rewriting criteria")
+OUTLIER_DETAIL = ("run %s is an outlier against %s and %s; log it in the score log, diff its "
+                  "per-criterion table against the others and tighten the criteria where it disagrees")
+SOFT_DETAIL = ("no single outlier: the three runs spread over %s (gaps %s and %s), more than 8; "
+               "the check lines are soft: tighten the criteria with the largest per-criterion "
+               "disagreement and take two fresh baseline runs")
+
+
+def baseline_two(a, b):
     noise = abs(a - b)
-    result = {
+    detail = None
+    if noise == 0:
+        third_run, detail = "needed", THIRD_RUN_ZERO
+    elif noise > 8:
+        third_run, detail = "needed", THIRD_RUN_WIDE % fmt(noise)
+    else:
+        third_run = "no"
+    return {
         "baseline": round_half_up((a + b) / 2),
         "noise": as_number(noise),
         "threshold": as_number(max(Decimal(3), 2 * noise)),
-        "soft": noise > 8,
+        "soft": False,
+        "third_run": third_run,
+        "outlier": None,
+        "detail": detail,
+    }
+
+
+def baseline_three(runs):
+    lo, mid, hi = sorted(runs)
+    g1, g2 = mid - lo, hi - mid
+    spread = hi - lo
+    outlier = None
+    detail = None
+    if spread <= 8:
+        kept = [lo, mid, hi]
+        noise = spread
+        soft = False
+    elif g1 != g2 and min(g1, g2) <= 8:
+        # The outlier sits on the wide side, so its gap to the nearest run is positive
+        # and no other run shares its value; the kept pair stays in input order.
+        outlier = hi if g2 > g1 else lo
+        kept = [r for r in runs if r != outlier]
+        noise = min(g1, g2)
+        soft = False
+        detail = OUTLIER_DETAIL % (fmt(outlier), fmt(kept[0]), fmt(kept[1]))
+    else:
+        kept = [lo, mid, hi]
+        noise = spread
+        soft = True
+        detail = SOFT_DETAIL % (fmt(spread), fmt(g1), fmt(g2))
+    return {
+        "baseline": round_half_up(sum(kept) / len(kept)),
+        "noise": as_number(noise),
+        "threshold": as_number(max(Decimal(3), 2 * noise)),
+        "soft": soft,
+        "third_run": "done",
+        "outlier": None if outlier is None else as_number(outlier),
+        "detail": detail,
+    }
+
+
+def cmd_baseline(args):
+    if len(args.runs) not in (2, 3):
+        fail("baseline takes two or three runs, got %d" % len(args.runs))
+    runs = []
+    for token in args.runs:
+        value = parse_decimal(token, "baseline score")
+        if value < 0 or value > 100:
+            fail("baseline scores must be between 0 and 100, got %s" % token)
+        runs.append(value)
+    if len(runs) == 2:
+        result = baseline_two(runs[0], runs[1])
+    else:
+        result = baseline_three(runs)
+    result["runs"] = [as_number(r) for r in runs]
+    if args.json:
+        print(json.dumps(result))
+        return 0
+    line = "baseline=%s noise=%s threshold=%s soft=%s third-run=%s" % (
+        result["baseline"], result["noise"], result["threshold"],
+        "true" if result["soft"] else "false", result["third_run"])
+    if result["third_run"] == "done":
+        line += " outlier=%s" % ("none" if result["outlier"] is None else result["outlier"])
+    print(line)
+    if result["detail"]:
+        print("detail: %s" % result["detail"])
+    return 0
+
+
+def cmd_budget(args):
+    total = parse_decimal(args.total, "--total")
+    spent = parse_decimal(args.spent, "--spent")
+    per_round = parse_decimal(args.per_round, "--per-round")
+    if total <= 0:
+        fail("--total must be positive, got %s" % args.total)
+    if spent < 0:
+        fail("--spent must be 0 or more, got %s" % args.spent)
+    if per_round <= 0:
+        fail("--per-round must be positive, got %s" % args.per_round)
+    if args.rounds is not None and args.rounds < 1:
+        fail("--rounds must be at least 1")
+    used = args.rounds_used
+    if used < 0:
+        fail("--rounds-used must be 0 or more")
+    remaining = total - spent
+    affordable = int((remaining / per_round).to_integral_value(rounding=ROUND_FLOOR))
+    affordable = max(0, affordable)
+    max_rounds = used + affordable
+    if args.rounds is not None:
+        max_rounds = min(max_rounds, args.rounds)
+    if affordable > 0 and max_rounds > used:
+        detail = "a round costs %s; %d more round%s fit%s in the remaining %s; %d run so far; pass --max-rounds %d to decide" % (
+            fmt(per_round), affordable, "" if affordable == 1 else "s", "s" if affordable == 1 else "",
+            fmt(remaining), used, max_rounds)
+    elif affordable > 0:
+        detail = "the round ceiling %d is reached (%d run); stop and report" % (max_rounds, used)
+    else:
+        detail = "the next round would exceed the budget; stop now and report"
+    result = {
+        "remaining": as_number(remaining),
+        "rounds_used": used,
+        "rounds_affordable": affordable,
+        "max_rounds": max_rounds,
+        "per_round": as_number(per_round),
+        "detail": detail,
     }
     if args.json:
         print(json.dumps(result))
     else:
-        print("baseline=%s noise=%s threshold=%s soft=%s" % (
-            result["baseline"], result["noise"], result["threshold"], "true" if result["soft"] else "false"))
+        print("remaining=%s rounds-used=%d rounds-affordable=%d max-rounds=%d" % (fmt(remaining), used, affordable, max_rounds))
+        print("detail: %s" % detail)
     return 0
 
 
@@ -182,6 +344,8 @@ def cmd_decide(args):
         fail("--threshold must be at least 1")
     if args.max_rounds < 1:
         fail("--max-rounds must be at least 1")
+    if not 0 <= args.target <= 100:
+        fail("--target must be between 0 and 100, got %s" % as_number(args.target))
     if args.rounds_used is not None and args.first_round is not None:
         fail("pass --rounds-used or --first-round, not both")
     tokens = [t for t in args.scores.split(",")]
@@ -200,7 +364,15 @@ def cmd_decide(args):
             fail("--first-round must be 0 or more")
         rounds_used = first + len(scores) - 1
     gates_pass = args.gates.upper() == "PASS"
-    outcome = decide(scores, args.threshold, args.target, args.max_rounds, rounds_used, gates_pass, args.confirm_score)
+    confirm = None
+    if args.confirm_score is not None:
+        parsed = parse_score(args.confirm_score)
+        if parsed["max"] != scores[-1]["max"]:
+            fail("--confirm-score %s has a different adjusted max from the last score %s; "
+                 "the confirmation run must grade the same snapshot and evidence"
+                 % (args.confirm_score, tokens[-1].strip()))
+        confirm = parsed["scaled"]
+    outcome = decide(scores, args.threshold, args.target, args.max_rounds, rounds_used, gates_pass, confirm)
     if args.json:
         print(json.dumps(outcome))
     else:
@@ -218,11 +390,20 @@ def build_parser():
     sub = parser.add_subparsers(dest="command")
     sub.required = True
 
-    baseline = sub.add_parser("baseline", help="mean, noise floor and move threshold from two runs")
-    baseline.add_argument("a")
-    baseline.add_argument("b")
+    baseline = sub.add_parser("baseline", help="mean, noise floor and move threshold from two or three runs")
+    baseline.add_argument("runs", nargs="+", metavar="RUN", help="two or three scorer runs, each 0 to 100")
     baseline.add_argument("--json", action="store_true")
     baseline.set_defaults(func=cmd_baseline)
+
+    budget = sub.add_parser("budget", help="rounds that fit in the remaining budget")
+    budget.add_argument("--total", required=True, help="total budget in the caller's unit (minutes or dollars)")
+    budget.add_argument("--spent", required=True, help="amount already spent, same unit")
+    budget.add_argument("--per-round", required=True, help="measured or estimated cost of one round, same unit")
+    budget.add_argument("--rounds", type=int, default=None, help="the total round ceiling the user agreed to")
+    budget.add_argument("--rounds-used", type=int, default=0,
+                        help="real rounds already run (default 0); max-rounds counts them")
+    budget.add_argument("--json", action="store_true")
+    budget.set_defaults(func=cmd_budget)
 
     decision = sub.add_parser("decide", help="apply the stop rules to a score series")
     decision.add_argument("--threshold", type=float, required=True, help="move threshold T")
@@ -235,8 +416,8 @@ def build_parser():
                           help="real round number of the first entry (alternative to --rounds-used; default 0)")
     decision.add_argument("--gates", default="PASS", choices=["PASS", "FAIL", "pass", "fail"],
                           help="PASS when every gate passes in the latest round (from the orchestrator's gate runs)")
-    decision.add_argument("--confirm-score", type=float, default=None,
-                          help="the second scorer run on the latest snapshot, after CONFIRM")
+    decision.add_argument("--confirm-score", default=None,
+                          help="the second scorer run on the latest snapshot, after CONFIRM (\"86\" or \"69/80\")")
     decision.add_argument("--json", action="store_true")
     decision.set_defaults(func=cmd_decide)
     return parser
@@ -250,8 +431,6 @@ def main(argv=None):
             value = getattr(args, name)
             if value == int(value):
                 setattr(args, name, int(value))
-        if args.confirm_score is not None and args.confirm_score == int(args.confirm_score):
-            args.confirm_score = int(args.confirm_score)
     return args.func(args)
 
 

@@ -1,0 +1,29 @@
+{
+ "should_fire": [
+  "this join is O(n^2) on 50k rows and takes 20 minutes, can we fix it",
+  "CI takes 40 minutes on 8 runners, how do we cut it",
+  "is my 8% speedup real? one run each, 3.2 s vs 2.95 s",
+  "which tests should run for this PR instead of the whole suite",
+  "our context packer blows the 60k token budget and drops the test command",
+  "did the benchmark regress across these commits? here are 60 medians",
+  "dedup of 2M records takes hours",
+  "5000 regexes per log line takes 6 hours on the nightly job",
+  "pick the exact best set of optional test suites that fits in 25 minutes"
+ ],
+ "should_not_fire": [
+  "my API call is slow, 45 s for 3,000 records, user 1.9 s",
+  "rename this variable to something clearer",
+  "write a unit test for login",
+  "explain big-O notation to me",
+  "the page loads slowly because of a 4 MB image",
+  "format this file",
+  "upgrade React to the latest version",
+  "why does my Dockerfile fail to build",
+  "add a dark mode toggle to the settings page"
+ ],
+ "decoys": [
+  {"name": "systematic-debugging", "description": "Use when encountering any bug, test failure, crash or unexpected behavior, before proposing fixes: reproduce, isolate, find the root cause, then fix and verify."},
+  {"name": "web-performance", "description": "Diagnose slow web pages and slow network calls: large images and bundles, render-blocking resources, caching headers, request waterfalls, API latency, Core Web Vitals."},
+  {"name": "code-maintenance", "description": "Routine code changes: rename symbols, format files, upgrade dependencies, write unit tests, explain concepts, fix build and container errors, small UI features."}
+ ]
+}

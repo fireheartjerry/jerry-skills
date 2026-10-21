@@ -1,7 +1,7 @@
 {
   "name": "jerry-skills",
-  "description": "Four skills for making agents work like you would with unlimited time: mind-reading expands a few words into the full prompt you meant, using a model of you mined from your own agent history; high-agency carries tasks from intent to verified completion; iterative-improvement runs a criteria-driven adversarial loop that makes open-ended quality measurable; agent-sessions delegates work to Claude and Codex children in isolated tmux sessions.",
-  "version": "1.1.0",
+  "description": "Five skills: mind-reading (expand a terse prompt into the full brief you meant, from a model of your own transcripts), high-agency (own tasks to a verified result), iterative-improvement (criteria-driven adversarial improvement loop), agent-sessions (orchestrate Claude, Codex and Gemini child sessions with verify gates, budgets and best-of-N) and competitive-systems (evidence-driven performance work with a portable dev.py).",
+  "version": "2.0.0",
   "author": {
     "name": "Jerry Yuze Li",
     "url": "https://github.com/fireheartjerry"
@@ -12,12 +12,15 @@
   "keywords": [
     "agents",
     "autonomy",
+    "benchmarking",
     "code-review",
     "codex",
     "iteration",
     "mind-reading",
     "multi-agent",
+    "optimization",
     "orchestration",
+    "performance",
     "personalization",
     "prompting",
     "quality",

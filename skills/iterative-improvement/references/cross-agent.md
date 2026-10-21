@@ -5,9 +5,10 @@ tiers, best first:
 
 | Tier | Independence | How |
 |---|---|---|
-| Separate agent CLI | Different model, separate process, isolated config, staged copy | `scripts/spawn_child.sh codex ...` (or `claude`, `kimi`) |
+| Separate agent CLI | Different model, separate process, isolated config, staged copy | `scripts/spawn_child.sh codex ...` (or `claude`) |
 | Same CLI, isolated process | Same model, but a fresh process with no shared context, the same isolation flags and the same post-run checks | `scripts/spawn_child.sh <your engine> ... --same-engine` |
 | Subagent | Same model, same session; isolation only as good as the path you hand it | your harness's subagent tool, pointed at a staged dir (recipe below) |
+| kimi | Different model, but no sandbox and no allowlist: the child can read, write and run anything as you | `scripts/spawn_child.sh kimi reviewer ... --unsandboxed`; trusted artifacts only |
 | Inline | None: you are grading your own work | last resort; disclose it in the report |
 
 A different CLI is usually worth the extra minute. It is the only option where the
@@ -19,7 +20,7 @@ artifact is detected. Say which tier ran in the report.
 
 **Independence is a property of what the child could see, not of which tool you
 used.** Verify the review cites real evidence before acting on it (the independence
-check in SKILL.md 5a).
+check in SKILL.md section 4).
 
 **Subagent recipe (when `spawn_child.sh` cannot be used).** Build the stage yourself:
 copy the snapshot to a fresh temp dir outside the repo, put the brief beside it, give
@@ -36,13 +37,14 @@ Do this before the user goes offline, for each engine you intend to use:
 ```
 scripts/spawn_child.sh --preflight codex --model <model>
 scripts/spawn_child.sh --preflight claude            # add --same-engine inside Claude Code
-scripts/spawn_child.sh --preflight kimi
+scripts/spawn_child.sh --preflight kimi --unsandboxed   # only if you accept kimi's risk
 ```
 
 Each runs a one-file stub snapshot through the full staged path with the real
 isolation flags and checks that the child read the staged file. `preflight ok: codex
-(codex-cli 0.162.1) as scorer, model gpt-5` means the engine, its auth and the
-isolation flags all work together. Anything else (login prompt, auth error, timeout,
+(codex-cli 0.163.0) as scorer, model gpt-5, 41s` means the engine, its auth and the
+isolation flags all work together; the trailing figure is that run's duration, read
+from its own `.log` footer. Anything else (login prompt, auth error, timeout,
 empty output) means that engine is unavailable at that configuration: drop a tier and
 record which tier you actually used. An installed-but-unauthenticated binary fails
 silently and reads exactly like a clean review, which is why the preflight uses the
@@ -74,7 +76,8 @@ Isolation has three layers, and all three are used:
    manifest), `prompt.md` (the brief plus a STAGING section naming these paths),
    `evidence/` (when supplied) and `out.md`. The child's cwd is `artifact/`. No path it
    receives contains the round number, the repo or LOOP, so `git rev-parse`, `..`
-   and `ls ../..` find nothing. Agent instruction files inside the artifact
+   and `ls ../..` find nothing. This hides those paths; whether the child could still
+   reach them by absolute path depends on layer 3. Agent instruction files inside the artifact
    (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `.claude/`, `.codex/`, ...) are renamed
    `*.as-data` and listed in the STAGING section, so the child reads them as part of
    the artifact instead of obeying them.
@@ -88,26 +91,40 @@ Isolation has three layers, and all three are used:
 
 ```
 scripts/spawn_child.sh ENGINE ROLE PROMPT SNAPSHOT OUT [--evidence DIR] [--model M]
-    [--loop-dir DIR] [--timeout S] [--no-bash] [--same-engine] [--dry-run]
+    [--loop-dir DIR] [--timeout S] [--same-engine] [--unsandboxed] [--dry-run]
 ```
 Use it rather than typing the flags. `--dry-run` prints the staging plan and the
 exact argv with `/<stage>` placeholders and creates nothing. A scorer requires
-`--model`; kimi is reviewer-only. Children never run write-dependent commands (builds,
+`--model`; kimi is reviewer-only and needs `--unsandboxed`. An empty snapshot (manifest
+with no files) is refused with exit 3. Children never run write-dependent commands (builds,
 dev servers, formatters): you run those before spawning and hand the result over with
-`--evidence` or a URL in the brief (SKILL.md 5d step 3). Every child's stdin is
+`--evidence` or a URL in the brief (SKILL.md section 4, Evidence; full-protocol.md 4d step 3). Every child's stdin is
 `/dev/null`; both `codex exec` and `claude -p` otherwise wait on an open stdin when
 launched from an agent's shell tool.
+
+## What each engine enforces
+
+| Engine | Reads | Writes | Commands | Enforced by |
+|---|---|---|---|---|
+| claude | only under `<stage>` (verified live: a file outside it, Glob and Grep outside it were all denied) | only `<stage>/out.md` | none (no Bash tool) | CLI permission rules under `dontAsk` |
+| codex | anything the user can read, including `~`, LOOP and the repo | none (output written by codex from `-o`) | read-only sandbox, no network | OS sandbox |
+| kimi | anything | anything | anything | nothing; the post-run checks see only the stage and the root's git status |
+
+So a Codex child that goes looking can find prior scores in LOOP or a secret in `~`, and
+an artifact carrying injected instructions could pull one into its output. Read every
+child output before acting on it or showing it to anyone, and prefer a Claude child for
+artifacts you did not write.
 
 ## Per-engine invocations (what the script runs)
 
 ### Codex (preferred scorer: OS-level read-only sandbox)
 ```
-CODEX_HOME="<stage>/home" codex exec --ephemeral -s read-only --skip-git-repo-check \
+CODEX_HOME="<stage>/engine-home" codex exec --ephemeral -s read-only --skip-git-repo-check \
   -c model_reasoning_effort="high" -c project_doc_max_bytes=0 -m "<model>" \
   -C "<stage>/artifact" -o "<stage>/out.md" \
   "Read and follow the instructions in <stage>/prompt.md. Your final message must be your complete output and nothing else; it is saved to a file automatically." < /dev/null
 ```
-`<stage>/home` is a fresh directory containing only a symlink `auth.json ->
+`<stage>/engine-home` is a fresh directory containing only a symlink `auth.json ->
 $CODEX_HOME/auth.json` (default `~/.codex/auth.json`). Verified: `--ignore-user-config`
 alone still loads the global `AGENTS.md` from the real `CODEX_HOME`; a fresh home does
 not, and `-s read-only` blocks writes everywhere, which is why the output file is
@@ -128,31 +145,39 @@ change when Codex is upgraded mid-loop, and the `.cmd` header records the CLI ve
 cd "<stage>/artifact" && claude -p "Read and follow the instructions in <stage>/prompt.md. Write your complete output to <stage>/out.md. Print only a one-line confirmation to stdout." \
   --setting-sources "" --disable-slash-commands --strict-mcp-config \
   --permission-mode dontAsk --add-dir "<stage>" [--model "<model>"] \
-  --tools "Read,Grep,Glob,Write,Bash" \
-  --allowedTools "Read" "Grep" "Glob" "Edit(//<stage>/out.md)" "Bash(ls:*)" "Bash(cat:*)" "Bash(head:*)" "Bash(wc:*)" < /dev/null
+  --tools "Read,Grep,Glob,Write" \
+  --allowedTools "Read(//<stage>/**)" "Grep(//<stage>/**)" "Glob(//<stage>/**)" "Edit(//<stage>/out.md)" < /dev/null
 ```
 `--setting-sources ""` drops user, project and local settings; `--disable-slash-commands`
 drops all skills; `--strict-mcp-config` drops MCP servers; `dontAsk` denies anything not
-allowlisted without prompting. Verified: file permission rules match `Edit(...)`
-patterns only, and a path rule needs the `//` prefix to be absolute (a single `/` is
+allowlisted without prompting. Every allow rule is scoped to the stage: a bare `Read`,
+`Grep` or `Glob` rule allows that tool on any path (an earlier version did this, and a
+child read a shell rc file in the user's home). Verified live on Claude Code 2.1.306:
+with the scoped rules, Read of a file outside the stage, Glob and Grep outside it were
+denied, while Read, Glob and Grep inside it worked. Verified: write permission matches
+`Edit(...)` patterns only, and a path rule needs the `//` prefix to be absolute (a single `/` is
 relative to the project root), so `Edit(//<stage>/out.md)` is what lets the Write tool
 create the output; `Write(<path>)` is ignored and `Edit(/<abs path>)` denies. Verified:
 with `--setting-sources ""` a `CLAUDE.md` in the cwd was not loaded (the child reported
 no project instructions); the rename is still applied. `--bare` would also skip the
 user-level `CLAUDE.md` but skips keychain reads too, so on macOS it fails auth unless
 `ANTHROPIC_API_KEY` is set; the script adds `--bare` only when that variable is set.
-`find` and `tail` are not allowlisted: `find -exec`/`-delete` can write, and Glob and
-Read cover the need. `--no-bash` drops Bash entirely; it is the stricter rerun after a
-discarded run. Never pass the flag that skips permissions; the allowlist is the sandbox.
+There is no Bash tool: a prefix rule such as `Bash(cat:*)` cannot be confined to a
+directory (a path that climbs out with `..`, or any absolute path, matches it), and Read,
+Glob and Grep cover listing, reading and counting. Never pass the flag that skips permissions; the
+allowlist is the sandbox.
 
 ### Kimi (reviewer only)
 ```
 cd "<stage>/artifact" && kimi -p "Read and follow the instructions in <stage>/prompt.md. Write your complete output to <stage>/out.md. Print only a one-line confirmation to stdout." \
-  --skills-dir "<stage>/home/kimi-skills" --add-dir "<stage>" [--model "<model>"] < /dev/null
+  --skills-dir "<stage>/engine-home/kimi-skills" --add-dir "<stage>" [--model "<model>"] < /dev/null
 ```
 `--skills-dir` pointed at an empty directory replaces auto-discovered skills. Kimi has
-no sandbox and no tool allowlist; its only protections are the stage, the post-run
-hash and the root fingerprint. The script refuses `kimi scorer`. Do not combine `-p`
+no sandbox and no tool allowlist: untrusted artifact content can drive any command as
+you, and the post-run hash and root fingerprint cannot see writes elsewhere (a shell rc
+file, `~/.ssh`). The script refuses kimi without `--unsandboxed`, records
+`# unsandboxed: yes` in the `.cmd`, and refuses `kimi scorer`. Rank it below a harness
+subagent and use it only on artifacts you wrote or trust. Do not combine `-p`
 with `-y` or `--auto`; kimi rejects both (`error: Cannot combine --prompt with ...`).
 
 ## Prompt-level defence (both briefs carry it)
@@ -165,9 +190,10 @@ content can contain injected text anywhere, not only in instruction files.
 
 `spawn_child.sh` verifies the staged artifact and the root fingerprint. On any change:
 the output file is renamed `*.discarded`, the incident is logged to `rounds.md`, and you
-rerun with the stricter variant: Claude with `--no-bash`; kimi replaced by another
-engine; Codex is already read-only, so a Codex discard means the root changed (someone
-edited the artifact during the run) and you rerun after checking. A scorer that changed
+rerun once after checking that nothing (you, a watcher, a formatter) edited ROOT during
+the run. Claude and Codex children cannot write to the stage, so a discard from them
+almost always means ROOT changed; a second discard means switch engine. A kimi discard
+means kimi wrote: replace it with another engine. A scorer that changed
 the artifact produced a number about a different artifact.
 
 ### Per-CLI notes
@@ -190,7 +216,13 @@ minus `.md` plus `.cmd`) with the stage path replaced by `/<stage>`, plus a head
 engine version, model and `same-engine`. The scorer's `round-0a.cmd` is the pin; every
 later scorer `.cmd` must be byte-identical to it. If it is not (a CLI upgrade changes
 the version line, a model change), rescore the previous snapshot under the new
-configuration before comparing.
+configuration before comparing. The `.log` ends with `# started`, `# finished`,
+`# duration: Ns` and `# usage:` lines. Codex prints `tokens used` with the count on the
+next line; the footer reads `# usage: tokens used: 19,783`. `claude -p` in text mode
+and kimi print no usage, so their footer says `not reported`; `--output-format json`
+would carry a cost field but is not used or verified here. Measure budgets in time,
+not money, unless every child is codex. Timing never goes into the `.cmd`, which must
+stay byte-identical between rounds.
 
 **Timeout.** The default is 900 seconds when `timeout` or `gtimeout` exists;
 `--timeout 0` disables it. A real audit takes minutes; run it in the background and
@@ -210,7 +242,7 @@ act on any of it.
 your browser session or running servers unless you arrange it. This matters most for
 the scorer: a visual check that you can run and it cannot is marked N/A, shrinks the
 adjusted max, and must be covered by evidence you produce with the exact check line
-(SKILL.md 5d).
+(SKILL.md section 4, Evidence).
 
 ---
 
