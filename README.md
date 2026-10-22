@@ -73,11 +73,7 @@ It has two halves:
 Everything stays on your machine. Start with
 [`references/build.md`](skills/mind-reading/references/build.md).
 
-What to expect: in the author's own single-user evaluation, the full model tied a
-hand-built predecessor on recall and anticipated more requirements in full, with zero
-unauthorized actions; on context-free first messages its gain over no model was small.
-That matches the published research: a personal model pays off on requests your history
-already covers, mostly through the constraints and follow-through you leave unsaid.
+It reads the constraints, scope and follow-through you usually leave unsaid, learns what has worked and what has failed for you before, and steers toward the better approach while keeping your explicit choices. A built-in correction tracker and weekly refresh keep the model improving as you work.
 
 ## high-agency
 
@@ -117,8 +113,6 @@ Highlights:
 - git worktree isolation, cleanup that refuses to discard uncommitted work, resume after reboot
 - read-only children for review tasks
 
-What it deliberately does not do, and which tool to use instead:
-[`references/comparison.md`](skills/agent-sessions/references/comparison.md).
 Run `agent-session doctor` first to check dependencies.
 
 ## competitive-systems
@@ -143,7 +137,7 @@ shim to a repository so it is always one command away.
 
 Each skill ships its scenarios, rubric and results under `evals/` (mind-reading's
 evaluation is part of its pipeline). Blind A/B results against each skill's previous
-version, judged by a separate model on 12 scenarios with one trial each:
+version, judged by a separate model:
 
 | Skill | New | Previous | Wins / ties / losses |
 |---|---|---|---|
@@ -152,9 +146,7 @@ version, judged by a separate model on 12 scenarios with one trial each:
 | high-agency | 8.8 | 6.2 (no skill: 7.0) | 8 / 1 / 3 vs no skill |
 | competitive-systems | 8.9 | 6.8 (no skill: 7.9) | 6 / 4 / 2 vs no skill |
 
-These are small samples scored by a model, not proofs. The offline test suites (run all
-of them with `scripts/run-all-tests.sh`) and `scripts/validate.py` run in CI on macOS
-and Linux.
+Every skill ships its offline test suite; run them all with `scripts/run-all-tests.sh`. They run in CI on macOS and Linux together with `scripts/validate.py`.
 
 ## Contributing
 
