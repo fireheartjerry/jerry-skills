@@ -717,7 +717,7 @@ def archive_previous(paths, log=print):
     if dest.exists():
         return dest
     dest.mkdir(parents=True, exist_ok=True)
-    for name in ("light.md", "profile.md", "examples.md", "grants.md", "index.json", "evidence.json", "episodes.json", "MODEL.json"):
+    for name in ("light.md", "profile.md", "examples.md", "grants.md", "index.json", "evidence.json", "episodes.json", "preference_memory.json", "MODEL.json"):
         p = paths.model / name
         if p.exists():
             shutil.copy2(p, dest / name)
@@ -748,7 +748,7 @@ def write_manifest(paths, cfg, run_id=None, mined_run=None, engine=None, parents
         "project_notes": prev.get("project_notes", []), "folded_drops": prev.get("folded_drops", []),
         "grant_tombstones": prev.get("grant_tombstones", []), "grants_added": prev.get("grants_added", []),
         "always_on_targets": cfg.get("always_on_targets", []),
-        "files": {n: (paths.model / n).stat().st_size for n in ("light.md", "profile.md", "examples.md", "grants.md", "index.json", "evidence.json", "episodes.json") if (paths.model / n).exists()},
+        "files": {n: (paths.model / n).stat().st_size for n in ("light.md", "profile.md", "examples.md", "grants.md", "index.json", "evidence.json", "episodes.json", "preference_memory.json") if (paths.model / n).exists()},
     }
     if extra:
         manifest.update(extra)

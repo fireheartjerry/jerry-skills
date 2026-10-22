@@ -20,7 +20,7 @@ LAYER_TITLES = {
     6: "Standing rules", 7: "Likes", 8: "Dislikes", 9: "Workflow habits", 10: "Recurring contexts",
 }
 LIGHT_SECTIONS = ["Read the prompts", "Default behaviour", "Quality bar", "Report", "Standing rules", "Never"]
-MODEL_FILES = ("light.md", "profile.md", "examples.md", "grants.md", "episodes.json")
+MODEL_FILES = ("light.md", "profile.md", "examples.md", "grants.md", "episodes.json", "preference_memory.json")
 _LAYER_RE = re.compile(r"^## (\d+)\. (.+?)\s*$")
 _GROUP_RE = re.compile(r"^### ([A-Z]{1,2})\. (.+?)\s*$")
 _EXAMPLE_RE = re.compile(r"^### (\d+)\. (.+?)\s*$")
@@ -534,6 +534,17 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
         recall_warning = str(exc)
     for echo in echoes:
         parts.append(("echo:" + echo["id"], _recall.render([echo]), False))
+    from . import preference_memory as _preferences
+    preference_warning, preferences = None, []
+    has_preferences = (model_dir / _preferences.FILENAME).exists()
+    if has_preferences:
+        try:
+            preferences = _preferences.retrieve(model_dir, seed, context_text=context_text,
+                                                limit=cfg_select.get("max_preference_pairs", 2))
+        except _preferences.PreferenceMemoryError as exc:
+            preference_warning = str(exc)
+    for preference in preferences:
+        parts.append(("preference:" + preference["review_id"] + "/" + preference["id"], _preferences.render([preference]), False))
     for e in reversed(ex_chosen):  # ascending relevance: the best match is last
         a, b = e["lines"]
         parts.append(("example:%d" % e["n"], "\n".join(examples[a - 1:b]).strip() + "\n", False))
@@ -551,6 +562,8 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
             drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("lessons:") and not parts[i][2]), None)
         if drop is None:
             drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("echo:")), None)
+        if drop is None:
+            drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("preference:")), None)
         if drop is None:
             break
         parts.pop(drop)
@@ -584,4 +597,7 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
         decision.update(context_fields=sorted(frame), context_hash=_intent.fingerprint(frame), context_routed=context_routed,
                         context_keywords={g["id"]: [w for w in g["when"] if _keyword_in(w, context_lower, context_stems, legacy)]
                                           for g in chosen if g["id"] in kept_groups})
+    if has_preferences:
+        decision.update(preference_pairs=[p[0].split(":", 1)[1] for p in parts if p[0].startswith("preference:")],
+                        preference_warning=preference_warning)
     return header + body, decision

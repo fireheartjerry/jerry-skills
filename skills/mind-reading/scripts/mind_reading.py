@@ -534,8 +534,15 @@ def cmd_preferences(args, paths, cfg, log):
             if not args.key or not args.answers:
                 raise PreferenceError("import needs --key and --answers")
             summary = import_answers(args.key, args.answers, out_path=args.out)
+        elif args.action == "learn":
+            from mr.preference_memory import learn
+            if not args.key or not args.answers or not args.pairs:
+                raise PreferenceError("learn needs --pairs, --key and --answers, with --home pointing to a still-building candidate")
+            with open(args.pairs, encoding="utf-8") as fh:
+                pairs = json.load(fh)
+            summary = learn(paths, cfg, pairs, args.key, args.answers)
         else:
-            raise PreferenceError("choose build or import")
+            raise PreferenceError("choose build, import or learn")
     except (PreferenceError, OSError, ValueError) as exc:
         log("preferences: %s" % exc)
         return EXIT_INVALID
@@ -753,7 +760,7 @@ def build_parser():
     p.set_defaults(func=cmd_recall)
 
     p = sub.add_parser("preferences", help="build and score a frozen human blind comparison")
-    p.add_argument("action", choices=["build", "import"])
+    p.add_argument("action", choices=["build", "import", "learn"])
     p.add_argument("--pairs")
     p.add_argument("--baseline-results")
     p.add_argument("--candidate-results")
