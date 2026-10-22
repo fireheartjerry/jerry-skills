@@ -59,6 +59,25 @@ class SelectTests(unittest.TestCase):
         _, d = self.select("zzz", kind="push ship")
         self.assertEqual(d["groups"], ["F"])
 
+    def test_resolved_group_id_routes_an_otherwise_ambiguous_seed(self):
+        _, decision = self.select("zzz qqq", kind="E")
+        self.assertEqual(decision["groups"], ["E"])
+        self.assertFalse(decision["fallback"])
+
+    def test_resolved_kind_routes_multiword_trigger_without_literal_seed_match(self):
+        import shutil
+        model = helpers.tmpdir() / "model"
+        shutil.copytree(self.paths.model, model)
+        original = (model / "profile.md").read_text()
+        lines = original.splitlines()
+        heading = next(i for i, line in enumerate(lines) if line.startswith("### E."))
+        lines[heading + 1] = "When: rq status, progress update, results"
+        (model / "profile.md").write_text("\n".join(lines) + "\n")
+        _select.build_index(model)
+        _, decision = _select.select_slice(model, "zzz qqq", self.sel, kind="status")
+        self.assertIn("E", decision["groups"])
+        self.assertIn("rq status", decision["matched_keywords"]["E"])
+
     def test_multi_kind_seed_escalates_and_plan_mode_raises_limits(self):
         seed = "fix the bug, push the release, redesign the ui, message the team, plan the roadmap, status please"
         _, d = self.select(seed)

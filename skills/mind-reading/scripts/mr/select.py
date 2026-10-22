@@ -356,6 +356,11 @@ def _phrase_in(phrase, seed_lower):
     return False
 
 
+def _kind_keyword_in(keyword, kind_words):
+    """A decoded kind can name the informative word in a multiword trigger."""
+    return bool((_words(keyword) - _STOP) & (kind_words - _STOP))
+
+
 def runtime_grants(text, tokens=None):
     """The grants.md text the runtime may see: the file's preamble plus only the blocks that are active, parse with
     zero errors and carry no forbidden instruction outside their Quote line. Revoked, invalid and malformed blocks are
@@ -413,12 +418,15 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     seed_words = _words(seed)
     seed_stems = {_stem(w) for w in seed_words}
     kind_words = _words(kind)
+    kind_id = (kind or "").strip().casefold()
     profile = _lines(model_dir / "profile.md") if (model_dir / "profile.md").exists() else []
     examples = _lines(model_dir / "examples.md") if (model_dir / "examples.md").exists() else []
 
     scored = []
     for g in idx["groups"]:
-        s = sum(1 for w in g["when"] if _keyword_in(w, seed_lower, seed_stems, legacy)) + 0.5 * sum(1 for w in g["when"] if w in kind_words)
+        s = sum(1 for w in g["when"] if _keyword_in(w, seed_lower, seed_stems, legacy)) + 0.5 * sum(1 for w in g["when"] if _kind_keyword_in(w, kind_words))
+        if kind_id == g["id"].casefold():
+            s += 0.5
         scored.append((s, g))
     matching = [g for s, g in sorted(scored, key=lambda t: (-t[0], t[1]["id"])) if s > 0]
     escalated = (not initiative) and len(matching) > cfg_select["max_groups"]  # a seed spanning kinds reads more
@@ -433,7 +441,9 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     max_lessons = cfg_select.get("initiative_max_lessons", 3) if wide else cfg_select.get("max_lessons", 2)
     ls_scored = []
     for lg in idx.get("lessons") or []:
-        sc = sum(1 for w in lg["when"] if _keyword_in(w, seed_lower, seed_stems, False)) + 0.5 * sum(1 for w in lg["when"] if w in kind_words)
+        sc = sum(1 for w in lg["when"] if _keyword_in(w, seed_lower, seed_stems, False)) + 0.5 * sum(1 for w in lg["when"] if _kind_keyword_in(w, kind_words))
+        if kind_id == lg["id"].casefold():
+            sc += 0.5
         ls_scored.append((sc, lg))
     chosen_lessons = [lg for sc, lg in sorted(ls_scored, key=lambda t: (-t[0], t[1]["id"])) if sc > 0][:max_lessons]
     chosen_ids = {g["id"].lower() for g in chosen + chosen_lessons}
@@ -545,7 +555,7 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     decision.update({"echoes": kept_echoes, "project": project,
                      "recall_warning": recall_warning,
                      "matched_keywords": {g["id"]: [w for w in g["when"] if _keyword_in(w, seed_lower, seed_stems, legacy)
-                                                               or w in kind_words] for g in chosen if g["id"] in kept_groups},
+                                                               or _kind_keyword_in(w, kind_words)] for g in chosen if g["id"] in kept_groups},
                      "fallback": not bool(matching), "budget_chars": budget,
                      "over_budget": len(body) + len(header) > budget})
     return header + body, decision
