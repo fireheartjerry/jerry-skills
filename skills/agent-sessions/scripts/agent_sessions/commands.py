@@ -29,8 +29,8 @@ from agent_sessions.state import (
     active_pauses, activity_seconds, all_metas, build_result, check_terminal, child_alive, descendants,
     empty_budget, events_path, fmt_usd, group_members, is_queued, kick, ledger_remaining, ledgers_dir,
     load_group, load_ledger, load_meta, load_progress, load_turn, load_turns, merge_judge, normalize_result,
-    pauses_dir, read_pause, require_meta, session_state, stale_reservations, state_lock, turn_numbers, unfinished,
-    working_children, write_group, write_lost,
+    pauses_dir, read_pause, require_meta, retire_runner, session_state, stale_reservations, state_lock,
+    turn_numbers, unfinished, working_children, write_group, write_lost,
 )
 from agent_sessions.engines import engine_for
 from agent_sessions.schema import SCHEMAS
@@ -1127,6 +1127,16 @@ def cmd_reap(args):
             for cm in descendants(meta):
                 if cm["name"] not in names:
                     names.append(cm["name"])
+    if not dry:
+        # Finished children that still linger: end every session, then wait
+        # for their runners outside the lock (a runner's last kick takes it),
+        # so none writes into a state directory while it is being removed.
+        lingering = [(n, m) for n, m in ((n, load_meta(n)) for n in names)
+                     if m and os.path.exists(os.path.join(sdir_of(n), "result.json")) and child_alive(n, m)]
+        for n, m in lingering:
+            end_session(n, m)
+        for n, m in lingering:
+            retire_runner(n, m)
     results = []
     for name in names:
         meta = load_meta(name) or {}
@@ -1431,10 +1441,7 @@ def resume_child(name, message=None):
     # The previous runner may still be lingering (tmux) or finishing its
     # --on-finish hook and kick; it must be gone before a new runner takes the
     # state directory. Wait outside the lock: that runner's kick needs it.
-    end_session(name, meta)
-    deadline = time.time() + 10
-    while child_alive(name, meta) and time.time() < deadline:
-        time.sleep(0.2)
+    retire_runner(name, meta)
     with state_lock():
         meta = load_meta(name)
         if not os.path.exists(os.path.join(sdir, "result.json")):

@@ -29,7 +29,7 @@ from agent_sessions.backend import choose_backend, env_socket, start
 from agent_sessions.state import (
     all_metas, build_result, check_terminal, child_alive, effective_depth, empty_budget,
     is_queued, ledger_exhausted, ledger_remaining, load_group, load_ledger, load_meta, normalize_result,
-    pauses_dir, read_pause, state_lock, working_children, write_ledger, fmt_usd,
+    pauses_dir, read_pause, retire_runner, state_lock, working_children, write_ledger, fmt_usd,
 )
 from agent_sessions.engines import engine_for, price_of
 from agent_sessions.schema import check_schema
@@ -475,6 +475,14 @@ def create(spec, dry_run=False, pending=()):
         return None, info
     engine_version = engine.version()
     sdir = sdir_of(name)
+    if spec.get("replace") and os.path.exists(os.path.join(sdir, "result.json")):
+        # A finished child may still linger. Its runner must be gone before
+        # the state directory is removed and made again, or its last
+        # progress.json lands in the new child's (or keeps the old one from
+        # being removed). Refusals come first, so a refused replace ends nothing.
+        old = _replace_precheck(name, spec)
+        if old:
+            retire_runner(name, old)
 
     with state_lock():
         kick()

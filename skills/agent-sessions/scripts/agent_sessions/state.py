@@ -44,7 +44,7 @@ __all__ = [
     "empty_usage", "add_usage", "empty_budget", "RESULT_DEFAULTS", "normalize_result",
     "load_meta", "require_meta", "load_progress", "turn_numbers", "load_turn", "load_turns",
     "build_result", "write_lost", "session_state", "activity_seconds", "state_lock",
-    "working_children", "stale_reservations", "all_metas", "child_alive", "check_terminal",
+    "working_children", "stale_reservations", "all_metas", "child_alive", "retire_runner", "check_terminal",
     "effective_depth", "descendants", "unfinished", "events_path", "read_events",
     "pauses_dir", "read_pause", "active_pauses", "write_pause", "groups_dir", "load_group", "group_members",
     "write_group", "kick", "merge_judge", "result_path", "is_queued", "ledgers_dir", "load_ledger",
@@ -396,6 +396,18 @@ def child_alive(name, meta):
     if meta is None:
         meta = load_meta(name)
     return backend.alive(name, meta)
+
+
+def retire_runner(name, meta, seconds=10):
+    """End a finished child's lingering session and wait for its runner to
+    exit: on its way out it still writes progress.json, which must not land
+    in a state directory that is being removed or reused. Call it outside the
+    state lock (that runner's last kick() takes it). True when it is gone."""
+    backend.end_session(name, meta)
+    deadline = time.time() + seconds
+    while child_alive(name, meta) and time.time() < deadline:
+        time.sleep(0.2)
+    return not child_alive(name, meta)
 
 
 def check_terminal(name, meta):

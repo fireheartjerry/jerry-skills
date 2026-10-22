@@ -13,7 +13,8 @@ Behaviour is driven by directives embedded anywhere in the prompt, matched by
   @@noanswer       claude: no `result` event; codex: no agent_message and no -o file;
                    gemini: no `result` event
   @@hang           sleep 3600 (dies on SIGTERM)
-  @@hang-hard      ignore SIGTERM, sleep 3600 (only SIGKILL works)
+  @@gate:PATH      wait (up to an hour) until PATH, relative to the cwd, exists, then go on
+  @@hang-hard      ignore SIGTERM (from before init) and sleep 3600 (only SIGKILL works)
   @@big:N          answer is N bytes of deterministic text
   @@stderr:TEXT    write TEXT to stderr before answering (underscores become spaces)
   @@is-error       claude: result has is_error true, subtype error_during_execution, exit 1;
@@ -180,7 +181,7 @@ def fail_once(d, prompt):
     return d
 
 
-def install_signal_log():
+def install_signal_log(d):
     def handler(signum, _frame):
         try:
             os.makedirs(HOME, exist_ok=True)
@@ -196,6 +197,10 @@ def install_signal_log():
         os._exit(128 + signum)
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
+    if "hang-hard" in d:
+        # Before init, so a test that has seen init knows SIGTERM is ignored.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
 
 def apply_edits(d):
@@ -313,14 +318,17 @@ def count_of(d, name):
 def pre_answer(d):
     if "stderr" in d and d["stderr"] is not True:
         err(str(d["stderr"]).replace("_", " "))
-    if "hang-hard" in d:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        signal.signal(signal.SIGHUP, signal.SIG_IGN)
     if "hang" in d or "hang-hard" in d:
         deadline = time.time() + 3600
         while time.time() < deadline:
             time.sleep(1)
         sys.exit(0)
+    gate = d.get("gate")
+    if gate and gate is not True:
+        path = os.path.join(os.getcwd(), gate)
+        deadline = time.time() + 3600
+        while not os.path.exists(path) and time.time() < deadline:
+            time.sleep(0.05)
     if "sleep" in d and d["sleep"] is not True:
         time.sleep(float(d["sleep"]))
 
@@ -420,7 +428,7 @@ def claude_main(argv):
     prompts = (load_conv("claude", cid) or []) + [prompt]
     save_conv("claude", cid, prompts)
     d = all_directives(prompt, prompts)
-    install_signal_log()
+    install_signal_log(d)
     if "auth-fail" in d:
         err("Invalid API key · Please run /login")
         return 1
@@ -647,7 +655,7 @@ def codex_main(argv):
     prompts = (load_conv("codex", cid) or []) + [prompt]
     save_conv("codex", cid, prompts)
     d = all_directives(prompt, prompts)
-    install_signal_log()
+    install_signal_log(d)
     if "no-rollout" not in d:
         write_rollout(cid, os.getcwd())
     if "auth-fail" in d:
@@ -770,7 +778,7 @@ def gemini_main(argv):
     prompts = (load_conv("gemini", cid) or []) + [prompt]
     save_conv("gemini", cid, prompts)
     d = all_directives(prompt, prompts)
-    install_signal_log()
+    install_signal_log(d)
     if "auth-fail" in d:
         err("Authentication failed: please set an auth method")
         return 1

@@ -1,12 +1,43 @@
 """Control surface: status, wait --any / --mine, list filters, events --follow."""
 
 import json
+import os
+import subprocess
+import sys
 import time
 
-from helpers import SessionTest
+from helpers import SCRIPT, SessionTest
+
+# Runs `agent-session ARGS...` in-process and writes the names a `wait` picked
+# to MARKER (json) as soon as it has picked them, before it starts polling.
+PICK_REPORTER = """
+import importlib.machinery, importlib.util, json, os, sys
+script, marker = sys.argv[1], sys.argv[2]
+loader = importlib.machinery.SourceFileLoader("agent_session_entry", script)
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(mod)
+commands = sys.modules["agent_sessions.commands"]
+expand = commands.expand_names
+def expand_names(names):
+    names = expand(names)
+    with open(marker + ".tmp", "w") as fh:
+        json.dump(names, fh)
+    os.replace(marker + ".tmp", marker)
+    return names
+commands.expand_names = expand_names
+sys.argv = [script] + sys.argv[3:]
+mod.entry()
+"""
 
 
 class ControlTests(SessionTest):
+    def wait_reporting_pick(self, marker, *args):
+        """`wait ARGS` in the background; MARKER appears once it has picked
+        its children (for --mine: those unfinished at that moment)."""
+        return subprocess.Popen([sys.executable, "-B", "-c", PICK_REPORTER, SCRIPT, marker, "wait"] + list(args),
+                                env=self.environ(), cwd=self.work, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, universal_newlines=True)
+
     def test_status_json_running_and_finished(self):
         self.spawn("claude", "x", "work @@slow:8", "--stall", "300")
         self.wait_until(lambda: self.has("x", "progress.json") and self.progress("x").get("phase") == "turn"
@@ -90,16 +121,30 @@ class ControlTests(SessionTest):
         self.ok("kill", "c")
 
     def test_wait_mine_and_list_filters(self):
-        self.spawn("claude", "mine1", "hi @@sleep:1")
-        self.spawn("claude", "mine2", "hi @@sleep:2")
+        # --mine waits for the children unfinished when it is called, so mine1
+        # and mine2 are held at a gate until it has picked them: on a slow
+        # machine a child could otherwise finish during the later spawns.
+        self.spawn("claude", "mine1", "hi @@gate:open")
+        self.spawn("claude", "mine2", "hi @@gate:open @@sleep:1")
         self.spawn("codex", "theirs", "hi @@sleep:25", env={"AGENT_SESSIONS_OWNER": "someone-else"})
-        start = time.time()
-        cp = self.run_as("wait", "--mine", "--timeout", "30")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        picked = os.path.join(self.box, "picked.json")
+        proc = self.wait_reporting_pick(picked, "--mine", "--timeout", "30")
+        try:
+            self.wait_until(lambda: os.path.exists(picked), timeout=30, message="wait --mine never picked its children")
+            with open(picked, encoding="utf-8") as fh:
+                self.assertEqual(sorted(json.load(fh)), ["mine1", "mine2"])
+            start = time.time()
+            open(os.path.join(self.work, "open"), "w").close()
+            stdout, stderr = proc.communicate(timeout=60)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        self.assertEqual(proc.returncode, 0, stdout + stderr)
         self.assertLess(time.time() - start, 7)
-        self.assertIn("name      : mine1", cp.stdout)
-        self.assertIn("name      : mine2", cp.stdout)
-        self.assertNotIn("theirs", cp.stdout)
+        self.assertIn("name      : mine1", stdout)
+        self.assertIn("name      : mine2", stdout)
+        self.assertNotIn("theirs", stdout)
         self.assertFalse(self.has("theirs", "result.json"))
         cp = self.run_as("wait", "--mine", "x")
         self.assertEqual(cp.returncode, 2)

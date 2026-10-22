@@ -31,6 +31,10 @@ git_bin="$(command -v git || true)"
 [ -z "$git_bin" ] || ln -s "$git_bin" "$bin/git"
 export PATH="$here/fake-engine:$bin:/usr/bin:/bin"
 export AGENT_SESSIONS_TEST_ROOT="$root"
+# Keep __pycache__ out of the source tree: the tests import the package
+# directly. test_cli checks that the entry itself never writes bytecode, with
+# `python3 -I`, which ignores this variable.
+export PYTHONDONTWRITEBYTECODE=1
 export AGENT_SESSIONS_TEST_BIN="$bin"
 unset AGENT_SESSION_DEPTH AGENT_SESSION_NAME AGENT_SESSION_STARTED AGENT_SESSIONS_OWNER \
       AGENT_SESSIONS_STATE AGENT_SESSIONS_TMUX_SOCKET AGENT_SESSIONS_TMUX_CONF AGENT_SESSIONS_MAX \

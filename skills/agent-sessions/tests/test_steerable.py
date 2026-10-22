@@ -244,6 +244,9 @@ class SteerableTests(SessionTest):
         self.ok("send", "x", "@@hang", "--no-wait")
         self.wait_until(lambda: (self.progress("x").get("phase") == "turn" and self.progress("x").get("turn") == 2),
                         message="turn 2 not running")
+        # Interrupted before its init, the engine has not stored the turn-2
+        # prompt and the next reply would be #2.
+        self.wait_session("x", turn=2)
         cp = self.ok("send", "x", "next", "--interrupt", "--timeout", "30")
         self.assertIn("interrupt : turn 2 is being stopped", cp.stdout)
         self.assertIn("reply#3: next", cp.stdout)

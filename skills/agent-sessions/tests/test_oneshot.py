@@ -155,6 +155,9 @@ class OneShotTests(SessionTest):
                 return read_json(prog_path).get("last_event_epoch")
             except (OSError, ValueError, AttributeError):
                 return None
+        # The runner stamps its own start first; the engine's quiet events
+        # (one every 0.5 s) only follow its init.
+        self.wait_session("x")
         self.wait_until(lambda: epoch() is not None, timeout=5)
         first = epoch()
         time.sleep(1.6)
@@ -284,8 +287,8 @@ class OneShotTests(SessionTest):
     def test_kill_escalates_to_sigkill(self):
         self.spawn("claude", "x", "@@hang-hard")
         self.wait_until(lambda: self.has("x", "engine.pid"), message="engine not started")
+        self.wait_session("x")   # SIGTERM is ignored from here on
         pid = self.read("x", "engine.pid")["pid"]
-        time.sleep(0.5)
         cp = self.ok("kill", "x", "--grace", "2")
         self.assertIn("force-killed", cp.stdout)
         self.assertFalse(pid_alive(pid))
@@ -578,6 +581,22 @@ class OneShotTests(SessionTest):
         cp = self.run_as("spawn", "claude", "x", self.work, "third", "--replace")
         self.assertEqual(cp.returncode, 2)
         self.assertIn("is running", cp.stderr)
+
+    def test_replace_retires_lingering_runner(self):
+        """Replacing a finished child that still lingers ends its runner
+        first: on its way out that runner writes progress.json, which must not
+        land in the new child's state directory."""
+        self.spawn("claude", "x", "first", env={"AGENT_SESSIONS_LINGER": "60"})
+        self.wait_result("x")
+        self.wait_until(lambda: self.progress("x").get("phase") == "linger", message="runner not lingering")
+        old = self.progress("x")["runner_pid"]
+        self.spawn("claude", "x", "second @@sleep:2", "--replace")
+        self.assertFalse(pid_alive(old), "the old runner outlived the replace")
+        self.wait_until(lambda: self.has("x", "progress.json") and self.progress("x").get("runner_pid"),
+                        message="new runner wrote no progress")
+        self.assertNotEqual(self.progress("x")["runner_pid"], old)
+        self.assertEqual(self.wait_result("x")["status"], "ok")
+        self.assertNotEqual(self.progress("x")["runner_pid"], old)
 
     def test_cap_is_enforced_atomically(self):
         env = self.environ({"AGENT_SESSIONS_MAX": "2"})

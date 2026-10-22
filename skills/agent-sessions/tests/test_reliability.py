@@ -176,10 +176,12 @@ class ReliabilityTests(SessionTest):
         self.assertIn("deadline", res["reason"])
 
     def test_deadline_spans_turns(self):
-        self.spawn("claude", "x", "first", "--steerable", "--deadline", "8")
+        # Turns 1 and 2 end well inside the deadline even on a slow machine, so
+        # turn 3 has started when the deadline stops it.
+        self.spawn("claude", "x", "first", "--steerable", "--deadline", "10")
         self.ok("turn", "x", "1", "--timeout", "20")
-        self.ok("send", "x", "@@sleep:4", "--timeout", "20")
-        cp = self.run_as("send", "x", "@@sleep:4", "--timeout", "20")
+        self.ok("send", "x", "@@sleep:2", "--timeout", "20")
+        cp = self.run_as("send", "x", "@@sleep:30", "--timeout", "30")
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         res = self.wait_result("x", timeout=20)
         self.assertEqual(res["status"], "timeout")

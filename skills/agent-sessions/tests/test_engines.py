@@ -10,6 +10,7 @@ from helpers import SCRIPT, SessionTest, script_module
 
 class ParserTests(SessionTest):
     def test_gemini_flags_and_parse(self):
+        self.env["AGENT_SESSIONS_MAX_GEMINI"] = "3"   # three at once, above the default engine cap of 2
         self.spawn("gemini", "g", "hello gemini")
         self.spawn("gemini", "ro", "hello", "--readonly")
         self.spawn("gemini", "std", "hello", "--tier", "standard")

@@ -10,7 +10,7 @@ from agent_sessions.common import OWNER_COMMS, PS_ENV, read_json, run, sdir_of
 
 __all__ = [
     "ps", "ps_lstart", "pid_running", "process_matches", "engine_alive", "runner_alive",
-    "killpg", "wait_dead", "ps_parent", "child_token", "owner_token", "owner_short", "find_binary",
+    "killpg", "wait_dead", "ps_parent", "ps_argv0", "child_token", "owner_token", "owner_short", "find_binary",
 ]
 
 
@@ -92,6 +92,21 @@ def ps_parent(pid):
     return ppid, " ".join(toks[1:6]), " ".join(toks[6:])
 
 
+def ps_argv0(pid):
+    """argv[0] of pid, or None. `ps -o comm=` is argv[0] on macOS but the
+    executable's own name on Linux, so a process started as `claude` (exec -a,
+    a launcher that names its child) shows there under another name. /proc
+    gives argv exactly; elsewhere the first word of `ps -o args=` stands in."""
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as fh:
+            return fh.read().split(b"\0", 1)[0].decode("utf-8", "replace") or None
+    except (OSError, ValueError):
+        pass
+    cp = ps("-o", "args=", "-p", str(pid))
+    words = cp.stdout.split()
+    return words[0] if cp.returncode == 0 and words else None
+
+
 def child_token(meta):
     """Owner token of everything a child spawns. Includes the start time so a
     reused name never claims an older child's descendants."""
@@ -115,6 +130,8 @@ def owner_token():
             break
         ppid, lstart, comm = info
         base = os.path.basename(comm.strip())
+        if base not in OWNER_COMMS:
+            base = os.path.basename(ps_argv0(pid) or "")
         if base in OWNER_COMMS:
             return "proc:%s:%d:%s" % (base, pid, lstart)
         pid = ppid

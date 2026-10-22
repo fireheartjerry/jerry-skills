@@ -161,7 +161,9 @@ Isolation (details in `references/isolation.md`):
 - `--replace`: reap the old state of this name first. Refused before anything
   is removed when the old child is running, its worktree is dirty, or its branch
   has unmerged commits (the error names `collect <name> --merge` and
-  `reap <name> --discard <tip>`).
+  `reap <name> --discard <tip>`). A finished child that still lingers is ended
+  first and its runner waited for (up to 10 s), so nothing of the old run is
+  written into the new state.
 - `--backend tmux|process` (default `AGENT_SESSIONS_BACKEND`, else tmux when
   installed, else process): see [Backends](#backends-tmux-and-process).
 
@@ -463,7 +465,9 @@ mean the tests pass. `--json`: `{"members": {...}, "overlaps": [{"a", "b",
 Scope: the names given (a group name means its members); otherwise every
 finished child whose owner token matches yours; `--all` lifts the owner filter.
 The children of every child in scope are added (they are owned by the child,
-not by you). Per child, under the state lock: a running child is skipped unless
+not by you). Lingering finished children are ended first and their runners
+waited for (up to 10 s each, outside the lock). Per child, under the state
+lock: a running child is skipped unless
 `--force`, which runs `kill` first; a lingering tmux session is ended; a lost
 child gets a `lost` result first; a worktree with uncommitted changes is
 skipped unless `--force`, which first writes a snapshot
@@ -617,11 +621,13 @@ Used only to scope the default `reap` and to label the OWNER column. In order:
 children are its own; the start time keeps a reused name from claiming an
 earlier child's descendants); `env:<value>` from `AGENT_SESSIONS_OWNER`;
 otherwise the first ancestor process (via `ps -o ppid=,lstart=,comm=`, run
-under the C locale) whose command basename is one of `claude`, `codex`,
-`node`, `cursor-agent`, `opencode`, `t3`, as `proc:<comm>:<pid>:<start time>`;
-otherwise the controlling tty or the user id. A misattribution costs at most
-an extra or missing `reap` entry; explicit names and `--all` are always
-available.
+under the C locale) whose command basename, or failing that the basename of its
+argv[0] (`/proc/<pid>/cmdline`, else `ps -o args=`; Linux's comm is the
+executable's own name, macOS's is argv[0]), is one of `claude`, `codex`,
+`gemini`, `node`, `cursor-agent`, `opencode`, `t3`, as
+`proc:<name>:<pid>:<start time>`; otherwise the controlling tty or the user id.
+A misattribution costs at most an extra or missing `reap` entry; explicit
+names and `--all` are always available.
 
 ## Backends: tmux and process
 

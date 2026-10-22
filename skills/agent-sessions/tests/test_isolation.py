@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 
-from helpers import SCRIPT, SessionTest, pid_alive
+from helpers import SCRIPT, SessionTest, pid_alive, script_module
 
 
 class IsolationTests(SessionTest):
@@ -252,22 +252,77 @@ class IsolationTests(SessionTest):
         self.wait_until(lambda: not self.tmux_alive("x"), timeout=5)
         self.assertFalse(os.path.exists(self.sdir("x")))
 
+    def test_reap_retires_lingering_runner(self):
+        """reap ends a lingering runner and waits for it before removing the
+        state, so its last progress.json write cannot leave the directory
+        behind."""
+        self.spawn("claude", "x", "hi", env={"AGENT_SESSIONS_LINGER": "60"})
+        self.wait_result("x")
+        self.wait_until(lambda: self.progress("x").get("phase") == "linger", message="runner not lingering")
+        runner = self.progress("x")["runner_pid"]
+        self.assertIn("reaped x", self.ok("reap", "x").stdout)
+        self.assertFalse(pid_alive(runner), "the runner outlived the reap")
+        self.assertFalse(os.path.exists(self.sdir("x")))
+
     def test_owner_token_from_ancestor_process(self):
+        """The owner is the nearest engine ancestor, found by its command name
+        or, when that differs (Linux reports the executable's own name, macOS
+        argv[0]), by argv[0]: a binary called claude and a process started as
+        claude both count."""
         bindir = os.path.join(self.box, "bin-owner")
         os.makedirs(bindir)
         fake_claude = os.path.join(bindir, "claude")
         os.symlink("/bin/bash", fake_claude)
-        env = self.environ({"AGENT_SESSIONS_OWNER": None, "AGENT_SESSION_NAME": None})
-        script = 'echo "bashpid=$$"; "$PY" "$AS" spawn claude x "$WORK" "hi @@sleep:0"'
-        env.update({"PY": sys.executable, "AS": SCRIPT, "WORK": self.work})
-        cp = subprocess.run([fake_claude, "-c", script], env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, universal_newlines=True, timeout=60)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        bashpid = [l for l in cp.stdout.splitlines() if l.startswith("bashpid=")][0].split("=", 1)[1]
-        owner = self.meta("x")["owner"]
-        self.assertTrue(owner.startswith("proc:claude:%s:" % bashpid), owner)
-        listing = self.ok("list", env={"AGENT_SESSIONS_OWNER": None}).stdout
-        self.assertIn("claude:%s" % bashpid, listing)
+        # bash 5.1+ (and dash, zsh) exec the last command of `-c` in place of
+        # the shell, which would drop the claude process from the spawn's
+        # ancestry; the trailing exit keeps the spawn its child, as the tool
+        # shell of a real engine is.
+        body = 'echo "bashpid=$$"; "$PY" "$AS" spawn claude %s "$WORK" "hi @@sleep:0"; exit $?'
+        cases = (("x", [fake_claude, "-c", body % "x"], {}),
+                 ("y", ["/bin/bash", "-c", 'exec -a claude /bin/bash -c "$INNER"'], {"INNER": body % "y"}))
+        for name, argv, extra in cases:
+            env = self.environ({"AGENT_SESSIONS_OWNER": None, "AGENT_SESSION_NAME": None})
+            env.update({"PY": sys.executable, "AS": SCRIPT, "WORK": self.work}, **extra)
+            cp = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                universal_newlines=True, timeout=60)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            bashpid = [l for l in cp.stdout.splitlines() if l.startswith("bashpid=")][0].split("=", 1)[1]
+            owner = self.meta(name)["owner"]
+            self.assertTrue(owner.startswith("proc:claude:%s:" % bashpid), (name, owner))
+            listing = self.ok("list", env={"AGENT_SESSIONS_OWNER": None}).stdout
+            self.assertIn("claude:%s" % bashpid, listing)
+
+    def test_owner_token_argv0_fallback(self):
+        """ps_argv0 reads argv[0] of a live process; owner_token takes the
+        command name first and argv[0] only when the name is not an engine."""
+        mod = script_module()
+        procs = sys.modules["agent_sessions.procs"]
+        proc = subprocess.Popen(["/bin/bash", "-c", "exec -a fancy-name /bin/sleep 30"])
+        try:
+            self.wait_until(lambda: os.path.basename(procs.ps_argv0(proc.pid) or "") == "fancy-name",
+                            timeout=10, message="ps_argv0 never saw argv[0]")
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertIsNone(procs.ps_argv0(proc.pid))
+        top = os.getppid()
+        chain = {top: (501, "Tue Oct 20 17:26:46 2026", "/usr/bin/python3"),
+                 501: (502, "Tue Oct 20 17:26:45 2026", "bash"),
+                 502: (503, "Tue Oct 20 17:26:44 2026", "node"),
+                 503: (1, "Tue Oct 20 17:26:43 2026", "zsh")}
+        argv0 = {top: "python3", 501: "/opt/engines/bin/claude", 502: "codex", 503: "-zsh"}
+        saved = (procs.ps_parent, procs.ps_argv0, os.environ.pop("AGENT_SESSIONS_OWNER", None),
+                 os.environ.pop("AGENT_SESSION_NAME", None))
+        procs.ps_parent, procs.ps_argv0 = chain.get, argv0.get
+        try:
+            self.assertEqual(mod.owner_token(), "proc:claude:501:Tue Oct 20 17:26:45 2026")
+            argv0[501] = "bash"
+            self.assertEqual(mod.owner_token(), "proc:node:502:Tue Oct 20 17:26:44 2026")
+        finally:
+            procs.ps_parent, procs.ps_argv0 = saved[0], saved[1]
+            for key, value in (("AGENT_SESSIONS_OWNER", saved[2]), ("AGENT_SESSION_NAME", saved[3])):
+                if value is not None:
+                    os.environ[key] = value
 
     def test_role_defaults_readonly(self):
         self.spawn("claude", "rv", "look", "--role", "review")

@@ -24,6 +24,7 @@ class ResumeTests(SessionTest):
         """Simulate a reboot: SIGKILL the runner and the engine's process group,
         so nothing gets the chance to write a result."""
         self.wait_until(lambda: self.has(name, "engine.pid"), message="engine not started")
+        self.wait_session(name)
         info = self.read(name, "engine.pid")
         prog = self.progress(name)
         os.kill(prog["runner_pid"], signal.SIGKILL)
@@ -80,6 +81,7 @@ class ResumeTests(SessionTest):
         continues the same conversation."""
         self.spawn("claude", "x", "long job @@on-turn:1:hang")
         self.wait_until(lambda: self.has("x", "engine.pid"), message="engine not started")
+        self.wait_session("x")
         engine = self.read("x", "engine.pid")["pid"]
         sid = self.meta("x")["conversation_id"]
         self.tmux("kill-server")

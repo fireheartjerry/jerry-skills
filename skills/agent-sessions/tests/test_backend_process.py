@@ -73,6 +73,7 @@ class ProcessBackendTests(SessionTest):
     def test_process_backend_lost_detection(self):
         self.spawn("claude", "x", "work @@on-turn:1:hang")
         self.wait_until(lambda: self.has("x", "engine.pid"), message="engine not started")
+        self.wait_session("x")
         info = self.read("x", "engine.pid")
         os.kill(self.progress("x")["runner_pid"], signal.SIGKILL)
         os.killpg(info["pgid"], signal.SIGKILL)

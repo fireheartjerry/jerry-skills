@@ -26,6 +26,9 @@ ROOT = os.path.realpath(os.environ.get("AGENT_SESSIONS_TEST_ROOT") or tempfile.m
 FAST = bool(os.environ.get("AGENT_SESSIONS_TEST_FAST"))
 _COUNTER = itertools.count()
 _MODULE = None
+# Tests import the package directly (script_module, test_docs); like the entry
+# script, they must not leave __pycache__ in the skill's source tree.
+sys.dont_write_bytecode = True
 
 
 def read_json(path):
@@ -145,7 +148,10 @@ def wait_until(pred, timeout=20, interval=0.2, message="condition not met"):
 class SessionTest(unittest.TestCase):
     linger = 1
     idle = 3600
-    max_children = 3
+    # Room for the most children any test runs at once, so no test depends on
+    # its first children ending before the later spawns on a slow machine.
+    # Tests of the cap set AGENT_SESSIONS_MAX themselves.
+    max_children = 8
 
     def setUp(self):
         self.box = os.path.join(ROOT, "%s.%s" % (self.__class__.__name__, self._testMethodName))
@@ -307,6 +313,37 @@ class SessionTest(unittest.TestCase):
         if self.has(name, "events.jsonl"):
             assert_valid_events(os.path.join(self.sdir(name), "events.jsonl"))
         return res
+
+    def session_reported(self, name, turn=None):
+        """The engine's session or thread id, once its init event (of `turn`,
+        when given) is in events.jsonl (a partly written last line is
+        skipped), else None."""
+        path = os.path.join(self.sdir(name), "events.jsonl")
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                try:
+                    ev = json.loads(raw)
+                except ValueError:
+                    continue
+                data = ev.get("data") if isinstance(ev, dict) else None
+                if turn is not None and isinstance(ev, dict) and ev.get("turn") != turn:
+                    continue
+                if ev.get("type") == "init" and isinstance(data, dict):
+                    if data.get("session_id") or data.get("thread_id"):
+                        return data.get("session_id") or data.get("thread_id")
+        return None
+
+    def wait_session(self, name, turn=None, timeout=30):
+        """Block until the engine has reported its session (in `turn`, when
+        given). engine.pid appears at Popen; only the init event shows the
+        engine is up: it has stored the prompt in its conversation and set its
+        signal handling. A child lost before that has nothing to resume ("no
+        session id; respawn"), so a test that kills, interrupts or loses an
+        engine must wait for this, not for engine.pid, on a slow machine."""
+        return self.wait_until(lambda: self.session_reported(name, turn), timeout,
+                               message="%s never reported its session" % name)
 
     def signals(self, name=None):
         """Signals the fake engines received (SIGINT, SIGTERM), in order."""

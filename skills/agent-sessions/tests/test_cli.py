@@ -88,7 +88,36 @@ class CliTests(SessionTest):
         for module in ("__init__", "common", "procs", "backend", "state", "engines", "schema", "gitops", "runner",
                        "commands", "cli"):
             self.assertTrue(os.path.exists(os.path.join(pkg, module + ".py")), module)
-        self.assertFalse(os.path.exists(os.path.join(pkg, "__pycache__")), "the entry sets dont_write_bytecode")
+
+    def test_entry_writes_no_bytecode(self):
+        """The entry sets dont_write_bytecode before it imports the package.
+        Checked on a clean copy, so nothing else that imported the package
+        counts, under -I (PYTHONDONTWRITEBYTECODE ignored) with a private
+        pycache prefix; a plain import of the copy is the control and must
+        write there."""
+        copy = os.path.join(self.box, "scripts")
+        shutil.copytree(os.path.dirname(SCRIPT), copy, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        prefix = os.path.join(self.box, "pycache")
+        python = [sys.executable, "-I", "-X", "pycache_prefix=" + prefix]
+        # The prefix mirrors absolute source paths; the stdlib's own startup
+        # imports land there too and are not the entry's doing.
+        mirror = os.path.join(prefix, os.path.realpath(copy).lstrip(os.sep))
+
+        def bytecode():
+            found = [os.path.join(d, f) for top in (copy, mirror) for d, _dirs, files in os.walk(top)
+                     for f in files if f.endswith(".pyc")]
+            return found + [d for d, dirs, _files in os.walk(copy) if "__pycache__" in dirs]
+
+        cp = subprocess.run(python + [os.path.join(copy, "agent-session"), "--help"], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, universal_newlines=True, env=self.environ())
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn("agent-session 3.1.0", cp.stdout)
+        self.assertEqual(bytecode(), [], "the entry sets dont_write_bytecode")
+        cp = subprocess.run(python + ["-c", "import sys; sys.path.insert(0, sys.argv[1]); import agent_sessions.cli",
+                                      copy], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True, env=self.environ())
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertTrue([p for p in bytecode() if p.endswith(".pyc")], "control import wrote no bytecode")
 
     def test_fast_subset(self):
         """tests/run.sh --fast runs only the quick classes and marks the run."""
