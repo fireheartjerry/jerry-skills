@@ -5,13 +5,17 @@
     python3 <skill-dir>/scripts/dev.py <command> --help
 
 Exit codes: 0 success or verdict produced; 1 a gate failed or the measured command failed;
-2 usage error; 3 a command or external tool could not be started. Every expected error is one
+2 usage error; 3 a command or external tool could not be started; 70 an internal error (a
+bug in dev.py: report it with the traceback); 130/143/129 interrupted by SIGINT, SIGTERM or
+SIGHUP (measured process groups are killed first). Every expected error is one
 line starting `dev.py <command>:`; `--json` prints exactly one JSON object on stdout and
 sends warnings to stderr; every random draw takes `--seed` (default 0).
 """
 import importlib
 import os
+import signal
 import sys
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -26,6 +30,7 @@ GROUPS = [
         ("scale", "devkit.measure", "doubling test: exponent with a CI after the startup baseline"),
         ("bound", "devkit.bound", "arithmetic bounds: amdahl, makespan (LPT), ops (Gate 2)"),
         ("changepoint", "devkit.measure", "step changes in a series by binary segmentation"),
+        ("bisect", "devkit.perfbisect", "first slower commit: timed binary search in a throwaway worktree"),
         ("catalog", "devkit.catalog", "technique cards by symptom: precondition, reject_when, facts"),
         ("report", "devkit.report", "fill the report template from compare, scale, aa and oracle"),
         ("oracle", "devkit.oracle", "write a differential unittest: reference vs new, anti-cache check"),
@@ -77,6 +82,31 @@ def find(name):
     return None
 
 
+INTERNAL_ERROR = 70
+
+
+class Terminated(KeyboardInterrupt):
+    """SIGTERM or SIGHUP, raised like Ctrl-C so the measured process group is killed."""
+
+    def __init__(self, signum):
+        KeyboardInterrupt.__init__(self)
+        self.signum = signum
+
+
+def _on_signal(signum, _frame):
+    raise Terminated(signum)
+
+
+def install_signal_handlers():
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, _on_signal)
+            except (ValueError, OSError):   # not the main thread, or unsupported
+                pass
+
+
 def main(argv):
     if not argv:
         print_help(sys.stderr)
@@ -95,6 +125,7 @@ def main(argv):
         return 2
     from devkit.common import DevError
     fn = getattr(importlib.import_module(module), "cmd_" + name.replace("-", "_"))
+    install_signal_handlers()
     try:
         return fn(argv[1:])
     except DevError as e:
@@ -104,9 +135,17 @@ def main(argv):
             for line in e.details:
                 sys.stderr.write("  " + line + "\n")
         return e.code
+    except Terminated as e:
+        sys.stderr.write("dev.py %s: terminated by signal %d\n" % (name, e.signum))
+        return 128 + e.signum
     except KeyboardInterrupt:
         sys.stderr.write("dev.py %s: interrupted\n" % name)
         return 130
+    except Exception as e:  # a bug: say so, with a distinct exit code CI can tell from a gate
+        traceback.print_exc()
+        sys.stderr.write("dev.py %s: internal error: %s: %s (exit %d; please report it)\n" % (
+            name, type(e).__name__, e, INTERNAL_ERROR))
+        return INTERNAL_ERROR
 
 
 if __name__ == "__main__":

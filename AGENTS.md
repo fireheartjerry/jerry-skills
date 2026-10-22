@@ -19,18 +19,18 @@ Entry point: `skills/high-agency/SKILL.md`
 
 ## skills/iterative-improvement
 
-Improvement loop for designs, pages, UI, code, architecture, docs or copy with no test oracle. Not for debugging one defect, a definite done state, explaining, planning or deploying, or work a test suite or benchmark measures, even if asked to iterate until it passes. Use when the user says improve this, polish this, world class, next level, this is good but, audit and fix it, iterate on this, run N rounds or keep going until it is great, and two competent people could disagree whether it is finished. Weighted criteria, hostile review, isolated scoring.
+Improvement loop for existing designs, pages, UI, code, architecture, docs or copy with no test oracle. Not for building from scratch, a one-line edit, debugging one defect, a definite done state, explaining, planning or deploying, or work a test suite, linter or metric measures, even if asked to iterate until it passes. Use when the user says improve this, polish this, world class, next level, this is good but, audit and fix it, iterate on this, run N rounds or keep going until it is great, and two competent people could disagree whether it is finished.
 
 Entry point: `skills/iterative-improvement/SKILL.md`
 
 ## skills/agent-sessions
 
-Delegate work to Claude, Codex or Gemini child sessions with results on disk: wait --any, status, verify gates, budgets, judge, best-of-N, worktrees, resume after reboot. Not for a quick same-engine subtask the host's native subagent tool finishes in one turn. Use it when work must outlive one tool call, fan out in parallel, cross engines (Codex judging Claude's diff), be verified by a command before it counts, stay under a cost cap, or run in its own worktree. Triggers: "spawn an agent", "run these in parallel", "get codex to review", "second opinion", "best of 3", "child session".
+Delegate work to Claude or Codex child agents on this machine (Gemini experimental) with results on disk: verify gates, cost caps, judge, best-of-N, worktrees, resume after reboot. Not for a same-engine subtask or short fan-out the host's native subagent tool handles, a long shell job (background it), cloud or scheduled agents, or building agent apps. Use it when agent work runs unattended, fans out under a budget, crosses engines (Codex reviewing Claude's diff), must pass a command, or needs a worktree. Triggers: "spawn an agent", "get codex to review", "best of 3", "child session".
 
 Entry point: `skills/agent-sessions/SKILL.md`
 
 ## skills/competitive-systems
 
-Make real software faster, cheaper or more scalable: profile, bound the gain, apply an algorithmic technique whose precondition holds, prove it with an oracle and A/B timing. Not for I/O or network waits, config, micro-optimisation or inputs small enough for brute force: it says when to stop. Covers quadratic loops, dedup, slow CI and test selection, dependency impact, LLM context packing, multi-pattern scans, repeated work, perf regressions, and whether a claimed speedup is real. Use for 'this is O(n^2)', 'CI takes 40 minutes', 'which tests must run for this PR', 'is this speedup real'.
+Fix code whose run time grows too fast with input size: bound the gain, prove the fix with an oracle and A/B timing. Not for I/O or network waits, SQL or database tuning, constant-factor tuning (SIMD, allocations, micro-optimisation), tail latency, lock contention or inputs small enough for brute force: it says when to stop. Covers quadratic loops, dedup, slow CI and test selection, dependency impact, job scheduling across workers, LLM context packing, multi-pattern scans, repeated work, benchmark regressions. Use for 'this is O(n^2)', 'CI takes 40 minutes', 'is this speedup real'.
 
 Entry point: `skills/competitive-systems/SKILL.md`

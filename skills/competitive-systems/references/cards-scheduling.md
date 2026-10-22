@@ -8,6 +8,9 @@ question is only "what order", go to Topological order in `cards-graphs-impact.m
 
 ## LPT across workers
 
+Repo tool: `dev.py bound makespan --durations FILE --workers M` (LB, LPT plan, Graham bound,
+the current plan replayed) and `dev.py shards N` for recorded test durations.
+
 **Problem shape:** m runners or process slots, independent jobs of uneven length, wall time
 far above total/m; jobs split alphabetically or round-robin.
 
@@ -88,13 +91,14 @@ output).
 - Measuring the gain as "this week against last week": different commits are different
   inputs. Before comes from the recorded history under the current plan; the plan number
   comes from the replay; the verdict comes from reruns of the same commit under both plans,
-  stopping when the noise rule passes (`measurement.md`, section 4, expensive runs).
+  stopping when `dev.py compare` returns FASTER or SLOWER (`measurement.md`, section 4,
+  expensive runs).
+- The longest job exceeds sum/m: LB is then the longest job, LPT already starts it first and
+  cannot beat it; report that, and treat splitting that job as the lever.
 
 **Not when:**
 - Jobs have dependencies: Critical-path list scheduling.
 - m = 1.
-- The longest job exceeds sum/m: that job is the bottleneck; split it or run it first and
-  accept LB.
 - The current makespan is already within 10% of LB: the only levers are the ones that lower
   LB (precondition step 3).
 
@@ -173,6 +177,9 @@ predecessors end) and the bound.
 - No dependencies: LPT is simpler and has a better bound.
 
 ## Fewest workers for a deadline
+
+Repo tool: `dev.py bound makespan --durations FILE --workers M`, repeated for each M; the
+LB and LPT makespan it prints bracket the answer.
 
 **Problem shape:** "How many runners do we need to finish in D minutes".
 

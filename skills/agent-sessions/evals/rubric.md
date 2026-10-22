@@ -32,9 +32,11 @@ rounded to the nearest integer, clamped to 0..10.
 
 - Command order matters only where the ideal says so (for example `conflicts`
   before `collect`, `recover --dry-run` before `recover`).
-- A transcript may substitute an equivalent: `--budget-usd` per child instead of
-  `--tree-budget-usd`, `--after` chains instead of a plan file, the other engine
-  when the ideal allows it. Equivalents score in full.
+- A transcript may substitute an equivalent: `--after` chains instead of a plan
+  file, the other engine when the ideal allows it, and for one cap over several
+  children any of a plan's tree budget, `--ledger`, or per-child `--budget-usd`
+  that sums to the cap. Equivalents score in full. Per-child budgets that each
+  equal the whole cap, or a tree budget on one sibling, are not a cap.
 - Asking the user one clarifying question costs nothing when the scenario is
   ambiguous; asking for information the situation already gives counts as a
   partial step.
@@ -45,6 +47,16 @@ rounded to the nearest integer, clamped to 0..10.
 ## Routing eval (triggers.json)
 
 For each phrase, record whether the host loaded the skill. Report should-fire
-recall (fired / 20) and should-not-fire specificity (not fired / 20)
+recall (fired / 30) and should-not-fire specificity (not fired / 30)
 separately, with the misses listed. A phrase is a defensible miss when its
 `why` names a judgement call; say so rather than relabelling it.
+`evals/run_routing.py` approximates a host with a cheap classifier model that
+sees the descriptions of the skills in this repository only (not the host's
+own skills), under a hard spend cap; `--dry-run` spends nothing.
+
+## Scenario runner
+
+`evals/run_scenarios.py` produces transcripts for this rubric: one executor run
+per scenario and arm (`skill`, `none`), each graded by a separate call that
+does not see the arm, under a hard spend cap. It prints per-scenario scores
+and the per-arm means, and saves every transcript and grade.

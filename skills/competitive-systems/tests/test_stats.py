@@ -18,7 +18,7 @@ def brute_u(a, b):
 
 
 class LocationSpreadTests(unittest.TestCase):
-    def test_median_and_quartiles_phase1_cases(self):
+    def test_median_and_quartiles_reference_cases(self):
         self.assertEqual(stats.median([3, 1, 2]), 2.0)
         self.assertEqual(stats.median([4, 1, 3, 2]), 2.5)
         self.assertEqual(stats.median([7]), 7.0)

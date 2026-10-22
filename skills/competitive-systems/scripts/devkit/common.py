@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import platform
+import posixpath
 import re
 import signal
 import subprocess
@@ -65,7 +66,15 @@ def print_json(obj):
 
 
 def fmt_time(seconds):
-    """8.10 s / 90.3 ms / 50 us, the phase-1 format."""
+    """8.10 s / 90.3 ms / 50 us; an hour or more also in hours: 122400.00 s (34.0 h)."""
+    if seconds != seconds:
+        return "n/a"
+    if seconds == float("inf"):
+        return "inf s"
+    if seconds >= 1e7:
+        return "%.3g s (%.3g h)" % (seconds, seconds / 3600.0)
+    if seconds >= 3600.0:
+        return "%.2f s (%.1f h)" % (seconds, seconds / 3600.0)
     if seconds >= 1.0:
         return "%.2f s" % seconds
     if seconds >= 0.001:
@@ -165,6 +174,26 @@ def run_quiet(argv, cwd=None):
     return p.returncode, p.stdout
 
 
+def run_capture(argv, cwd=None):
+    """Run argv, return (returncode, stdout, stderr) or (None, '', reason) when it cannot
+    start."""
+    try:
+        p = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True)
+    except OSError as e:
+        return None, "", str(e)
+    return p.returncode, p.stdout, p.stderr
+
+
+def git_refusal_hint(root):
+    """A one-line fix when git refuses root (safe.directory), else None."""
+    rc, _, err = run_capture(["git", "-C", root, "rev-parse", "--is-inside-work-tree"])
+    if rc and "dubious ownership" in err:
+        return ("git refuses %s (dubious ownership: the directory belongs to another user); "
+                "run `git config --global --add safe.directory %s`" % (root, root))
+    return None
+
+
 def repo_root(override=None):
     """(root, note). Order: override, DEVKIT_REPO, git toplevel, current directory."""
     if override:
@@ -178,6 +207,9 @@ def repo_root(override=None):
     rc, out = run_quiet(["git", "rev-parse", "--show-toplevel"])
     if rc == 0 and out.strip():
         return out.strip(), None
+    hint = git_refusal_hint(os.getcwd())
+    if hint:
+        return os.getcwd(), hint + "; using the current directory as the root"
     return os.getcwd(), "not a git repository; using the current directory as the root"
 
 
@@ -294,7 +326,7 @@ def changed_files(root, base=None):
             base = "origin/" + base
         tokens = _git_z(root, ["diff", "--name-status", "-z", "--find-renames", "%s...HEAD" % base])
         if tokens is None:
-            raise UsageError("git diff against %s failed; is it a valid ref?" % base)
+            raise UsageError(base_diff_failure(root, base))
         parse(tokens)
     tokens = _git_z(root, ["diff", "--name-status", "-z", "--find-renames", "HEAD"])
     if tokens is not None:
@@ -303,6 +335,23 @@ def changed_files(root, base=None):
     for path in tokens or []:
         add("?", path)
     return out
+
+
+def base_diff_failure(root, base):
+    """Why `git diff BASE...HEAD` failed, with the fix: a missing ref, a shallow clone with no
+    merge base (the default CI checkout), or git's own message."""
+    rc, out, err = run_capture(["git", "-C", root, "diff", "--name-only", "%s...HEAD" % base])
+    last = (err.strip().splitlines() or ["unknown error"])[-1]
+    if not _resolves(root, base):
+        return ("--base %s does not resolve; is it a valid ref? In a CI checkout fetch it first "
+                "(git fetch origin %s, or actions/checkout with fetch-depth: 0)"
+                % (base, base.split("/", 1)[-1]))
+    rc2, shallow = run_quiet(["git", "-C", root, "rev-parse", "--is-shallow-repository"])
+    if rc2 == 0 and shallow.strip() == "true":
+        return ("git diff against %s failed (%s): this is a shallow clone, so %s and HEAD share "
+                "no merge base; fetch full history (actions/checkout fetch-depth: 0, or git "
+                "fetch --unshallow) or pass --base <merge-base sha>" % (base, last, base))
+    return "git diff against %s failed: %s" % (base, last)
 
 
 def _resolves(root, ref):
@@ -336,12 +385,40 @@ def rel_to_root(root, path):
 _GLOB_CACHE = {}
 
 
-def glob_regex(pattern):
-    """Compile a gitignore-style glob: `**/` is zero or more directories, a trailing `/**`
-    everything below, `*` and `?` stay inside one path segment, `[...]` is a class."""
-    rx = _GLOB_CACHE.get(pattern)
-    if rx is not None:
-        return rx
+def _split_braces(pattern):
+    """Expand `{a,b}` alternation (nested braces allowed) into a list of patterns; a brace
+    without a matching close or without a comma stays literal."""
+    depth, start = 0, None
+    for i, c in enumerate(pattern):
+        if c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                body = pattern[start + 1:i]
+                alts, d, last = [], 0, 0
+                for j, ch in enumerate(body):
+                    if ch == "{":
+                        d += 1
+                    elif ch == "}":
+                        d -= 1
+                    elif ch == "," and d == 0:
+                        alts.append(body[last:j])
+                        last = j + 1
+                alts.append(body[last:])
+                if len(alts) < 2:
+                    continue
+                head, tail = pattern[:start], pattern[i + 1:]
+                out = []
+                for alt in alts:
+                    out.extend(_split_braces(head + alt + tail))
+                return out
+    return [pattern]
+
+
+def _glob_body(pattern):
     i, n, out = 0, len(pattern), []
     while i < n:
         c = pattern[i]
@@ -358,20 +435,41 @@ def glob_regex(pattern):
             out.append("[^/]")
             i += 1
         elif c == "[":
-            j = pattern.find("]", i + 1)
-            if j == -1:
+            k = i + 1
+            negate = k < n and pattern[k] == "!"
+            if negate:
+                k += 1
+            # a `]` right after `[` or `[!` is a literal member, as in fnmatch
+            j = pattern.find("]", k + 1 if k < n and pattern[k] == "]" else k)
+            if j == -1 or j == k:
                 out.append("\\[")
                 i += 1
             else:
-                body = pattern[i + 1:j]
-                if body.startswith("!"):
-                    body = "^" + body[1:]
-                out.append("[" + body.replace("\\", "\\\\") + "]")
+                body = pattern[k:j]
+                body = "".join("\\" + ch if ch in "\\]^[" else ch for ch in body)
+                out.append("[" + ("^" if negate else "") + body + "]")
                 i = j + 1
         else:
             out.append(re.escape(c))
             i += 1
-    rx = re.compile("".join(out) + r"\Z")
+    return "".join(out)
+
+
+def glob_regex(pattern):
+    """Compile a gitignore-style glob: `**/` is zero or more directories, a trailing `/**`
+    everything below, `*` and `?` stay inside one path segment, `[...]` is a class (`[!...]`
+    negates, a leading `]` is literal), `{a,b}` is alternation. UsageError for a pattern
+    that cannot compile, such as a reversed range `[z-a]`."""
+    rx = _GLOB_CACHE.get(pattern)
+    if rx is not None:
+        return rx
+    alts = _split_braces(pattern)
+    body = _glob_body(alts[0]) if len(alts) == 1 else \
+        "(?:%s)" % "|".join(_glob_body(a) for a in alts)
+    try:
+        rx = re.compile(body + r"\Z")
+    except re.error as e:
+        raise UsageError("glob %r cannot be compiled: %s" % (pattern, e))
     _GLOB_CACHE[pattern] = rx
     return rx
 
@@ -399,18 +497,64 @@ def first_match(patterns, relpath):
     return None
 
 
-def walk_files(root, exclude_dirs):
+def git_listed_files(root):
+    """Tracked plus untracked, not-ignored files of the git work tree at root (relative,
+    posix, sorted), or None when root is not the top of a git work tree or git is absent."""
+    rc, top = run_quiet(["git", "-C", root, "rev-parse", "--show-toplevel"])
+    if rc != 0 or not top.strip():
+        return None
+    if os.path.realpath(top.strip()) != os.path.realpath(root):
+        return None
+    tokens = _git_z(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    if tokens is None:
+        return None
+    return sorted(set(t for t in tokens if t))
+
+
+def walk_files(root, exclude_dirs, use_git=True):
     """Sorted repository-relative posix paths of regular files, pruning excluded dirs.
 
-    An exclude entry without `/` prunes a directory of that name anywhere; with `/` it is a
-    glob on the directory's relative path.
+    Inside a git work tree (root is its top level) the candidates come from `git ls-files
+    --cached --others --exclude-standard`, so gitignored directories (virtual environments,
+    generated code, output) are never read; elsewhere the tree is walked. Either way an
+    exclude entry without `/` prunes a directory of that name anywhere, an entry with `/` is
+    a glob on the directory's relative path, and a directory holding `pyvenv.cfg` (a virtual
+    environment under any name) is pruned.
     """
-    plain = set(d for d in exclude_dirs if "/" not in d and not any(ch in d for ch in "*?["))
+    plain = set(d for d in exclude_dirs if "/" not in d and not any(ch in d for ch in "*?[{"))
     globbed = [d for d in exclude_dirs if d not in plain]
+    listed = git_listed_files(root) if use_git else None
+    if listed is not None:
+        venvs = set(posixpath.dirname(f) for f in listed
+                    if posixpath.basename(f) == "pyvenv.cfg")
+        bad_dirs = {}
+
+        def excluded_dir(d):
+            hit = bad_dirs.get(d)
+            if hit is None:
+                parent = posixpath.dirname(d)
+                hit = (bool(parent) and excluded_dir(parent)) or \
+                    posixpath.basename(d) in plain or d in venvs or \
+                    any(glob_match(g, d) for g in globbed) or \
+                    os.path.islink(os.path.join(root, d))
+                bad_dirs[d] = hit
+            return hit
+
+        out = []
+        for f in listed:
+            d = posixpath.dirname(f)
+            if d and excluded_dir(d):
+                continue
+            if os.path.isfile(os.path.join(root, f)) and not os.path.islink(os.path.join(root, f)):
+                out.append(f)
+        return out
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = to_posix(os.path.relpath(dirpath, root))
         rel_dir = "" if rel_dir == "." else rel_dir + "/"
+        if rel_dir and "pyvenv.cfg" in filenames:
+            dirnames[:] = []
+            continue
         keep = []
         for d in sorted(dirnames):
             if d in plain or any(glob_match(g, rel_dir + d) for g in globbed):
@@ -443,7 +587,8 @@ DEFAULT_CONFIG = {
                   "Cargo.toml", ".github/workflows/**", "tools/dev.json"],
     "ignore": ["*.md", "*.rst", "docs/**", "LICENSE*", "COPYING*", "*.png", "*.jpg",
                "*.jpeg", "*.gif", "*.svg"],
-    "exclude_dirs": [".git", "node_modules", ".venv", "venv", "dist", "build", "target",
+    "exclude_dirs": [".git", "node_modules", ".venv", "venv", "env", ".conda", ".nox", "dist",
+                     "build", "target", "out", "coverage", ".next", ".nuxt", ".turbo",
                      ".devkit", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache",
                      ".ruff_cache"],
     "test_globs": {
@@ -461,6 +606,16 @@ DEFAULT_CONFIG = {
     "max_changed_files": 25,
 }
 _LIST_KEYS = ("sensitive", "ignore", "exclude_dirs", "always_run", "benchmarks")
+# A path with one of these directory names is test data: `ignore` never drops it, so a
+# changed golden file, snapshot or fixture fails closed instead of selecting nothing.
+TEST_DATA_DIRS = frozenset(("tests", "test", "__tests__", "__snapshots__", "snapshots",
+                            "fixtures", "__fixtures__", "testdata", "test_data", "spec",
+                            "golden", "goldens"))
+
+
+def is_test_data(relpath):
+    """True when a directory segment of relpath names a test or fixture directory."""
+    return any(seg in TEST_DATA_DIRS for seg in to_posix(relpath).split("/")[:-1])
 _DICT_KEYS = ("commands", "test_globs", "test_map", "size_audit")
 STEPS = ("lint", "typecheck", "test", "test_report")
 
@@ -532,6 +687,25 @@ def load_config(root, warn_unknown=True):
                 if not (isinstance(targets, list) and all(isinstance(t, str) for t in targets)):
                     raise UsageError("%s: test_map[%r] must be a list of paths" % (where, src))
         cfg[key] = value
+    for key in ("sensitive", "ignore", "exclude_dirs", "always_run"):
+        for g in cfg.get(key) or []:
+            if not isinstance(g, str):
+                raise UsageError("%s: %s entries must be strings" % (where, key))
+            try:
+                glob_regex(g.lstrip("/"))
+            except UsageError as e:
+                raise UsageError("%s: %s: %s" % (where, key, e.message))
+    for lang, globs in cfg["test_globs"].items():
+        for g in globs if isinstance(globs, list) else []:
+            try:
+                glob_regex(str(g).lstrip("/"))
+            except UsageError as e:
+                raise UsageError("%s: test_globs.%s: %s" % (where, lang, e.message))
+    for g in cfg.get("test_map", {}):
+        try:
+            glob_regex(g.lstrip("/"))
+        except UsageError as e:
+            raise UsageError("%s: test_map: %s" % (where, e.message))
     cfg["path"] = where
     return cfg
 

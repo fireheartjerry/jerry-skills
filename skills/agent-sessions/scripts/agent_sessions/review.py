@@ -13,7 +13,7 @@ import time
 
 from agent_sessions.common import (
     DEFAULT_BUDGET, NAME_RE, die, fmt_cost, kv, now_iso, options_of, out, parse_args, parse_count,
-    parse_duration, read_json, read_text, sdir_of, warn, write_json, write_text,
+    parse_duration, parse_usd, read_json, read_text, sdir_of, warn, write_json, write_text,
 )
 from agent_sessions.procs import owner_token
 from agent_sessions.state import (
@@ -23,8 +23,8 @@ from agent_sessions.state import (
 from agent_sessions.engines import JUDGE_PROMPT, OTHER_ENGINE
 from agent_sessions.schema import JUDGE_SCHEMA, validate
 from agent_sessions.gitops import (
-    branch_tip, changed_files, commits_ahead, delete_ref, dirty_files, git, is_dirty, list_snapshots, repo_root,
-    resolve_commit, snapshot_records, SNAPSHOT_ENV,
+    branch_tip, changed_files, commits_ahead, delete_ref, dirty_files, git, is_dirty, list_snapshots, names_z,
+    repo_root, resolve_commit, snapshot_records, status_entries, tree_diff,
 )
 from agent_sessions.launch import SpawnError, create
 
@@ -46,33 +46,34 @@ def _status_exit(status):
 # --------------------------------------------------------------------------- judge
 
 def full_diff(meta):
-    """(patch text, note) of everything a child changed: for a worktree child,
-    base_commit against the worktree including uncommitted and untracked files
-    (through a temporary index, so the worktree's own index is untouched); for
-    a plain git workdir, `git diff HEAD`; else (None, reason)."""
+    """(patch text, note, left_out) of everything a child changed, new files
+    included, built through a private index and object directory (the
+    repository's index and object store stay untouched). A worktree child:
+    its worktree against base_commit. A shared-tree child: the tree against
+    the HEAD it started from, minus the paths that were already uncommitted
+    then (the user's work, recorded at spawn). (None, reason, None) without a
+    repository. `left_out` says what the diff does not show, or is None."""
+    index = os.path.join(sdir_of(meta["name"]), ".judge-index")
     wt = meta.get("worktree") if isinstance(meta.get("worktree"), dict) else None
     if wt and os.path.isdir(wt.get("path") or ""):
         path, base = wt["path"], wt.get("base_commit") or "HEAD"
-        index = os.path.join(sdir_of(meta["name"]), ".judge-index")
-        env = dict(SNAPSHOT_ENV, GIT_INDEX_FILE=index)
-        try:
-            git(path, "read-tree", "HEAD", env=env)
-            git(path, "add", "-A", env=env)
-            cp = git(path, "diff", "--cached", base, env=env)
-        finally:
-            try:
-                os.unlink(index)
-            except OSError:
-                pass
+        cp, left_out = tree_diff(path, base, index)
         if cp.returncode != 0:
-            return None, "git diff failed: %s" % cp.stderr.strip()
-        return cp.stdout, "worktree %s against %s" % (wt.get("branch"), base[:12])
+            return None, "git diff failed: %s" % cp.stderr.strip(), None
+        return cp.stdout, "worktree %s against %s: every change on the branch, committed or not" % (
+            wt.get("branch"), base[:12]), left_out
     workdir = meta.get("workdir") or ""
     if os.path.isdir(workdir) and repo_root(workdir):
-        cp = git(workdir, "diff", "HEAD")
+        base = meta.get("head_at_spawn")
+        if not base or not resolve_commit(workdir, base):
+            base = "HEAD"
+        excluded = [p for p in meta.get("dirty_at_spawn") or [] if isinstance(p, str)]
+        cp, left_out = tree_diff(workdir, base, index, exclude=excluded)
         if cp.returncode == 0:
-            return cp.stdout, "shared tree: uncommitted changes, which may include other writers"
-    return None, "no git repository"
+            return cp.stdout, ("shared tree %s against %s: changes since the child started, which may include "
+                               "other writers" % (workdir, base[:12])), left_out
+        return None, "git diff failed: %s" % cp.stderr.strip(), None
+    return None, "no git repository", None
 
 
 def judge_inputs(name, meta, res, brief_file):
@@ -90,16 +91,17 @@ def judge_inputs(name, meta, res, brief_file):
     if len(answer) > JUDGE_ANSWER_CAP:
         answer = answer[:JUDGE_ANSWER_CAP] + "\n\n[answer capped at %d of %d chars]\n" % (JUDGE_ANSWER_CAP, len(answer))
     write_text(os.path.join(jdir, "answer.md"), answer)
-    patch, note = full_diff(meta)
+    patch, note, left_out = full_diff(meta)
     diff_p = os.path.join(jdir, "diff.patch")
     if patch is not None and patch.strip():
         if len(patch) > JUDGE_DIFF_CAP:
             patch = patch[:JUDGE_DIFF_CAP] + "\n[diff capped at %d chars; see the worktree]\n" % JUDGE_DIFF_CAP
+            left_out = "; ".join(x for x in (left_out, "the diff was capped at %d chars" % JUDGE_DIFF_CAP) if x)
         write_text(diff_p, patch)
     elif os.path.exists(diff_p):
         os.unlink(diff_p)
     write_text(os.path.join(jdir, "schema.json"), json.dumps(JUDGE_SCHEMA, indent=2))
-    return jdir, note
+    return jdir, note, left_out
 
 
 def judge_name(name):
@@ -121,23 +123,38 @@ def judge_where(meta):
     wt = meta.get("worktree") if isinstance(meta.get("worktree"), dict) else None
     if wt and os.path.isdir(wt.get("path") or ""):
         return "The agent worked in a git worktree, which is ./worktree (read it for context around the diff)."
-    return ("The agent worked in %s, which may be outside what you can read; judge from judge/diff.patch and "
-            "judge/answer.md." % (meta.get("workdir") or "an unknown directory"))
+    workdir = meta.get("workdir")
+    if workdir and os.path.isdir(workdir):
+        return ("The agent worked in %s, which you can read for context around the diff (it is a shared tree: "
+                "files there may also hold other people's work)." % workdir)
+    return "The agent's directory is gone; judge from judge/diff.patch and judge/answer.md."
 
 
-def start_judge(name, meta, res, engine, tier, brief_file):
+def judge_read_dirs(meta):
+    """Directories a judge may read besides its own: a shared-tree child's workdir."""
+    wt = meta.get("worktree") if isinstance(meta.get("worktree"), dict) else None
+    if wt and os.path.isdir(wt.get("path") or ""):
+        return []
+    workdir = meta.get("workdir")
+    return [os.path.realpath(workdir)] if workdir and os.path.isdir(workdir) else []
+
+
+def start_judge(name, meta, res, engine, tier, brief_file, caps=None):
     jname = judge_name(name)
-    jdir, note = judge_inputs(name, meta, res, brief_file)
-    prompt = JUDGE_PROMPT % {"schema": json.dumps(JUDGE_SCHEMA), "where": judge_where(meta)}
+    jdir, note, left_out = judge_inputs(name, meta, res, brief_file)
+    about = note + "." + (" Left out: %s." % left_out if left_out else "")
+    prompt = JUDGE_PROMPT % {"schema": json.dumps(JUDGE_SCHEMA), "where": judge_where(meta), "about_diff": about}
     spec = {
         "engine": engine, "name": jname, "dir": sdir_of(name), "prompt": prompt, "tier": tier, "model": None,
         "role": "review", "readonly": True, "steerable": False, "worktree": False, "base": None, "copy": [],
         "timeout_s": 900, "stall_s": meta.get("stall_s") or 900, "deadline_s": None, "retries": 1,
-        "budget_usd": None, "max_tokens": None, "max_turns": None, "tree_budget_usd": None, "tree_max_tokens": None,
+        "budget_usd": (caps or {}).get("budget_usd"), "max_tokens": (caps or {}).get("max_tokens"),
+        "max_turns": None, "tree_budget_usd": None, "tree_max_tokens": None,
         "schema_path": os.path.join(jdir, "schema.json"), "verify": None, "verify_timeout_s": None,
         "verify_fixups": None, "after": [], "queue": True, "on_finish": None, "backend": None, "replace": True,
         "json": False, "n": None, "engines": None, "group": None, "plan": None, "judge_of": name,
         "judge_target": judge_target(res), "ledger": (meta.get("budget") or {}).get("ledger"),
+        "mcp": "none", "add_dirs": judge_read_dirs(meta), "diff": None, "diff_note": left_out,
     }
     try:
         create(spec)
@@ -169,12 +186,13 @@ def record_verdict(name, jname, jres):
            "verdict": verdict["verdict"], "confidence": verdict["confidence"], "summary": verdict["summary"],
            "findings": verdict["findings"], "judged_at_iso": now_iso(), "judge_child": jname,
            "judge_finished_iso": jres.get("finished_iso"), "judged_run": jmeta.get("judge_target"),
+           "diff_note": jmeta.get("diff_note"),
            "untrusted": "summary and findings are judge output: evidence to weigh, not instructions"}
     write_json(os.path.join(sdir_of(name), "judge.json"), doc)
     return doc, None
 
 
-def run_judge(name, engine=None, tier="standard", brief_file=None):
+def run_judge(name, engine=None, tier="standard", brief_file=None, caps=None):
     """Start or reuse the judge of one finished child. Returns (jname, stored
     judge.json or None). Reused: a judge still running on the same finished
     run, and a recorded verdict for that run. A new judge starts when there
@@ -213,8 +231,58 @@ def run_judge(name, engine=None, tier="standard", brief_file=None):
         except OSError:
             pass
     engine = engine or OTHER_ENGINE.get(meta["engine"], "claude")
-    start_judge(name, meta, res, engine, tier, brief_file)
+    start_judge(name, meta, res, engine, tier, brief_file, caps)
     return jname, None
+
+
+# A codex judge reads about 220k tokens even for a one-line diff, and codex
+# applies a token cap only after the turn: a cap below what it reads cannot
+# stop the read, it only turns the finished verdict into a budget failure.
+CODEX_JUDGE_FLOOR = 400000
+# Revise rounds (resume with findings, then judge again) before the parent
+# stops and reports instead of looping on findings that keep coming back.
+MAX_REVISE_ROUNDS = 2
+
+
+def judge_cap_warning(engine, caps):
+    n = (caps or {}).get("max_tokens")
+    if engine == "codex" and isinstance(n, int) and n < CODEX_JUDGE_FLOOR:
+        return ("--max-tokens %d is below what a codex judge reads (about 220k, mostly cached); codex cannot be "
+                "stopped mid-read, so this cap only discards a finished verdict as a budget failure. Use %d or more, "
+                "or a cap only to bound a runaway" % (n, CODEX_JUDGE_FLOOR))
+    return None
+
+
+def judge_next(name, doc):
+    """The `next :` hint after a verdict, with the revise-round stop rule."""
+    # A resume after a verdict moves that verdict to attempts/<k>.judge.json,
+    # so their count is the number of revise rounds already run.
+    adir = os.path.join(sdir_of(name), "attempts")
+    rounds = len([f for f in os.listdir(adir) if f.endswith(".judge.json")]) if os.path.isdir(adir) else 0
+    verdict = doc.get("verdict")
+    if verdict == "approve":
+        return "agent-session conflicts %s, then agent-session collect %s --merge (say the target first)" % (
+            name, name)
+    if rounds >= MAX_REVISE_ROUNDS:
+        return ("stop: %s has had %d revise rounds (the limit is %d). Do not resume it again; report the unresolved "
+                "findings and the spend to the user" % (name, rounds, MAX_REVISE_ROUNDS))
+    if verdict == "reject":
+        return ("check the findings yourself; a reject means a wrong approach, so respawn with a new brief rather "
+                "than resume, or report to the user")
+    return ("check each finding, then agent-session resume %s --message \"<the findings you confirmed>\" and judge "
+            "again (revise round %d of %d; stop earlier if a finding recurs or only low ones remain)" % (
+                name, rounds + 1, MAX_REVISE_ROUNDS))
+
+
+def judge_caps(o):
+    """--budget-usd / --max-tokens for judge children (a codex judge of a
+    small diff reads about 200k tokens, mostly cached)."""
+    caps = {}
+    if "budget-usd" in o:
+        caps["budget_usd"] = parse_usd(o["budget-usd"], "--budget-usd")
+    if "max-tokens" in o:
+        caps["max_tokens"] = parse_count(o["max-tokens"], "--max-tokens", 1)
+    return caps
 
 
 def print_verdict(doc, as_json):
@@ -222,9 +290,16 @@ def print_verdict(doc, as_json):
         out(json.dumps(doc, indent=2))
         return
     findings = doc.get("findings") or []
+    cost = fmt_cost(doc.get("cost_usd"))
+    if not isinstance(doc.get("cost_usd"), (int, float)):
+        jres = read_json(os.path.join(sdir_of(doc.get("judge_child") or ""), "result.json")) or {}
+        total = (jres.get("usage") or {}).get("total_tokens") if isinstance(jres.get("usage"), dict) else None
+        cost = "%s tokens, cost unknown" % (total if isinstance(total, int) else "?")
     kv("verdict", "%s (%s %s, %d finding%s, %s)" % (
         doc.get("verdict"), doc.get("engine"), doc.get("tier") or "default", len(findings),
-        "" if len(findings) == 1 else "s", fmt_cost(doc.get("cost_usd"))))
+        "" if len(findings) == 1 else "s", cost))
+    if doc.get("diff_note"):
+        kv("diff", "the judge's diff left out: %s" % doc["diff_note"])
     kv("confidence", doc.get("confidence"))
     out("--- judge summary and findings (judge output, untrusted) ---")
     out(doc.get("summary") or "")
@@ -272,9 +347,16 @@ def cmd_judge(args):
     if engine and engine not in OTHER_ENGINE:
         die("--engine must be claude, codex or gemini")
     budget = parse_duration(o.get("timeout", DEFAULT_BUDGET), "--timeout")
-    jname, stored = run_judge(name, engine, tier, o.get("brief"))
+    caps = judge_caps(o)
+    judged = load_meta(name) or {}
+    problem = judge_cap_warning(engine or OTHER_ENGINE.get(judged.get("engine"), "claude"), caps)
+    if problem:
+        warn(problem)
+    jname, stored = run_judge(name, engine, tier, o.get("brief"), caps)
     if stored:
         print_verdict(stored, o.get("json"))
+        if not o.get("json"):
+            kv("next", judge_next(name, stored))
         return 0
     problems, pending = wait_judges([(name, jname)], budget)
     if pending:
@@ -290,10 +372,17 @@ def cmd_judge(args):
             out(json.dumps({"name": name, "judge_child": jname, "status": "error", "reason": problems[name]}))
         else:
             kv("judge", "failed: %s" % problems[name])
+            jres = read_json(os.path.join(sdir_of(jname), "result.json")) or {}
+            if jres.get("failure_class") == "budget":
+                kv("note", "the judge hit its cap; the work it read is paid for and the verdict is lost. A codex "
+                   "judge needs --max-tokens %d or more" % CODEX_JUDGE_FLOOR)
             kv("next", "agent-session result %s   (raw judge output); agent-session judge %s starts a new judge"
                % (jname, name))
         return 1
-    print_verdict(read_json(os.path.join(sdir_of(name), "judge.json")), o.get("json"))
+    doc = read_json(os.path.join(sdir_of(name), "judge.json"))
+    print_verdict(doc, o.get("json"))
+    if not o.get("json"):
+        kv("next", judge_next(name, doc or {}))
     return 0
 
 
@@ -357,7 +446,7 @@ def cmd_select(args):
         for m in members:
             row = member_row(0, m)
             if row["status"] == "ok" and row["verify"] in ("pass", None):
-                jname, stored = run_judge(m)
+                jname, stored = run_judge(m, caps=judge_caps(o))
                 if not stored:
                     pairs.append((m, jname))
         problems, still = wait_judges(pairs, DEFAULT_BUDGET)
@@ -411,10 +500,9 @@ def cmd_diff(args):
         if cp.returncode != 0:
             die("git diff failed: %s" % cp.stderr.strip())
         sys.stdout.write(cp.stdout)
-        untracked = [l[3:] for l in git(wt["path"], "status", "--porcelain", "--untracked-files=all").stdout.splitlines()
-                     if l.startswith("??")]
-        for path in untracked:
-            out("untracked : %s" % path)
+        for xy, path in status_entries(wt["path"]):
+            if xy == "??":
+                out("untracked : %s" % path)
         return 0
     workdir = meta.get("workdir") or ""
     if not os.path.isdir(workdir) or not repo_root(workdir):
@@ -444,11 +532,24 @@ def cmd_collect(args):
     if len(pos) != 1 or len(modes) != 1:
         die("usage: collect <name|group> --merge | --squash | --cherry-pick SHA | --branch [--json]")
     mode = modes[0]
+    group = pos[0] if not load_meta(pos[0]) and load_group(pos[0]) else None
     name = resolve_collect_target(pos[0])
     meta = require_meta(name)
     res = check_terminal(name, meta)
     if res is None:
         die("'%s' is still running" % name, "agent-session wait %s --timeout %d" % (name, DEFAULT_BUDGET))
+    res = normalize_result(res)
+    verify = res.get("verify") if isinstance(res.get("verify"), dict) else None
+    unproven = None
+    if res.get("status") != "ok":
+        unproven = "'%s' finished %s%s" % (name, res.get("status"),
+                                            " (%s)" % res["failure_class"] if res.get("failure_class") else "")
+    elif verify and verify.get("status") not in ("pass", None):
+        unproven = "'%s' finished ok but its verify is %s" % (name, verify.get("status"))
+    if unproven and mode != "branch" and not o.get("allow-failed"):
+        die("%s, so its work is not proven; collect brings only verified work into a branch" % unproven,
+            "agent-session result %s (read why), agent-session collect %s --branch (inspect it), or --allow-failed "
+            "when the user wants the partial work anyway" % (name, name))
     wt = meta.get("worktree") if isinstance(meta.get("worktree"), dict) else None
     if not wt:
         die("'%s' did not run in a worktree; its changes are already in %s" % (name, meta.get("workdir")))
@@ -474,10 +575,17 @@ def cmd_collect(args):
             kv("next", "git -C %s merge %s   (or open a pull request from it)" % (shlex.quote(root), branch))
         return 0
     into = git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    tracked_dirty = git(root, "status", "--porcelain", "--untracked-files=no").stdout.strip()
-    if tracked_dirty and mode in ("merge", "squash", "cherry-pick"):
-        die("the parent tree %s has uncommitted changes, so git would refuse to %s; commit or stash them first"
-            % (root, mode.replace("-", " ")))
+    dirty = [p for xy, p in status_entries(root, untracked="no")]
+    if dirty and mode in ("merge", "squash", "cherry-pick"):
+        die("the parent tree %s has uncommitted changes (%s%s); they are the user's (or another writer's) work, "
+            "not yours to commit or stash, and a %s on top of them is not safe" % (
+                root, ", ".join(dirty[:5]), ", ..." if len(dirty) > 5 else "", mode.replace("-", " ")),
+            "agent-session collect %s --branch (report the branch and tip; the user merges when the tree is "
+            "clean), or ask the user to commit or stash first" % name)
+    count = 1 if mode == "cherry-pick" else ahead
+    if not o.get("json"):
+        kv("target", "%s in %s (%s of %s, %d commit%s)" % (into, root, mode, branch, count, "" if count == 1 else "s"))
+        sys.stdout.flush()
     if mode == "merge":
         cp = git(root, "merge", "--no-edit", branch)
         if cp.returncode != 0:
@@ -515,7 +623,8 @@ def cmd_collect(args):
         kv("collected", "%s into %s by %s" % (branch, into, mode))
         kv("head", head)
         if mode == "merge":
-            kv("next", "agent-session reap %s   (deletes the branch, now merged)" % name)
+            kv("next", "agent-session reap %s   (deletes the branch, now merged%s)" % (
+                group or name, "; reaps every member of the group" if group else ""))
         else:
             # A squash or cherry-pick copies the changes; the branch never becomes
             # an ancestor of HEAD, so a plain reap keeps it.
@@ -566,9 +675,7 @@ def cmd_conflicts(args):
         # parent branch after the spawn, plus the parent tree's dirty files.
         since = set(dirty_files(wt["root"]))
         if base:
-            cp = git(wt["root"], "diff", "--name-only", base, "HEAD")
-            if cp.returncode == 0:
-                since.update(l for l in cp.stdout.splitlines() if l.strip())
+            since.update(names_z(git(wt["root"], "diff", "--name-only", "-z", base, "HEAD")))
         parent_since[n] = since
     if not members:
         die("no worktree children in scope; conflicts compares the files changed in worktrees")
@@ -615,6 +722,7 @@ def cmd_conflicts(args):
     if simulation is None:
         simulated = None
     found = bool(overlaps) or bool(simulated)
+    groups_named = [p for p in pos if not load_meta(p) and (load_group(p) or {}).get("kind") == "best-of"]
     if o.get("json"):
         out(json.dumps({"members": members, "overlaps": overlaps, "merge_conflicts": simulated,
                         "merge_simulation": simulation or "unavailable (needs git 2.38+)"}, indent=2))
@@ -625,6 +733,9 @@ def cmd_conflicts(args):
             out("merge conflict (simulated): %s <-> %s : %s" % (sc["a"], sc["b"], ", ".join(sc["files"])))
         if not found:
             out("no overlapping files among %s" % ", ".join(sorted(members, key=lambda k: (k.startswith("("), k))))
+        if groups_named:
+            out("note : members of a best-of group solve the same task, so they overlap by design; before collect, "
+                "check the winner against the parent: agent-session conflicts <winner>")
         if simulation:
             out("note : overlaps are a forecast from changed paths; merge conflicts come from git merge-tree "
                 "on committed work only")

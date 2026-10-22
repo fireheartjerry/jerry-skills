@@ -3,10 +3,8 @@
 The scorer answers one question: *given the criteria and the artifact as it stands
 right now, how many points does it earn?*
 
-Its value comes entirely from what it **does not** know. An agent told "we just
-rebuilt the typography system" will look at the typography and find it improved.
-That is not scoring, it is confirmation. Withholding context is the mechanism, not an
-oversight.
+Its value comes from what it does not know: told "we rebuilt the typography", it would
+find the typography improved. Withholding context is the mechanism.
 
 ## The scorer sees
 
@@ -32,7 +30,7 @@ oversight.
 
 Spawn it with `scripts/spawn_child.sh <engine> scorer <brief> <snapshot> <out> --model
 <pinned model> --evidence <evidence dir>`; the script applies the isolation flags in
-`cross-agent.md` and verifies afterwards that the staged copy was not touched.
+`isolation.md` and verifies afterwards that the staged copy was not touched.
 
 ---
 
@@ -56,8 +54,8 @@ CRITERIA
 
 ARTIFACT
 The ARTIFACT directory named in the STAGING section at the end of this file, which is
-also your working directory. <how to view it: entry file, URL of a server already
-running, what the evidence covers>
+also your working directory. <how to view it: the entry file, and what the evidence
+covers by file name. Never a URL: the scorer has no network.>
 
 PRE-COMPUTED EVIDENCE
 Under the EVIDENCE directory named in the STAGING section. <check name -> file. Each was
@@ -100,6 +98,9 @@ RULES
   Systematic bias in either direction destroys that.
 - If a criterion is ambiguous, score it the stricter way and flag the ambiguity in
   your notes. Ambiguity resolved generously inflates the number.
+- When points rest on an image, the Evidence cell quotes something you can see in it:
+  text on the screen, a size you measured. If you cannot open images, the criterion
+  is N/A and Unscoreable says the capture needs a text form.
 
 OUTPUT FORMAT
 
@@ -132,8 +133,13 @@ loop's N/A round, two criteria unscoreable).
 
 ## Using the result
 
-Log raw total, adjusted max, scaled total, N/A list and gate results to the score log,
-and the per-criterion breakdown to the round log. The per-criterion numbers are the
+Run `scripts/score_math.py check-scorer <out> --criteria <doc>` first: it checks the
+output's arithmetic (points and maxes sum to the Score line, every max matches its
+weight, Scaled is right, each N/A is listed under Unscoreable) and prints the series
+token `decide` takes, so nothing is re-tallied by hand. On a problem line, rerun the
+scorer once; do not correct its numbers. Then log raw total, adjusted max, scaled
+total, N/A list and gate results to the score log, and the per-criterion breakdown to
+the round log. The per-criterion numbers are the
 useful part: the total tells you *whether* the round worked, the breakdown tells you
 *what* worked, which is what you steer with. Gate PASS/FAIL for `score_math.py decide
 --gates` comes from your own gate runs; the scorer's gate table should agree with them,
@@ -147,12 +153,18 @@ triage row (`DO`, source: scorer notes), not a footnote.
 **Watch for a scorer that stops discriminating.** If several criteria return the
 same points every round regardless of what changed, those criteria are not
 measuring anything; their "How to check it" is too soft. Tighten them, bump the rubric
-version, and rescore the previous snapshot (`references/criteria-guide.md`, Amending
-criteria; loop mechanics in `references/full-protocol.md` section 5).
+version, and rescore the previous snapshot (`references/full-protocol.md` section 5).
 A criterion that cannot move is dead weight in the total and it dilutes every real gain.
 
 **Watch for scorer notes flagging the same ambiguity repeatedly.** That is the
 scorer telling you the criteria document has a hole in it. Fix the document.
 
 A criterion N/A two rounds in a row is your problem, not the scorer's. Produce the
-evidence by running the check line, or amend the criterion out.
+evidence by running the check line, or amend the criterion out. When the evidence was
+supplied and the scorer still could not read it (an image, a PDF), the engine cannot
+read that format: run `spawn_child.sh --preflight ENGINE --vision`, hand over a text
+form (axe JSON, a DOM text dump, measured sizes), or pin another engine and rescore.
+
+**Spot-check two image citations per round.** Open the capture and confirm the quoted
+detail is there. One that is not means the scorer described a picture it never saw:
+discard the run and act as for a scorer that cannot read the format.

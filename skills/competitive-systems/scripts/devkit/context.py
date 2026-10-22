@@ -11,9 +11,13 @@ references/cards-llm-context.md.
    direct targets; call-site chunks of each reached file gain score.
 4. Pack: the fixed card algorithm (must-keep ranges subtracted from candidates, ratio greedy
    with the best-single fallback, over-budget must-keep shortened to signature lines and
-   reported, output sorted by path and line) with 10% headroom.
+   reported, output sorted by path and line) with 10% headroom. Candidates scoring under
+   --min-score are dropped first, so a large budget is not filled with noise; --must-keep-text
+   reserves room for text that is not a file (the test command, a hard boundary).
 
-Tokens are estimated as characters / 4 and labelled as an estimate. For a fixed repository
+Tokens are estimated as characters / 4 and labelled as an estimate; every chunk's cost
+includes the `==> path:lines <==` header and separator --emit prints, so the emitted packet
+stays within the limit. For a fixed repository
 state the packet is byte-identical across runs (every iteration is over sorted keys).
 """
 import math
@@ -32,6 +36,7 @@ MAX_CHUNK_LINES = 120         # longer definitions split at methods, then into w
 WINDOW = 100
 NAME_FILE_CAP = 5             # a name defined in (or path-matching) more files is too common
 WHOLE_FILE_SHARE = 0.4        # a path-matched file joins must-keep whole up to this share
+DEFAULT_MIN_SCORE = 0.25     # bm25 is normalised to 1.0 for the best chunk
 USE_BONUS, USE_CAP = 0.5, 1.0
 PATH_FILE_BONUS = 1.0
 HOP_BONUS = {1: 0.6, 2: 0.3}
@@ -48,13 +53,33 @@ def code_like(tok):
     return bool("_" in tok or "." in tok or "/" in tok or re.search(r"[a-z][A-Z]", tok))
 
 
+# Plain words that task text uses for instructions rather than to name code; as weak names
+# they would make any file defining `empty()` or `after()` a direct target. They still count
+# in BM25 scoring.
+STOP_WORDS = frozenset("""
+about above after again against also always another answer before being below between both
+broken bug change changes check could does doing done during each else error errors every
+expect expected fail fails failing fast faster file files first from have here into issue
+just keep last later like line lines make many more most must need never next none only
+other output over please public raise raises rather really result return returns right
+same seems should since slow slower some still such sure than that their them then there
+these they thing think this those through under until used uses using very want when where
+which while will with without work works would wrong your empty status value values true
+false call calls code test tests unittest pytest python after break case data list name
+type types first second third fix fixed run runs running time times way api does
+""".split())
+
+
 def names_in(task_text, weak=True):
     """Names in task order. Code-like tokens (underscore, dot, slash or camelCase) as in the
     card; with weak=True also plain words of 4+ characters (the card's IDENT already
-    requires the length), which exact_hits treats more strictly."""
+    requires the length) that are not common instruction words (STOP_WORDS), which
+    exact_hits treats more strictly."""
     out = []
     for tok in IDENT.findall(task_text):
-        if (code_like(tok) or weak) and tok not in out:
+        if tok in out:
+            continue
+        if code_like(tok) or (weak and tok.lower() not in STOP_WORDS):
             out.append(tok)
     return out
 
@@ -231,13 +256,14 @@ def subtract_ranges(c, chosen):
 
 
 def pack(must_keep, candidates, B, tokens, headroom=HEADROOM, shorten=None,
-         merge_candidates=True):
+         merge_candidates=True, reserve=0):
     """The card's fixed pack. `shorten` trims a must-keep chunk to its signature lines
     (identity when None). merge_candidates=False skips the adjacency merge for candidates
     that are already disjoint (a partition of files into chunks), where merging adjacent
-    chunks would collapse a file into one chunk at the larger score."""
+    chunks would collapse a file into one chunk at the larger score. `reserve` tokens are
+    taken off the limit first (text that must appear but is not a file chunk)."""
     shorten = shorten or (lambda c: c)
-    limit = int(B * (1 - headroom))
+    limit = int(B * (1 - headroom)) - reserve
     chosen = merge_ranges(must_keep)
     used = sum(tokens(c) for c in chosen)
     note_ = ""
@@ -350,6 +376,13 @@ class Repo(object):
 
     def tokens(self, c):
         chars = sum(len(line) + 1 for _, line in self.text_of(c))
+        return (chars + 3) // 4
+
+    def cost(self, c):
+        """Tokens of the chunk as --emit prints it: the text plus its header and blank line."""
+        chars = sum(len(line) + 1 for _, line in self.text_of(c))
+        chars += len(chunk_header(c.path, c.start, c.end,
+                                  _ranges(c.keep) if c.keep is not None else None)) + 2
         return (chars + 3) // 4
 
     def chunk_at(self, path, line):
@@ -494,8 +527,9 @@ def _expand(repo, direct, add):
     return expanded
 
 
-def _candidates(repo, query, bonus, reasons):
-    """(candidate chunks scored by normalised BM25 plus bonuses, retrieval description)."""
+def _candidates(repo, query, bonus, reasons, min_score=0.0):
+    """(candidate chunks scored by normalised BM25 plus bonuses, retrieval description,
+    number dropped under min_score)."""
     docs = [(f, a, "%s %s\n%s" % (f, label, "\n".join(repo.lines[f][a - 1:b])))
             for f, a, b, label in repo.chunks]
     if len(docs) > BM25_MIN_CHUNKS:
@@ -507,24 +541,36 @@ def _candidates(repo, query, bonus, reasons):
         ranked = score_direct(docs, query)
     top = ranked[0][1] if ranked and ranked[0][1] > 0 else 0.0
     lexical = dict((cid, s / top) for cid, s in ranked) if top else {}
-    candidates = []
+    candidates, dropped = [], 0
     for cid, (f, a, b, label) in enumerate(repo.chunks):
         lex = lexical.get(cid, 0.0)
         score = round(lex + bonus.get((f, a), 0.0), 9)
         if score <= 0:
             continue
+        if score < min_score:
+            dropped += 1
+            continue
         why = list(reasons.get((f, a), []))
         if lex > 0:
             why.append("bm25 %.2f" % lex)
         candidates.append(Chunk(f, a, b, score, "; ".join(why)))
-    return candidates, retrieval
+    return candidates, retrieval, dropped
+
+
+TEXT_PATH = "<text>"
+
+
+def text_cost(text):
+    return (len(text) + 1 + len(chunk_header(TEXT_PATH, 1, 1, None)) + 2 + 3) // 4
 
 
 def build_packet(root, query, budget=DEFAULT_BUDGET, must_keep=(), cfg=None, info=None,
-                 emit=False):
+                 emit=False, min_score=DEFAULT_MIN_SCORE, keep_text=()):
     """The packet as a dict (schema devkit-context/1)."""
     if budget <= 0:
         raise UsageError("--budget must be a positive number of tokens")
+    if min_score < 0:
+        raise UsageError("--min-score must be >= 0")
     repo = Repo(root, cfg, info)
     notes = []
     names = names_in(query)
@@ -541,7 +587,8 @@ def build_packet(root, query, budget=DEFAULT_BUDGET, must_keep=(), cfg=None, inf
 
     _must_and_bonus(repo, names, hits, direct, why_direct, limit, must, add)
     expanded = _expand(repo, direct, add)
-    candidates, retrieval = _candidates(repo, query, bonus, reasons)
+    candidates, retrieval, dropped = _candidates(repo, query, bonus, reasons, min_score)
+    reserve = sum(text_cost(t) for t in keep_text)
 
     def shorten(c):
         if c.keep is not None or c.path not in repo.lines:
@@ -550,17 +597,28 @@ def build_packet(root, query, budget=DEFAULT_BUDGET, must_keep=(), cfg=None, inf
                 if i == c.start or SIGNATURE.match(line) or _mentions(line, names)]
         return c._replace(keep=tuple(kept))
 
-    out, used, pack_note = pack(must, candidates, budget, repo.tokens, HEADROOM, shorten,
-                                merge_candidates=False)
+    out, used, pack_note = pack(must, candidates, budget, repo.cost, HEADROOM, shorten,
+                                merge_candidates=False, reserve=reserve)
     chunks = []
+    for t in keep_text:
+        item = {"path": TEXT_PATH, "start": 1, "end": 1, "lines": None,
+                "tokens": text_cost(t), "score": 0.0, "must_keep": True,
+                "reason": MUST + "--must-keep-text"}
+        if emit:
+            item["text"] = t
+        chunks.append(item)
+    used += reserve
     for c in out:
         item = {"path": c.path, "start": c.start, "end": c.end,
                 "lines": _ranges(c.keep) if c.keep is not None else None,
-                "tokens": repo.tokens(c), "score": round(c.score, 6),
+                "tokens": repo.cost(c), "score": round(c.score, 6),
                 "must_keep": c.reason.startswith(MUST), "reason": c.reason}
         if emit:
             item["text"] = "\n".join(line for _, line in repo.text_of(c))
         chunks.append(item)
+    if dropped:
+        notes.append("%d candidate chunk(s) scored under --min-score %g and were left out; "
+                     "%d of %d tokens unused" % (dropped, min_score, max(0, limit - used), limit))
     if not names:
         notes.append("the query names no identifier or path; ranking is lexical only")
     if not candidates and not must:
@@ -570,6 +628,7 @@ def build_packet(root, query, budget=DEFAULT_BUDGET, must_keep=(), cfg=None, inf
             "direct_targets": direct, "direct_reasons": dict((p, why_direct[p]) for p in direct),
             "retrieval": retrieval, "expanded": expanded, "files": len(repo.files),
             "chunks_total": len(repo.chunks), "chunks": chunks, "used": used,
+            "min_score": min_score, "dropped_below_min_score": dropped,
             "note": pack_note, "notes": notes}
 
 
@@ -581,6 +640,31 @@ def _ranges(keep):
         else:
             out.append([i, i])
     return out
+
+
+def chunk_header(path, start, end, lines):
+    span = "%d-%d" % (start, end)
+    if lines is not None:
+        span += " (signature lines %s)" % ", ".join(
+            "%d-%d" % tuple(r) if r[0] != r[1] else str(r[0]) for r in lines)
+    return "==> %s:%s <==" % (path, span)
+
+
+def emit_blocks(chunks):
+    """[(header, text)] with adjacent full chunks of one file merged into one block."""
+    blocks = []
+    for c in chunks:
+        prev = blocks[-1] if blocks else None
+        if (prev and c["path"] != TEXT_PATH and prev["path"] == c["path"]
+                and prev["lines"] is None and c["lines"] is None
+                and c["start"] == prev["end"] + 1):
+            prev["end"] = c["end"]
+            prev["text"] += "\n" + c["text"]
+            continue
+        blocks.append(dict(c))
+    return [(chunk_header(b["path"], b["start"], b["end"], b["lines"])
+             if b["path"] != TEXT_PATH else "==> %s <==" % TEXT_PATH, b["text"])
+            for b in blocks]
 
 
 def render(p, emit=False):
@@ -606,25 +690,32 @@ def render(p, emit=False):
     for n in p["notes"]:
         lines.append("note: " + n)
     if emit:
-        for c in p["chunks"]:
-            span = "%d-%d" % (c["start"], c["end"])
-            if c["lines"] is not None:
-                span += " (signature lines %s)" % ", ".join(
-                    "%d-%d" % tuple(r) if r[0] != r[1] else str(r[0]) for r in c["lines"])
-            lines.append("")
-            lines.append("==> %s:%s <==" % (c["path"], span))
-            lines.append(c["text"])
+        body = []
+        for header, text in emit_blocks(p["chunks"]):
+            body.extend(["", header, text])
+        emitted = "\n".join(body).lstrip("\n")
+        lines.append("emitted %d tokens (chars/4, from the first ==> on)" % (
+            (len(emitted) + 3) // 4))
+        lines.extend(body)
     return "\n".join(lines)
 
 
 def cmd_context(args):
     p = Parser(prog="dev.py context", description="Token-budgeted context packet for a task: "
                "exact names first, BM25, bounded import-graph expansion, then the card's pack.")
-    p.add_argument("query", help="the task text: identifiers, paths, error strings, words")
+    p.add_argument("query", help="identifiers, paths and error text from the task (leave out "
+                                 "instructions such as the test command: pass those with "
+                                 "--must-keep-text)")
     p.add_argument("--budget", type=int, default=DEFAULT_BUDGET,
                    help="token budget (default %(default)s; 10%% is kept as headroom)")
     p.add_argument("--must-keep", action="append", default=[], metavar="PATH[:START-END]",
                    help="a file or line range that is never dropped (repeatable)")
+    p.add_argument("--must-keep-text", action="append", default=[], metavar="TEXT",
+                   help="text that is not a file but must be in the packet and counted, such "
+                        "as the verification command or a hard boundary (repeatable)")
+    p.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE,
+                   help="drop candidate chunks scoring under this (bm25 normalised to 1 for "
+                        "the best chunk, plus bonuses; default %(default)s; 0 keeps all)")
     p.add_argument("--emit", action="store_true", help="also print the text of every chunk")
     p.add_argument("--repo", default=None, help="repository root (default: git top level)")
     p.add_argument("--json", action="store_true", help="print one JSON object")
@@ -632,7 +723,8 @@ def cmd_context(args):
     root, root_note = repo_root(a.repo)
     if root_note:
         note(root_note)
-    packet = build_packet(root, a.query, a.budget, a.must_keep, load_config(root), emit=a.emit)
+    packet = build_packet(root, a.query, a.budget, a.must_keep, load_config(root), emit=a.emit,
+                          min_score=a.min_score, keep_text=a.must_keep_text)
     if a.json:
         print_json(packet)
     else:

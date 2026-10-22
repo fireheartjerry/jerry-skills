@@ -1,6 +1,7 @@
 """worktree subdir, branch handling, reap scoping and safety, owner token,
 roles (read-only by default for review and research), --base and --copy."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -289,8 +290,10 @@ class IsolationTests(SessionTest):
             bashpid = [l for l in cp.stdout.splitlines() if l.startswith("bashpid=")][0].split("=", 1)[1]
             owner = self.meta(name)["owner"]
             self.assertTrue(owner.startswith("proc:claude:%s:" % bashpid), (name, owner))
-            listing = self.ok("list", env={"AGENT_SESSIONS_OWNER": None}).stdout
-            self.assertIn("claude:%s" % bashpid, listing)
+            # The spawning shell has exited by now, so a caller with another
+            # token sees the child as adopted; the recorded owner is unchanged.
+            rows = json.loads(self.ok("list", "--json", env={"AGENT_SESSIONS_OWNER": None}).stdout)
+            self.assertTrue([r for r in rows if r["name"] == name and r["owner"] == owner], rows)
 
     def test_owner_token_argv0_fallback(self):
         """ps_argv0 reads argv[0] of a live process; owner_token takes the

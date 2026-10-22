@@ -1,12 +1,16 @@
 # Graph and change-impact cards
 
-Covers "what depends on this", change impact, reachability, cycles, and build order. A
+Covers "what depends on this", change impact, reachability, cycles, build order, and shortest
+paths. A
 dependency graph is only as good as its completeness: when it cannot be made complete, the
 consumer must fail closed (treat unknown nodes as affected). If the time is actually spent
 fetching or rebuilding the graph rather than traversing it, go to `cards-repeated-work.md`. If
 you need a schedule across workers rather than an order, go to `cards-scheduling.md`.
 
 ## Reverse-graph impact set
+
+Repo tool: `dev.py affected FILES --explain` walks this reverse graph from changed files to
+tests for Python, TypeScript/JavaScript, Go and Rust; `dev.py where SYMBOL` lists importers.
 
 **Problem shape:** "Which services, tests or modules are affected if X changes", currently
 answered by recomputing everything, or by a forward DFS from every node.
@@ -274,3 +278,67 @@ class DSU:
 
 See also: scheduling the resulting order across workers is `cards-scheduling.md`; caching the
 graph build is `cards-repeated-work.md`.
+
+## Shortest paths (BFS and Dijkstra)
+
+**Problem shape:** Cheapest route, fewest hops between services, distance from the nearest of
+several sources. Often written as relaxing every edge until nothing changes (O(V x E)),
+Floyd-Warshall for one pair (O(V^3)), or a DFS over all paths (exponential).
+
+**Precondition test:** Every edge weight is non-negative (Dijkstra) or all are equal (BFS;
+several sources start together at distance 0). A negative weight fails this card:
+Bellman-Ford is the tool, and a negative cycle has no shortest path.
+
+**Complexity:** O(V x E) or exponential -> O((V + E) log V) Dijkstra, O(V + E) BFS.
+
+**Sketch:**
+
+```python
+import heapq
+from collections import deque
+
+def bfs_dist(succ, sources):                  # unweighted, several sources: hops to nearest
+    dist = dict((s, 0) for s in sources)
+    q = deque(sorted(dist))
+    while q:
+        u = q.popleft()
+        for v in succ.get(u, ()):
+            if v not in dist:
+                dist[v] = dist[u] + 1
+                q.append(v)
+    return dist
+
+def dijkstra(adj, sources):                   # adj: {u: [(v, w)]}, every w >= 0
+    dist = dict((s, 0) for s in sources)
+    heap = [(0, s) for s in sorted(dist)]
+    heapq.heapify(heap)
+    while heap:
+        d, u = heapq.heappop(heap)
+        if d > dist[u]:
+            continue                          # stale entry: u was settled closer already
+        for v, w in adj.get(u, ()):
+            nd = d + w
+            if nd < dist.get(v, float("inf")):
+                dist[v] = nd
+                heapq.heappush(heap, (nd, v))
+    return dist
+```
+
+Unreachable nodes are absent from the result.
+
+**Oracle:** Bellman-Ford (relax every edge V - 1 times) on random graphs with V <= 30,
+integer weights from 0 to 9 including zero, one to three sources; compare the distance maps,
+unreachable nodes included.
+
+**Traps:**
+- A negative weight gives a wrong answer without an error: check `w >= 0` when building the
+  adjacency.
+- Nodes that do not compare with each other break the heap on equal distances: push
+  `(d, index, node)`.
+- Float weights: sums depend on the path order, so compare distances with a tolerance.
+- Path output: keep a parent map and break ties by node order, or two runs can print
+  different equally short paths.
+
+**Not when:**
+- Negative weights (Bellman-Ford), or all pairs on a small dense graph (Floyd-Warshall).
+- One query on a small graph: Gate 2.

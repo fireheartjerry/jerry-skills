@@ -287,7 +287,7 @@ def rubric_block(s, probes=True):
     out = ["## %s %s" % (s["id"], s["title"]), "",
            "Situation: %s" % s["situation"], "",
            "User message: \"%s\"" % s["user_message"], "",
-           "Fixture: `%s`. Guards a phase-1 strength: %s." % (s["fixture"], "yes" if s["guards_phase1"] else "no"), "",
+           "Fixture: `%s`. Guards a strength of the previous version: %s." % (s["fixture"], "yes" if s["guards_prior_strength"] else "no"), "",
            "Musts:"]
     out += ["- M%d. %s" % (i + 1, m) for i, m in enumerate(s["musts"])]
     out += ["", "Failure modes:"]

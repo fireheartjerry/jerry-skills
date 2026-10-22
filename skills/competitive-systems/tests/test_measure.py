@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,10 +24,11 @@ def run_dev(*args, **kw):
                           stderr=subprocess.PIPE, universal_newlines=True, env=env, **kw)
 
 
-def bench_json(before, after, path, meta=None):
+def bench_json(before, after, path, meta=None, command=("true",), cpu=None):
     """Write a devkit-bench/1 file with two arms whose wall times are given."""
     def arm(vals):
-        return {"command": ["true"], "shell": False, "wall": vals, "cpu": [v * 0.9 for v in vals],
+        return {"command": list(command), "shell": False, "wall": vals,
+                "cpu": [cpu if cpu is not None else v * 0.9 for v in vals],
                 "rss": [1 << 20] * len(vals), "exit": [0] * len(vals),
                 "stdout_sha256": [None] * len(vals)}
     data = {"schema": "devkit-bench/1", "arms": {"before": arm(before), "after": arm(after)},
@@ -98,13 +100,33 @@ class BenchTests(unittest.TestCase):
         self.assertIn("runs    2", p.stdout)
         self.assertIn("Gate 1: CPU", p.stdout)
 
-    def test_check_output_warns_when_outputs_differ(self):
+    def test_differing_outputs_make_the_verdict_invalid(self):
         p = run_dev("bench", "--arm", "a=%s -c print(1)" % PY, "--arm", "b=%s -c print(2)" % PY,
                     "--runs", "2", "--warmup", "0", "--check-output", "--json")
-        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.returncode, 1, p.stderr)
         data = json.loads(p.stdout)
         self.assertTrue(any("outputs differ" in w for w in data["warnings"]), data["warnings"])
         self.assertIn("outputs differ", p.stderr)
+        self.assertEqual(data["outputs_differ"], [["a", "b"]])
+        self.assertEqual(data["compare"]["verdict"], "INVALID")
+        self.assertIn("no timing claim", data["compare"]["report_lines"][1])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "b.json")
+            with open(path, "w") as f:
+                json.dump(data, f)
+            c = run_dev("compare", path)
+            self.assertEqual(c.returncode, 1, c.stderr)
+            self.assertIn("verdict: INVALID", c.stdout)
+            self.assertNotIn("Paste into the report", c.stdout)
+            t = run_dev("bench", "--arm", "a=%s -c print(1)" % PY, "--arm",
+                        "b=%s -c print(2)" % PY, "--runs", "2", "--warmup", "0",
+                        "--check-output")
+            self.assertEqual(t.returncode, 1)
+            self.assertNotIn("Paste into the report", t.stdout)
+        e = run_dev("bench", "--arm", "a=%s -c pass" % PY, "--arm", "b=%s -c pass" % PY,
+                    "--runs", "2", "--warmup", "0", "--check-output", "--json")
+        self.assertEqual(e.returncode, 0, e.stderr)
+        self.assertIn("compared empty outputs", e.stderr)
         hashes = data["arms"]["a"]["stdout_sha256"]
         self.assertEqual(len(set(hashes)), 1)
         self.assertNotEqual(hashes[0], data["arms"]["b"]["stdout_sha256"][0])
@@ -324,10 +346,235 @@ class AATests(unittest.TestCase):
                         "--", "true", cwd=tmp, env=env)
             self.assertEqual(json.loads(r.stdout)["schema"], "devkit-aa/1")
 
+    def write_aa(self, tmp, command, min_effect, runs=20):
+        import datetime
+        os.makedirs(os.path.join(tmp, ".devkit"), exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with open(os.path.join(tmp, ".devkit", "aa.json"), "w") as f:
+            json.dump({"command": command, "min_effect": min_effect, "ci": [0.9, 1.1],
+                       "runs": runs, "timestamp": stamp}, f)
+
+    def test_saved_floor_applies_only_to_its_own_command_and_never_below(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"DEVKIT_REPO": tmp}
+            self.write_aa(tmp, ["python3", "run_old.py", "4000"], 0.12)
+            other = bench_json(TEN_BEFORE, TEN_AFTER, os.path.join(tmp, "o.json"),
+                               command=("sleep", "1"))
+            q = run_dev("compare", other, "--resamples", "300", cwd=tmp, env=env)
+            self.assertEqual(q.returncode, 0, q.stderr)
+            self.assertIn("min effect 5% (default", q.stdout)
+            self.assertIn("not on these arms", q.stderr)
+            same = bench_json(TEN_BEFORE, TEN_AFTER, os.path.join(tmp, "s.json"),
+                              command=("python3", "run_old.py", "20000"))
+            q = run_dev("compare", same, "--resamples", "300", cwd=tmp, env=env)
+            self.assertIn("min effect 12.0% (from .devkit/aa.json on `python3 run_old.py`, "
+                          "20 runs", q.stdout)
+            q = run_dev("compare", same, "--resamples", "300", "--min-effect", "0.01",
+                        cwd=tmp, env=env)
+            self.assertIn("min effect 12.0% (the A/A noise floor", q.stdout)
+            q = run_dev("compare", same, "--resamples", "300", "--min-effect", "0.2",
+                        cwd=tmp, env=env)
+            self.assertIn("min effect 20% (--min-effect)", q.stdout)
+
+    def test_save_refuses_a_noisier_floor_and_shell_quotes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"DEVKIT_REPO": tmp}
+            self.write_aa(tmp, ["true"], 0.05, runs=20)
+            p = run_dev("aa", "--runs", "3", "--warmup", "0", "--save", "--", "true",
+                        cwd=tmp, env=env)
+            self.assertEqual(p.returncode, 2, p.stderr)
+            self.assertIn("pass --force", p.stderr)
+            p = run_dev("aa", "--runs", "3", "--warmup", "0", "--save", "--force",
+                        "--resamples", "300", "--", "true", cwd=tmp, env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("runs the command 6 times", p.stderr)
+            self.assertIn("under 10", p.stderr)
+            p = run_dev("aa", "--shell", "--runs", "2", "--warmup", "0", "--resamples", "300",
+                        "--", PY, "-c", "print(1)", cwd=tmp, env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+
     def test_aa_needs_a_command(self):
         p = run_dev("aa", "--runs", "2")
         self.assertEqual(p.returncode, 2)
         self.assertIn("dev.py aa:", p.stderr)
+
+
+class RobustnessTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="devkit-robust-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_bench_rejects_typos_before_the_timed_runs(self):
+        slow = "a=%s -c \"import time; time.sleep(0.5)\"" % PY
+        for extra in (["--input", "/nonexistent/file"], ["--repo", "/nonexistent"],
+                      ["--out", "/nonexistent/dir/b.json"], ["--min-effect", "-1"]):
+            args = ["bench", "--arm", slow, "--runs", "3", "--warmup", "0"] + extra
+            if extra[0] == "--min-effect":
+                args += ["--arm", slow.replace("a=", "b=", 1)]
+            t0 = time.time()
+            p = run_dev(*args, cwd=self.tmp)
+            self.assertEqual(p.returncode, 2, (extra, p.stderr))
+            self.assertLess(time.time() - t0, 1.2, extra)
+            self.assertNotIn("Traceback", p.stderr)
+
+    def test_unbalanced_quotes_and_zero_medians_are_usage_errors(self):
+        for args in (["bench", "--arm", "a=%s -c 'print(1)" % PY],
+                     ["scale", "--sizes", "10,20", "--baseline", "%s -c 'x" % PY, "--",
+                      PY, "-c", "print({n})"]):
+            p = run_dev(*args, cwd=self.tmp)
+            self.assertEqual(p.returncode, 2, p.stderr)
+            self.assertIn("check the quotes", p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
+        path = bench_json(TEN_BEFORE, TEN_AFTER, os.path.join(self.tmp, "z.json"), cpu=0.0)
+        p = run_dev("compare", path, "--metric", "cpu", cwd=self.tmp)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("zero median", p.stderr)
+        p = run_dev("scale", "--sizes", "10,20", "--", PY, "-c", "pass", cwd=self.tmp)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("quote it as '{n}'", p.stderr)
+
+    def test_compare_rss_uses_bytes_and_skips_wall_checks(self):
+        path = os.path.join(self.tmp, "r.json")
+        bench_json(TEN_BEFORE, TEN_AFTER, path, cpu=0.1)
+        with open(path) as f:
+            data = json.load(f)
+        data["arms"]["before"]["rss"] = [8691712 + i * 4096 for i in range(10)]
+        data["arms"]["after"]["rss"] = [8675328 + i * 4096 for i in range(10)]
+        with open(path, "w") as f:
+            json.dump(data, f)
+        p = run_dev("compare", path, "--metric", "rss", "--min-effect", "0.05", cwd=self.tmp)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("appears to be waiting", p.stderr)
+        before_line = [ln for ln in p.stdout.splitlines() if ln.startswith("Before:")][0]
+        self.assertNotRegex(before_line, r"\d s\b")
+        self.assertRegex(before_line, r"MiB|KiB|MB|KB|B\b")
+
+    def test_changepoint_rejects_non_finite_values(self):
+        path = os.path.join(self.tmp, "s.csv")
+        vals = ["100" if i < 30 else "120" for i in range(60)]
+        vals[10] = "nan"
+        with open(path, "w") as f:
+            f.write("\n".join(vals) + "\n")
+        p = run_dev("changepoint", path, cwd=self.tmp)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn("value 10", p.stderr)
+        sys.path.insert(0, SCRIPTS)
+        try:
+            from devkit import stats
+        finally:
+            sys.path.remove(SCRIPTS)
+        series = [100.0 + (i % 3) * 0.1 for i in range(30)] + \
+                 [120.0 + (i % 3) * 0.1 for i in range(30)]
+        self.assertEqual([pt["index"] for pt in stats.changepoint(series, 5, 0.01)], [30])
+        series[10] = float("nan")
+        with self.assertRaises(ValueError):
+            stats.changepoint(series, 5, 0.01)
+
+    def test_internal_error_exit_code_and_legacy_zero_speedup(self):
+        sys.path.insert(0, SCRIPTS)
+        try:
+            import importlib
+            import types
+            dev = importlib.import_module("dev")
+            fake = types.ModuleType("devkit_fake_cmd")
+
+            def cmd_bench(_args):
+                raise RuntimeError("boom")
+            fake.cmd_bench = cmd_bench
+            sys.modules["devkit_fake_cmd"] = fake
+            real = dev.find
+            dev.find = lambda name: "devkit_fake_cmd"
+            import contextlib
+            import io
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err):
+                    rc = dev.main(["bench"])
+            finally:
+                dev.find = real
+                del sys.modules["devkit_fake_cmd"]
+            self.assertEqual(rc, dev.INTERNAL_ERROR)
+            self.assertIn("internal error: RuntimeError: boom", err.getvalue())
+            from devkit import measure
+            before = measure.summarize([0.001] * 7)
+            after = measure.summarize([0.4] * 7)
+            name, speedup, _ = measure.verdict(before, after)
+            self.assertEqual(name, "slower")
+            self.assertIn("slower", measure.report_lines(before, after, name, speedup)[1])
+        finally:
+            sys.path.remove(SCRIPTS)
+
+    def test_scale_classifies_the_unrounded_exponent_and_reports_progress(self):
+        sys.path.insert(0, SCRIPTS)
+        try:
+            from devkit import measure
+        finally:
+            sys.path.remove(SCRIPTS)
+        real = measure.time_many
+        measure.time_many = lambda cmd, runs, warmup, **kw: (
+            [1e-7 * float(cmd[-1]) ** 1.696] * runs, [None] * runs)
+        try:
+            import contextlib
+            import io
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                res = measure.scale_core(["prog", "{n}"], [10000, 20000, 40000, 80000], 3, 0,
+                                         None, True, progress=True)
+        finally:
+            measure.time_many = real
+        self.assertEqual(res["exponent"], 1.7)
+        self.assertAlmostEqual(res["exponent_raw"], 1.696, places=3)
+        self.assertEqual(res["class"], "between linear and quadratic")
+        self.assertIn("scale: n=10000 median", err.getvalue())
+        self.assertIn("if time grows quadratically", err.getvalue())
+
+    def test_time_once_with_and_without_waitid(self):
+        sys.path.insert(0, SCRIPTS)
+        try:
+            from devkit import measure
+        finally:
+            sys.path.remove(SCRIPTS)
+        real = measure.wait_unreaped
+        try:
+            for waited in (True, False):
+                if not waited:
+                    measure.wait_unreaped = lambda proc: False
+                r = measure.time_once([PY, "-c", "print(1)"], capture_stdout=True)
+                self.assertEqual(r["exit"], 0)
+                self.assertGreater(r["wall"], 0)
+                self.assertIsNotNone(r["stdout_sha256"])
+                self.assertFalse(r["leftover"])
+        finally:
+            measure.wait_unreaped = real
+
+    @unittest.skipUnless(os.name == "posix", "process groups and signals are POSIX")
+    def test_sigterm_and_leftovers_kill_the_measured_process_group(self):
+        import signal
+        pidfile = os.path.join(self.tmp, "pid")
+        proc = subprocess.Popen([PY, "-I", DEV, "bench", "--shell", "--runs", "1", "--warmup",
+                                 "0", "--arm", "a=echo $$ > %s; exec sleep 30" % pidfile],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.tmp)
+        for _ in range(100):
+            if os.path.exists(pidfile) and open(pidfile).read().strip():
+                break
+            time.sleep(0.05)
+        child = int(open(pidfile).read())
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 128 + signal.SIGTERM, err)
+        time.sleep(0.1)
+        with self.assertRaises(OSError):
+            os.kill(child, 0)
+        bg = os.path.join(self.tmp, "bg")
+        p = run_dev("bench", "--shell", "--runs", "1", "--warmup", "0",
+                    "--arm", "a=sleep 30 & echo $! > %s" % bg, cwd=self.tmp)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("left processes running", p.stderr)
+        time.sleep(0.1)
+        with self.assertRaises(OSError):
+            os.kill(int(open(bg).read()), 0)
 
 
 class ScaleTests(unittest.TestCase):
@@ -378,7 +625,8 @@ class BoundTests(unittest.TestCase):
         self.assertAlmostEqual(data["cap"], 1.0 / 0.88, places=9)
         self.assertEqual(run_dev("bound", "amdahl", "--p", "1.5", "--s", "2").returncode, 2)
         self.assertEqual(run_dev("bound", "nosuch").returncode, 2)
-        self.assertEqual(run_dev("bound").returncode, 0)
+        self.assertEqual(run_dev("bound").returncode, 2)
+        self.assertEqual(run_dev("bound", "--help").returncode, 0)
 
     def test_makespan_graham_tight_instance(self):
         # Graham's tight instance for m = 4: LPT gives 15 against the optimum 12 = 4/3 - 1/12.
@@ -471,6 +719,63 @@ class BoundTests(unittest.TestCase):
             self.assertNotIn("Traceback", t.stderr)
 
 
+class BoundEdgeTests(unittest.TestCase):
+    def test_exponential_models_and_huge_exponents_never_hang_or_crash(self):
+        for args in (["--n", "20", "--ops", "2**n"], ["--n", "5", "--ops", "n**n"],
+                     ["--n", "5", "--ops", "9**9**9"],
+                     ["--n", "1000", "--time-at-n", "0.01", "--exponent", "50"]):
+            t0 = time.time()
+            p = run_dev("bound", "ops", *args, timeout=20)
+            self.assertEqual(p.returncode, 0, (args, p.stderr))
+            self.assertLess(time.time() - t0, 5, args)
+            self.assertNotIn("Traceback", p.stderr)
+            self.assertIn("proceed", p.stdout)
+        p = run_dev("bound", "ops", "--n", "20", "--ops", "2**n", "--json")
+        self.assertEqual(json.loads(p.stdout)["flip_size"], 20)
+
+    def test_caret_rates_and_the_estimate_label(self):
+        p = run_dev("bound", "ops", "--n", "5000", "--ops", "n^2")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("use ** for powers", p.stderr)
+        self.assertNotIn("BinOp", p.stderr)
+        p = run_dev("bound", "ops", "--n", "5000", "--ops", "foo*n")
+        self.assertIn("the only name is n", p.stderr)
+        j = lambda *a: json.loads(run_dev("bound", "ops", "--json", *a).stdout)
+        slow = j("--n", "20000", "--ops", "n*n/2", "--path", "batch")
+        fast = j("--n", "20000", "--ops", "n*n/2", "--path", "batch", "--runtime", "c-builtin")
+        mine = j("--n", "20000", "--ops", "n*n/2", "--path", "batch", "--rate", "1e8")
+        self.assertAlmostEqual(slow["time_at_n"], 20.0)
+        self.assertAlmostEqual(fast["time_at_n"], 1.0)
+        self.assertAlmostEqual(mine["time_at_n"], 2.0)
+        self.assertEqual((mine["runtime"], slow["estimate"]), ("--rate", True))
+        self.assertGreater(fast["flip_size"], slow["flip_size"])
+        text = run_dev("bound", "ops", "--n", "1200000", "--ops", "0.0085*n**2",
+                       "--path", "batch").stdout
+        self.assertIn("122400.00 s (34.0 h)", text)
+        self.assertIn("one timed run", text)
+        meas = j("--n", "1000", "--time-at-n", "0.23", "--exponent", "2")
+        self.assertFalse(meas["estimate"])
+
+    def test_duplicate_job_names_keep_their_durations(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "jobs.json")
+            with open(path, "w") as f:
+                json.dump([["a", 5], ["a", 7], ["b", 3]], f)
+            out = json.loads(run_dev("bound", "makespan", "--durations", path, "--workers",
+                                     "2", "--json").stdout)
+            self.assertEqual(out["longest"], {"name": "a#2", "seconds": 7.0})
+            self.assertAlmostEqual(out["lb"], 7.5)
+            with open(path, "w") as f:
+                json.dump([["Foo#a", 1], ["Foo#a", 2], ["Foo#b", 3], ["x", 4]], f)
+            out = json.loads(run_dev("bound", "makespan", "--durations", path, "--workers",
+                                     "2", "--json").stdout)
+            names = sorted(n for w in out["plan"] for n in w["jobs"])
+            self.assertEqual(names, ["Foo#a", "Foo#a#2", "Foo#b", "x"])
+            text = run_dev("bound", "makespan", "--durations", "1,2,3,4,5,6,7", "--workers",
+                           "2", "--brief").stdout
+            self.assertIn("... (", text)
+
+
 class ChangepointTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -542,10 +847,16 @@ class ChangedFilesTests(unittest.TestCase):
     """devkit.common.changed_files against a real temporary repository (no network)."""
 
     def git(self, *args):
+        # Isolated from the developer's git config: a global core.hooksPath (husky,
+        # pre-commit, gitleaks templates) or signing setup must not break the fixture.
+        env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+        env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                    "HOME": self.tmp})
         cmd = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
-               "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"] + list(args)
+               "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+               "-c", "core.hooksPath=" + os.devnull] + list(args)
         return subprocess.run(cmd, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              universal_newlines=True, check=True).stdout.strip()
+                              universal_newlines=True, check=True, env=env).stdout.strip()
 
     def write(self, name, text):
         with open(os.path.join(self.root, name), "w") as f:
@@ -593,7 +904,234 @@ class ChangedFilesTests(unittest.TestCase):
 
     def test_outside_a_repository_is_empty(self):
         with tempfile.TemporaryDirectory() as plain:
-            self.assertEqual(self.changed_files(os.path.realpath(plain)), [])
+            plain = os.path.realpath(plain)
+            old = os.environ.get("GIT_CEILING_DIRECTORIES")
+            os.environ["GIT_CEILING_DIRECTORIES"] = os.path.dirname(plain)  # even when TMPDIR
+            try:                                                           # sits in a repo
+                self.assertEqual(self.changed_files(plain), [])
+            finally:
+                if old is None:
+                    del os.environ["GIT_CEILING_DIRECTORIES"]
+                else:
+                    os.environ["GIT_CEILING_DIRECTORIES"] = old
+
+
+class CostAndSlopeTests(unittest.TestCase):
+    """--max-total stops a run before it gets expensive; pairwise slopes flag growth that one
+    fitted exponent cannot describe."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, SCRIPTS)
+        try:
+            from devkit import measure
+            from devkit.common import CommandFailed
+        finally:
+            sys.path.remove(SCRIPTS)
+        cls.m, cls.CommandFailed = measure, CommandFailed
+
+    def stub_scale(self, fn, sizes, **kw):
+        import contextlib
+        import io
+        real = self.m.time_many
+        self.m.time_many = lambda cmd, runs, warmup, **k: ([fn(float(cmd[-1]))] * runs,
+                                                           [None] * runs)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                return self.m.scale_core(["prog", "{n}"], sizes, 3, 0, None, True,
+                                         progress=True, **kw), err.getvalue()
+        finally:
+            self.m.time_many = real
+
+    def test_pair_slopes_and_rising_rule(self):
+        self.assertEqual([round(x, 6) for x in self.m.pair_slopes([1, 2, 4, 8], [1, 4, 16, 64])],
+                         [2.0, 2.0, 2.0])
+        self.assertFalse(self.m.slopes_rising([2.0, 2.0, 2.0]))
+        self.assertFalse(self.m.slopes_rising([1.37, 1.86, 1.91]))     # startup noise settling
+        self.assertFalse(self.m.slopes_rising([1.2, 1.5, 1.8]))        # a*n + b*n^2
+        self.assertTrue(self.m.slopes_rising([1.0, 2.0, 4.0]))         # 2^(n/c)
+        self.assertEqual(self.m.pair_slopes([1, 2], [0.5, 1.0], baseline=0.6), [None])
+
+    def test_exponential_growth_is_flagged_not_fitted_as_a_power(self):
+        res, err = self.stub_scale(lambda n: 2 ** (n / 10.0) * 1e-3, [10, 20, 40, 80])
+        self.assertTrue(res["slopes_rising"])
+        self.assertTrue(any("growth looks exponential" in w for w in res["warnings"]))
+        res, _ = self.stub_scale(lambda n: 1e-6 * n ** 2, [1000, 2000, 4000, 8000])
+        self.assertFalse(res["slopes_rising"])
+        self.assertEqual(res["warnings"], [])
+
+    def test_mixed_linear_quadratic_in_the_middle_band_says_what_to_do(self):
+        res, _ = self.stub_scale(lambda n: 1e-3 * n + 1e-6 * n * n, [250, 500, 1000, 2000])
+        self.assertTrue(1.3 <= res["exponent_raw"] < 1.7, res["exponent_raw"])
+        self.assertTrue(any("a mix of terms" in w and "production n" in w
+                            for w in res["warnings"]), res["warnings"])
+
+    def test_scale_stops_before_a_size_past_the_cap_using_the_fitted_exponent(self):
+        cubic = lambda n: (n / 1000.0) ** 3            # 1 s, 8 s, then 64 s per run
+        with self.assertRaises(self.CommandFailed) as cm:
+            self.stub_scale(cubic, [1000, 2000, 4000, 8000], max_total=100)
+        msg = cm.exception.message
+        self.assertIn("n=4000 would take about", msg)
+        self.assertIn("exponent 3.00", msg)
+        self.assertIn("largest size that fits is about n=", msg)
+        self.assertIn("--runs 3", msg)
+        res, err = self.stub_scale(cubic, [1000, 2000, 4000, 8000], max_total=0)
+        self.assertEqual(len(res["sizes"]), 4)
+        self.assertIn("at the exponent 3.00 fitted so far", err)
+        self.assertIn("will run `prog {n}` 12 times", err)
+
+    def test_bench_and_aa_stop_when_the_first_runs_project_past_the_cap(self):
+        sleep = "%s -c \"import time; time.sleep(0.15)\"" % PY
+        p = run_dev("bench", "--arm", "a=" + sleep, "--arm", "b=" + sleep, "--runs", "10",
+                    "--max-total", "1")
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("--max-total", p.stderr)
+        self.assertIn("bench will run each of 2 arm(s) 11 times", p.stderr)
+        self.assertIn("side effects", p.stderr)
+        p = run_dev("aa", "--runs", "10", "--max-total", "1", "--", PY, "-c",
+                    "import time; time.sleep(0.15)")
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("aa would take about", p.stderr)
+        self.assertEqual(run_dev("bench", "--arm", "a=true", "--max-total", "-1").returncode, 2)
+
+
+class ExternalSamplesTests(unittest.TestCase):
+    """compare --samples: external timings get the same CI and verdict rules."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def write(self, name, values, header=""):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as f:
+            f.write(header + "\n".join(str(v) for v in values) + "\n")
+        return path
+
+    def test_samples_give_a_verdict_and_say_where_they_came_from(self):
+        b = self.write("before.txt", [x * 100 for x in TEN_BEFORE])
+        a = self.write("after.txt", [x * 100 for x in TEN_AFTER], header="# ms per op\n")
+        p = run_dev("compare", "--samples", "before=" + b, "--samples", "after=" + a,
+                    "--unit", "ms", "--min-effect", "0.05", "--json", cwd=self.tmp)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["verdict"], "FASTER")
+        self.assertEqual(data["arms"], ["before", "after"])
+        self.assertAlmostEqual(data["before"]["median"], 0.200, places=6)    # ms -> s
+        self.assertIn("external samples", p.stderr)
+        self.assertNotIn("process startup", p.stderr)          # per-op times are not launches
+
+    def test_samples_usage_errors(self):
+        b = self.write("b.txt", TEN_BEFORE)
+        for args in (["--samples", "x=" + b],
+                     ["--samples", "x=" + b, "--samples", "x=" + b],
+                     ["--samples", "x=" + b, "--samples", "y=" + b, "--metric", "cpu"],
+                     ["--samples", "nofile"]):
+            p = run_dev("compare", *args, cwd=self.tmp)
+            self.assertEqual(p.returncode, 2, (args, p.stderr))
+            self.assertNotIn("Traceback", p.stderr)
+        bad = self.write("zero.txt", [0.0] * 10)
+        p = run_dev("compare", "--samples", "x=" + bad, "--samples", "y=" + b, cwd=self.tmp)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("positive", p.stderr)
+
+
+@unittest.skipIf(shutil.which("git") is None, "git is not installed")
+class BisectTests(unittest.TestCase):
+    """dev.py bisect on a temporary repository: finds the commit that slowed the command and
+    leaves the user's tree, branch and worktree list as they were."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = os.path.realpath(os.path.join(self.tmp, "repo"))
+        os.makedirs(self.root)
+        self.env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+        self.env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                         "HOME": self.tmp, "DEVKIT_REPO": self.root})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def git(self, *args):
+        cmd = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+               "-c", "core.hooksPath=" + os.devnull] + list(args)
+        return subprocess.run(cmd, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, check=True, env=self.env).stdout.strip()
+
+    def commit_series(self, slow_from, total=9, broken=()):
+        self.git("init", "-q")
+        for i in range(1, total + 1):
+            delay = 0.09 if i >= slow_from else 0.01
+            body = "raise SystemExit(3)\n" if i in broken else ""
+            with open(os.path.join(self.root, "step.py"), "w") as f:
+                f.write("import time\n%stime.sleep(%s)\nprint('v%d')\n" % (body, delay, i))
+            self.git("add", "step.py")
+            self.git("commit", "-qm", "commit %d" % i)
+        return self.git("rev-list", "--reverse", "HEAD").splitlines()
+
+    def bisect(self, *extra):
+        commits = self.git("rev-list", "--reverse", "HEAD").splitlines()
+        return run_dev("bisect", "--good", commits[0], "--bad", "HEAD", "--runs", "3",
+                       "--warmup", "0", "--json", *extra + ("--", PY, "step.py"),
+                       cwd=self.root, env=self.env)
+
+    def test_finds_the_first_slower_commit_without_touching_the_tree(self):
+        commits = self.commit_series(slow_from=6)
+        head = self.git("rev-parse", "HEAD")
+        p = self.bisect()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["schema"], "devkit-bisect/1")
+        self.assertEqual(data["first_bad"], commits[5])
+        self.assertIn("will run", p.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+
+    def test_skips_a_commit_that_fails_and_still_finds_the_step(self):
+        commits = self.commit_series(slow_from=7, broken=(5,))
+        p = self.bisect()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["first_bad"], commits[6])
+        self.assertIn(commits[4], data["skipped"])
+
+    def test_an_unbuildable_commit_next_to_the_step_leaves_a_range(self):
+        commits = self.commit_series(slow_from=6, broken=(5,))
+        p = self.bisect()
+        self.assertEqual(p.returncode, 1, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertFalse(data["found"])
+        self.assertEqual(data["range"], [commits[3], commits[5]])
+
+    def test_no_slowdown_refuses_and_bad_refs_are_usage_errors(self):
+        self.commit_series(slow_from=99, total=4)
+        p = self.bisect()
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("nothing to bisect", p.stderr)
+        self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+        p = run_dev("bisect", "--good", "nosuchref", "--bad", "HEAD", "--", PY, "step.py",
+                    cwd=self.root, env=self.env)
+        self.assertEqual(p.returncode, 2)
+        self.assertNotIn("Traceback", p.stderr)
+
+    def test_search_order_and_skips_are_pure_functions(self):
+        sys.path.insert(0, SCRIPTS)
+        try:
+            from devkit.perfbisect import order_to_try, search
+        finally:
+            sys.path.remove(SCRIPTS)
+        self.assertEqual(order_to_try(-1, 5, 2), [2, 1, 3, 0, 4])
+        for first in range(10):
+            lo, hi, skipped = search(list(range(10)), lambda i: i >= first)
+            self.assertEqual((hi, hi - lo), (first, 1))
+        lo, hi, skipped = search(list(range(6)), lambda i: None if i < 5 else True)
+        self.assertEqual((lo, hi), (-1, 5))
+        self.assertEqual(skipped, [0, 1, 2, 3, 4])
 
 
 if __name__ == "__main__":

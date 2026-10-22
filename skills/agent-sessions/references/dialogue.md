@@ -48,11 +48,12 @@ agent-session spawn codex reviewer ~/code/app --steerable --role review \
   "You review designs adversarially. Reply READY."
 ```
 
-`--role review` makes the reviewer read-only. Give it `~/code/app` even though
-it only reads the proposal: a read-only claude child can read only inside its
-own directory, so write the
-proposal file into the repo (or a scratch directory you name as `<dir>`) rather
-than into `/tmp`.
+`--role review` makes the reviewer read-only. Its `<dir>` is the repository so
+it can read the code the design touches. The proposal itself needs no file:
+`send --file` reads the file in your process and delivers its text as the
+message. (Only when you ask a read-only claude child to open a file itself
+must that file be under its `<dir>`, or a directory passed with `--add-dir`;
+a codex reviewer's read-only sandbox reads anywhere.)
 
 Then, for each exchange:
 
@@ -64,10 +65,13 @@ Then, for each exchange:
    `wait` on a steerable child: `wait` returns only after `stop` or the idle
    exit, so it would report exit 3 until the hour is up.
 2. Send it to the reviewer, asking specifically for what is wrong. A reviewer
-   asked "what do you think?" will mostly compliment.
+   asked "what do you think?" will mostly compliment. Relay the reply file
+   that `turn` and `send` print on their `file :` line, rather than retyping
+   a long design (which costs output tokens and risks a paraphrase):
 
    ```bash
-   agent-session send reviewer --timeout 240 --file proposal.md
+   agent-session send reviewer --timeout 240 "What breaks in this design? Findings first."
+   agent-session send reviewer --timeout 240 --file <state>/proposer/turns/1.answer.txt
    ```
 
 3. Send the critique back to the proposer, asking it to either fix the design
@@ -75,12 +79,13 @@ Then, for each exchange:
    saying so out loud stops the proposer from caving to every objection.
 4. Decide: converged, still moving, or stuck.
 
-Stop as soon as an exchange produces nothing new. A steerable child cannot
-take `--schema`; `--verify` on it runs once, after the session ends. To check
-the proposer's final patch, give it `--worktree --verify "<test cmd>"` at spawn
-and `judge proposer` after `stop`. Converging early is a good
-outcome, not a wasted setup. When you are done, `agent-session stop` both
-children and `agent-session reap` once they have finished.
+Stop as soon as an exchange produces nothing new; converging early is a good
+outcome, not a wasted setup. A steerable child cannot take `--schema`;
+`--verify` on it runs once, after the session ends. To check the proposer's
+final patch, give it `--worktree --verify "<test cmd>"` at spawn and `judge
+proposer` after `stop`. When you are done, `agent-session stop` both children
+and `agent-session reap` once they have finished. `status` of a steerable
+child exits 3 while it runs and points at `turn <name> last`.
 
 ## Ask for disagreement explicitly
 

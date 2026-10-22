@@ -276,6 +276,51 @@ if [ "$skip_claude" -eq 0 ]; then
   [ "$(jpath "$res" verify.status)" = "pass" ] || { show_result verify-claude; fail "verify.status != pass"; }
   cost="$(jget "$res" cost_usd)"
   [ -n "$cost" ] && add_cost "$cost"
+
+  step "claude write child loads no MCP servers (--mcp none is the default)"
+  "$as" spawn claude mcp-claude "$work" --tier cheap --budget-usd 0.05 \
+    "Reply with exactly the word OK." || fail "spawn claude mcp check"
+  "$as" wait mcp-claude --timeout 240 || { show_result mcp-claude; fail "mcp check child did not finish ok"; }
+  python3 -c 'import json,sys
+for raw in open(sys.argv[1]):
+    try: ev = json.loads(raw)
+    except ValueError: continue
+    if ev.get("type") == "system" and ev.get("subtype") == "init":
+        mcp = [t for t in ev.get("tools") or [] if str(t).startswith("mcp__")]
+        servers = ev.get("mcp_servers") or []
+        if mcp or servers:
+            sys.exit("MCP loaded: tools %s, servers %s" % (mcp[:5], servers))
+        sys.exit(0)
+sys.exit("no init event")' "$AGENT_SESSIONS_STATE/mcp-claude/turns/1.events.jsonl" || fail "--mcp none did not hold"
+  cost="$(jget "$AGENT_SESSIONS_STATE/mcp-claude/result.json" cost_usd)"
+  [ -n "$cost" ] && add_cost "$cost"
+
+  step "claude --diff review (reads the parent's uncommitted change from its state directory)"
+  printf 'diff smoke\n' > "$vrepo/added-by-parent.txt"
+  "$as" spawn claude diff-claude "$vrepo" --role review --diff HEAD --tier cheap --budget-usd 0.05 \
+    "Which new file does the patch add? Reply with only its file name." || fail "spawn claude --diff"
+  "$as" wait diff-claude --timeout 240 || { show_result diff-claude; fail "--diff review did not finish ok"; }
+  case "$(jget "$AGENT_SESSIONS_STATE/diff-claude/result.json" answer)" in
+    *added-by-parent.txt*) ;; *) show_result diff-claude; fail "--diff reviewer did not see the patch" ;;
+  esac
+  rm -f "$vrepo/added-by-parent.txt"
+  cost="$(jget "$AGENT_SESSIONS_STATE/diff-claude/result.json" cost_usd)"
+  [ -n "$cost" ] && add_cost "$cost"
+
+  step "worktree --verify with a missing ignored dependency (spawn warns; verify fails)"
+  printf 'dep.txt\n' > "$vrepo/.gitignore"
+  git -C "$vrepo" add .gitignore && git -C "$vrepo" -c user.name=smoke -c user.email=smoke@localhost \
+    commit -q -m ignore || fail "commit .gitignore"
+  printf 'dep\n' > "$vrepo/dep.txt"
+  out="$("$as" spawn claude deps-claude "$vrepo" --tier cheap --worktree --budget-usd 0.05 --verify "test -f dep.txt" \
+    --verify-fixups 0 "Reply with exactly the word DONE. Do not create any file." 2>&1)" || fail "spawn deps-claude"
+  echo "$out"
+  case "$out" in *"absent from the worktree: dep.txt"*) ;; *) fail "spawn did not warn about dep.txt" ;; esac
+  "$as" wait deps-claude --timeout 240
+  res="$AGENT_SESSIONS_STATE/deps-claude/result.json"
+  [ "$(jget "$res" failure_class)" = "verify" ] || { show_result deps-claude; fail "missing dependency did not fail verify"; }
+  cost="$(jget "$res" cost_usd)"
+  [ -n "$cost" ] && add_cost "$cost"
 fi
 
 if [ "$skip_codex" -eq 0 ]; then

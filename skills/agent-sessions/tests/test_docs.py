@@ -68,7 +68,9 @@ class DocsContractTests(unittest.TestCase):
         text = read(os.path.join(SKILL, "SKILL.md"))
         self.assertIn("version: 3.1.0", text)
         lines = text.count("\n")
-        self.assertTrue(150 <= lines <= 190, "SKILL.md has %d lines; keep it between 150 and 190" % lines)
+        # A ceiling only: every line of SKILL.md is loaded on each use, so a
+        # shorter file that keeps the decisions is better, never a failure.
+        self.assertLessEqual(lines, 190, "SKILL.md has %d lines; keep it at 190 or fewer" % lines)
         bad = [os.path.relpath(p, SKILL) for p in skill_files() if EM_DASH in read_lenient(p)]
         self.assertEqual(bad, [], "em dash (U+2014) in %s" % bad)
 
@@ -106,15 +108,15 @@ class DocsContractTests(unittest.TestCase):
         self.assertIn("--no-such-flag", problems[1])
         problems = []
         mod.check_scenarios({"scenarios": [{"id": "Bad Id"}]}, problems)
-        self.assertTrue(any("expected 12" in p for p in problems), problems)
+        self.assertTrue(any("expected 24" in p for p in problems), problems)
         self.assertTrue(any("missing keys" in p for p in problems), problems)
 
     def test_reference_pointers_exist(self):
         text = read(os.path.join(SKILL, "SKILL.md"))
         for ref in sorted(set(re.findall(r"references/[a-z-]+\.md", text))):
             self.assertTrue(os.path.isfile(os.path.join(SKILL, ref)), ref)
-        for name in ("commands", "schema", "reliability", "review", "pipelines", "isolation", "dialogue",
-                     "comparison"):
+        for name in ("commands", "prompts", "schema", "reliability", "review", "pipelines", "isolation", "dialogue",
+                     "scope"):
             self.assertIn("references/%s.md" % name, text, "SKILL.md does not point to %s.md" % name)
 
 

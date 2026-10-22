@@ -6,10 +6,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +31,14 @@ GIT_ENV = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
 
 # A stand-in for `codex`: honours --version and -o, records what it saw, and misbehaves
 # on request through STUB_MODE / STUB_TOUCH so the post-run checks can be exercised.
+# A stand-in for `kimi` (no sandbox): writes ../out.md and can touch a file in ROOT.
+STUB_KIMI = r"""#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then echo "kimi 0.0-stub"; exit 0; fi
+echo "review" > ../out.md
+[ -n "${STUB_TOUCH:-}" ] && echo x >> "$STUB_TOUCH"
+exit 0
+"""
+
 STUB_CODEX = r"""#!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then echo "codex-cli 0.0-stub"; exit 0; fi
 out=""; prev=""
@@ -43,6 +53,7 @@ for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
   echo "renamed=$(grep -c ' -> ' ../prompt.md | tr -d ' ')"
   echo "has_docs_rename=$(grep -c 'docs/CLAUDE.md -> docs/CLAUDE.md.as-data' ../prompt.md | tr -d ' ')"
   echo "staging_header=$(grep -c '^STAGING' ../prompt.md | tr -d ' ')"
+  echo "auth=$(cat "${CODEX_HOME:-/nonexistent}/auth.json" 2>&1 | head -c 40)"
   echo "PREFLIGHT OK $(cat hello.txt 2>/dev/null)"
 } > "$out"
 case "${STUB_MODE:-ok}" in
@@ -52,13 +63,42 @@ case "${STUB_MODE:-ok}" in
   garbage) echo "I refuse" > "$out" ;;
   usage) printf 'codex\nDONE\ntokens used\n19,783\n' ;;
   usage-oneline) echo "tokens used: 1234" ;;
+  sleep) sleep 60 & echo "$! $$" > "$STUB_PIDS"; wait ;;
+  rotate) rm -f "$CODEX_HOME/auth.json"; echo '{"rotated":1}' > "$CODEX_HOME/auth.json" ;;
+  vision) python3 -c '
+import struct, sys, zlib
+data = open(sys.argv[1], "rb").read()
+at = data.index(b"IDAT")
+size = struct.unpack(">I", data[at - 4:at])[0]
+pixel = tuple(zlib.decompress(data[at + 4:at + 4 + size])[1:4])
+names = {(220, 20, 20): "red", (20, 170, 40): "green", (20, 40, 220): "blue",
+         (240, 220, 20): "yellow", (220, 20, 220): "magenta", (20, 210, 220): "cyan"}
+print("PREFLIGHT OK " + names[pixel])
+' ../evidence/swatch.png > "$out" ;;
+  blind) echo "PREFLIGHT OK red" > "$out" ;;
 esac
 [ -n "${STUB_TOUCH:-}" ] && echo x >> "$STUB_TOUCH"
 exit 0
 """
 
+# A stand-in for `claude -p`: writes ../out.md (its cwd is the staged artifact) and, under
+# --output-format json, prints the one JSON result object claude prints, with a cost.
+STUB_CLAUDE = r"""#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then echo "2.1.0 (Claude Code stub)"; exit 0; fi
+echo "## Score: 50/100" > ../out.md
+case " $* " in
+  *" --output-format json "*) echo '{"type":"result","is_error":false,"total_cost_usd":0.01234,"result":"done"}' ;;
+  *) echo "done" ;;
+esac
+case "${STUB_MODE:-ok}" in
+  sleep) sleep 60 & echo "$! $$" > "$STUB_PIDS"; wait ;;
+esac
+exit 0
+"""
+
 
 def run_py(script, *args, **kwargs):
+    kwargs.setdefault("env", clean_env())
     return subprocess.run([sys.executable, "-I", script] + list(args),
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           universal_newlines=True, **kwargs)
@@ -83,8 +123,16 @@ def files_in(directory):
     return sorted(found)
 
 
+def clean_env(extra=None):
+    """os.environ without the GIT_* variables a git hook exports, so a test run inside a
+    hook never writes fixtures into the caller's index."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")}
+    env.update(extra or {})
+    return env
+
+
 def git(cwd, *args):
-    env = dict(os.environ, **GIT_ENV)
+    env = clean_env(GIT_ENV)
     env["HOME"] = cwd
     return subprocess.run(["git"] + list(args), cwd=cwd, env=env, check=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
@@ -109,28 +157,99 @@ class SnapshotTests(unittest.TestCase):
     def test_create_excludes_and_skips_symlinks(self):
         proc = run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("snapshot: 2 files ->", proc.stdout)
+        self.assertRegex(proc.stdout, r"^snapshot: 3 files \(\d+ KB\) ->")
         self.assertIn("skipped symlink: link.txt", proc.stderr)
-        self.assertEqual(files_in(self.out), ["node_modules/m.js", "src/a.txt"])
-        for absent in (".git/HEAD", ".iterative-improvement/x/rounds.md",
-                       "docs/criteria/x-criteria.md", "notes-rounds.md", "link.txt"):
+        self.assertIn("skipped criteria doc: docs/criteria/x-criteria.md", proc.stderr)
+        self.assertEqual(files_in(self.out), ["node_modules/m.js", "notes-rounds.md", "src/a.txt"])
+        for absent in (".git/HEAD", ".iterative-improvement/x/rounds.md", "docs/criteria/x-criteria.md", "link.txt"):
             self.assertFalse(os.path.exists(os.path.join(self.out, absent)), absent)
         manifest = json.loads(read(self.out + ".manifest.json"))
-        self.assertEqual(sorted(manifest["files"]), ["node_modules/m.js", "src/a.txt"])
+        self.assertEqual(sorted(manifest["files"]), ["node_modules/m.js", "notes-rounds.md", "src/a.txt"])
         self.assertEqual(len(manifest["files"]["src/a.txt"]["sha256"]), 64)
 
+    def test_pair_stages_both_rounds_blind(self):
+        first = self.out
+        self.assertEqual(run_py(SNAPSHOT, "create", "--root", self.root, "--path", "src", "--out", first).returncode, 0)
+        write(os.path.join(self.root, "src", "a.txt"), "alpha, improved\n")
+        second = os.path.join(self.tmp, "loop", "snapshots", "round-3")
+        self.assertEqual(run_py(SNAPSHOT, "create", "--root", self.root, "--path", "src", "--out", second).returncode, 0)
+        views = []
+        for label in ("0", "3"):
+            view = os.path.join(self.tmp, "loop", "evidence", "view-round-" + label)
+            write(os.path.join(view, "capture-1.png"), "png of round %s\n" % label)
+            write(os.path.join(view, "sub", "page.txt"), "text of round %s\n" % label)
+            views.append(view)
+        out = os.path.join(self.tmp, "loop", "snapshots", "pair")
+        proc = run_py(SNAPSHOT, "pair", "--first", first, "--second", second, "--out", out,
+                      "--first-evidence", views[0], "--second-evidence", views[1])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(os.listdir(out)), ["a", "b"])
+        mapping = dict(line.split(": ", 1) for line in read(out + ".mapping").splitlines())
+        self.assertEqual(sorted(mapping.values()), sorted([os.path.abspath(first), os.path.abspath(second)]))
+        for label in ("a", "b"):
+            round_label = "3" if mapping[label].endswith("round-3") else "0"
+            expected = "alpha, improved\n" if round_label == "3" else "alpha\n"
+            self.assertEqual(read(os.path.join(out, label, "src", "a.txt")), expected)
+            self.assertEqual(read(os.path.join(out + "-evidence", label + "-capture-1.png")),
+                             "png of round %s\n" % round_label)
+            self.assertEqual(read(os.path.join(out + "-evidence", label + "-sub-page.txt")),
+                             "text of round %s\n" % round_label)
+        self.assertNotIn("round", " ".join(os.listdir(out + "-evidence")), "file names must not say which round")
+        manifest = json.loads(read(out + ".manifest.json"))
+        self.assertEqual(manifest["root"], "", "no ROOT: spawn_child.sh then skips the ROOT fingerprint")
+        self.assertEqual(sorted(manifest["files"]), ["a/src/a.txt", "b/src/a.txt"])
+        self.assertEqual(run_py(SNAPSHOT, "verify", "--snapshot", out).stdout.strip(), "unchanged")
+        # Order is random: over 30 pairings both orders appear.
+        orders = set()
+        for index in range(30):
+            target = os.path.join(self.tmp, "pairs", str(index))
+            self.assertEqual(run_py(SNAPSHOT, "pair", "--first", first, "--second", second, "--out", target).returncode, 0)
+            orders.add(read(target + ".mapping").splitlines()[0].endswith("round-0"))
+        self.assertEqual(orders, {True, False})
+        # Refusals: a non-empty out, a raw evidence dir with its manifest, a changed snapshot.
+        self.assertEqual(run_py(SNAPSHOT, "pair", "--first", first, "--second", second, "--out", out).returncode, 2)
+        write(os.path.join(views[0], "manifest.md"), "| C1 | cmd |\n")
+        proc = run_py(SNAPSHOT, "pair", "--first", first, "--second", second, "--out", out + "2",
+                      "--first-evidence", views[0], "--second-evidence", views[1])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("pass the evidence.py view", proc.stderr)
+        write(os.path.join(second, "src", "a.txt"), "tampered\n")
+        proc = run_py(SNAPSHOT, "pair", "--first", first, "--second", second, "--out", out + "3")
+        self.assertEqual(proc.returncode, 3)
+        self.assertIn("no longer matches its manifest", proc.stderr)
+
     def test_secret_shaped_files_excluded_outside_git(self):
-        for rel in (".env", ".env.local", "config/.env.production", "certs/server.pem", ".ssh/id_rsa", "id_ed25519.pub"):
+        secrets = (".env", ".env.local", "config/.env.production", "certs/server.pem", ".ssh/id_rsa", "id_ed25519.pub",
+                   ".npmrc", ".pypirc", ".netrc", "credentials.json", "packages/api/secrets.yaml", "terraform.tfvars",
+                   "server.key", "keystore.p12", "cert.pfx", ".aws/credentials", "packages/api/service-account.json",
+                   "config/.ENV", "key.PEM", "deploy/id_ecdsa_ci", "client_secret_123.json")
+        for rel in secrets:
             write(os.path.join(self.root, rel), "secret\n")
-        write(os.path.join(self.root, "src", "environment.ts"), "ok\n")
+        # Assembled so the repository's secret scanner does not flag this test file.
+        write(os.path.join(self.root, "notes", "key.txt"), "-----BEGIN RSA " + "PRIVATE KEY-----\nabc\n")
+        kept = ("src/environment.ts", ".env.example", "src/id_utils.py", "docs/id_card.md", "src/id_generator.py",
+                "src/secretary.py", "docs/credentials-howto.md")
+        for rel in kept:
+            write(os.path.join(self.root, rel), "ok\n")
         proc = run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(files_in(self.out), ["node_modules/m.js", "src/a.txt", "src/environment.ts"])
+        self.assertEqual(files_in(self.out), sorted(["node_modules/m.js", "notes-rounds.md", "src/a.txt"] + list(kept)))
+        for rel in secrets + ("notes/key.txt",):
+            self.assertIn("skipped secret-shaped", proc.stderr)
+            self.assertRegex(proc.stderr, r"(?m)^skipped secret-shaped \([^)]*\): %s$" % re.escape(rel), rel)
+        self.assertIn("contains a private key block", proc.stderr)
+        out2 = self.out + "-inc"
+        proc = run_py(SNAPSHOT, "create", "--root", self.root, "--out", out2, "--include", ".npmrc",
+                      "--include", "docs/criteria/*")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(".npmrc", files_in(out2))
+        self.assertIn("docs/criteria/x-criteria.md", files_in(out2))
+        self.assertNotIn(".pypirc", files_in(out2))
 
     def test_create_extra_exclude(self):
         proc = run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out, "--exclude", "node_modules")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(files_in(self.out), ["src/a.txt"])
+        self.assertEqual(files_in(self.out), ["notes-rounds.md", "src/a.txt"])
 
     def test_create_path_restriction(self):
         write(os.path.join(self.root, "other", "b.txt"), "beta\n")
@@ -191,7 +310,7 @@ class SnapshotTests(unittest.TestCase):
         os.rename(os.path.join(copy, "src", "a.txt"), os.path.join(copy, "src", "a.txt.as-data"))
         proc = run_py(SNAPSHOT, "seal", "--dir", copy)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("sealed: 2 files", proc.stdout)
+        self.assertIn("sealed: 3 files", proc.stdout)
         self.assertTrue(os.path.isfile(copy + ".manifest.json"))
         proc = run_py(SNAPSHOT, "verify", "--snapshot", copy)
         self.assertEqual(proc.stdout.strip(), "unchanged")
@@ -208,13 +327,14 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("would remove: src/new.txt", proc.stdout)
         self.assertIn("would copy: src/a.txt", proc.stdout)
-        self.assertIn("would copy: node_modules/m.js (unchanged)", proc.stdout)
-        self.assertIn("backup of 2 files would go to", proc.stdout)
+        self.assertNotIn("node_modules/m.js", proc.stdout, "unchanged files are not rewritten")
+        self.assertIn("dry run: 1 to copy, 1 to remove", proc.stdout)
         self.assertIn(os.path.join(self.tmp, "loop", "restore-backup"), proc.stdout)
         self.assertEqual(read(os.path.join(self.root, "src", "a.txt")), "edited\n")
+        before = os.stat(os.path.join(self.root, "node_modules", "m.js")).st_mtime_ns
         proc = run_py(SNAPSHOT, "restore", "--snapshot", self.out, "--root", self.root)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("restored: 2 copied, 1 removed", proc.stdout)
+        self.assertIn("restored: 1 copied, 1 removed", proc.stdout)
         match = re.search(r"backup: 2 files -> (.+)$", proc.stdout, re.M)
         self.assertIsNotNone(match, proc.stdout)
         backup = match.group(1)
@@ -223,7 +343,111 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(read(os.path.join(backup, "src", "new.txt")), "new\n")
         self.assertEqual(read(os.path.join(self.root, "src", "a.txt")), "alpha\n")
         self.assertFalse(os.path.exists(os.path.join(self.root, "src", "new.txt")))
-        self.assertTrue(os.path.exists(os.path.join(self.root, "notes-rounds.md")), "excluded files are left alone")
+        self.assertEqual(os.stat(os.path.join(self.root, "node_modules", "m.js")).st_mtime_ns, before)
+        self.assertTrue(os.path.exists(os.path.join(self.root, "docs", "criteria", "x-criteria.md")),
+                        "excluded files are left alone")
+
+    def test_restore_gives_restored_files_a_fresh_mtime(self):
+        # A build tool compares mtimes: a restored source must look newer than the
+        # output built from the edit, or the revert never reaches the build.
+        run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out)
+        old = 1500000000
+        os.utime(os.path.join(self.out, "src", "a.txt"), (old, old))
+        write(os.path.join(self.root, "src", "a.txt"), "edited\n")
+        proc = run_py(SNAPSHOT, "restore", "--snapshot", self.out, "--root", self.root)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertGreater(os.stat(os.path.join(self.root, "src", "a.txt")).st_mtime, old + 1000)
+
+    def test_restore_only_and_expect_protect_other_peoples_edits(self):
+        run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out)
+        write(os.path.join(self.root, "src", "a.txt"), "loop edit\n")
+        later = os.path.join(self.tmp, "loop", "snapshots", "round-1")
+        self.assertEqual(run_py(SNAPSHOT, "create", "--root", self.root, "--out", later).returncode, 0)
+        write(os.path.join(self.root, "node_modules", "m.js"), "teammate edit\n")
+        write(os.path.join(self.root, "src", "teammate.txt"), "teammate file\n")
+        proc = run_py(SNAPSHOT, "restore", "--snapshot", self.out, "--root", self.root, "--expect", later, "--dry-run")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("not the loop's change: node_modules/m.js", proc.stdout)
+        self.assertIn("not the loop's change: src/teammate.txt", proc.stdout)
+        self.assertNotIn("not the loop's change: src/a.txt", proc.stdout)
+        self.assertIn("--only", proc.stderr)
+        proc = run_py(SNAPSHOT, "restore", "--snapshot", self.out, "--root", self.root, "--expect", later,
+                      "--only", "src/a.txt")
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn("restored: 1 copied, 0 removed", proc.stdout)
+        self.assertEqual(read(os.path.join(self.root, "src", "a.txt")), "alpha\n")
+        self.assertEqual(read(os.path.join(self.root, "node_modules", "m.js")), "teammate edit\n")
+        self.assertTrue(os.path.exists(os.path.join(self.root, "src", "teammate.txt")))
+        proc = run_py(SNAPSHOT, "restore", "--snapshot", self.out, "--root", self.root, "--only", "src", "--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines()[0], "would remove: src/teammate.txt")
+        sub = os.path.join(self.tmp, "loop", "snapshots", "round-sub")
+        self.assertEqual(run_py(SNAPSHOT, "create", "--root", self.root, "--path", "src", "--out", sub).returncode, 0)
+        proc = run_py(SNAPSHOT, "restore", "--snapshot", sub, "--root", self.root, "--only", "node_modules")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("outside the snapshot's paths", proc.stderr)
+
+    def test_create_dry_run_and_whole_root_limit(self):
+        proc = run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out, "--path", "src", "--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines()[0], "would copy: src/a.txt")
+        self.assertIn("dry run: 1 files", proc.stdout)
+        self.assertFalse(os.path.exists(self.out))
+        self.assertFalse(os.path.exists(self.out + ".manifest.json"))
+        for index in range(501):
+            write(os.path.join(self.root, "many", "f%03d.txt" % index), "x\n")
+        proc = run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out)
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("refusing a whole-root snapshot of 504 files", proc.stderr)
+        self.assertIn("--path", proc.stderr)
+        self.assertFalse(os.path.exists(self.out))
+        proc = run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out, "--path", "src")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        proc = run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out + "-w", "--whole-root")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("snapshot: 504 files", proc.stdout)
+
+    def test_fingerprint_is_scoped_and_sees_untracked_content(self):
+        sub = os.path.join(self.tmp, "loop", "snapshots", "round-fp")
+        write(os.path.join(self.root, "src", "draft.txt"), "draft\n")
+        self.assertEqual(run_py(SNAPSHOT, "create", "--root", self.root, "--path", "src", "--out", sub).returncode, 0)
+        saved = os.path.join(self.tmp, "fp.json")
+        proc = run_py(SNAPSHOT, "fingerprint", "--snapshot", sub, "--save", saved)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertRegex(proc.stdout, r"^fingerprint: 2 files, [0-9a-f]{12}$")
+        write(os.path.join(self.root, "node_modules", "m.js"), "outside the scope\n")
+        proc = run_py(SNAPSHOT, "fingerprint", "--snapshot", sub, "--compare", saved)
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "unchanged"), "an edit outside the scope never counts")
+        write(os.path.join(self.root, "src", "draft.txt"), "draft, edited\n")
+        write(os.path.join(self.root, "src", "added.txt"), "new\n")
+        proc = run_py(SNAPSHOT, "fingerprint", "--snapshot", sub, "--compare", saved)
+        self.assertEqual(proc.returncode, 3, proc.stdout)
+        self.assertEqual(proc.stdout.splitlines(), ["added: src/added.txt", "changed: src/draft.txt"])
+        whole = os.path.join(self.tmp, "fp-whole.json")
+        run_py(SNAPSHOT, "fingerprint", "--snapshot", sub, "--save", whole, "--whole-root")
+        write(os.path.join(self.root, "node_modules", "m.js"), "outside again\n")
+        proc = run_py(SNAPSHOT, "fingerprint", "--snapshot", sub, "--compare", whole, "--whole-root")
+        self.assertEqual(proc.returncode, 3)
+        self.assertIn("changed: node_modules/m.js", proc.stdout)
+
+    @unittest.skipIf(shutil.which("git") is None, "git not on PATH")
+    def test_fingerprint_in_git_covers_untracked_files_without_index_lock(self):
+        shutil.rmtree(os.path.join(self.root, ".git"))
+        git(self.root, "init", "-q")
+        git(self.root, "add", "src")
+        git(self.root, "commit", "-q", "-m", "init")
+        write(os.path.join(self.root, "src", "untracked.txt"), "one\n")
+        sub = os.path.join(self.tmp, "loop", "snapshots", "round-g")
+        self.assertEqual(run_py(SNAPSHOT, "create", "--root", self.root, "--path", "src", "--out", sub).returncode, 0)
+        saved = os.path.join(self.tmp, "fp.json")
+        index = os.path.join(self.root, ".git", "index")
+        mtime = os.stat(index).st_mtime_ns
+        run_py(SNAPSHOT, "fingerprint", "--snapshot", sub, "--save", saved)
+        write(os.path.join(self.root, "src", "untracked.txt"), "two\n")
+        proc = run_py(SNAPSHOT, "fingerprint", "--snapshot", sub, "--compare", saved)
+        self.assertEqual(proc.returncode, 3)
+        self.assertIn("changed: src/untracked.txt", proc.stdout)
+        self.assertEqual(os.stat(index).st_mtime_ns, mtime, "the fingerprint must not rewrite the index")
 
     def test_restore_refuses_other_root(self):
         run_py(SNAPSHOT, "create", "--root", self.root, "--out", self.out)
@@ -249,8 +473,9 @@ class SnapshotTests(unittest.TestCase):
         files = files_in(self.out)
         self.assertNotIn("node_modules/m.js", files)
         self.assertIn("src/a.txt", files)
-        self.assertNotIn("notes-rounds.md", files)
+        self.assertIn("notes-rounds.md", files)
         self.assertNotIn("docs/criteria/x-criteria.md", files)
+        self.assertRegex(proc.stderr, r"skipped 1 gitignored entry in scope: node_modules")
 
     @unittest.skipIf(shutil.which("git") is None, "git not on PATH")
     def test_git_worktree_respects_gitignore(self):
@@ -271,7 +496,7 @@ class SnapshotTests(unittest.TestCase):
         proc = run_py(SNAPSHOT, "create", "--root", worktree, "--out", out)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         files = files_in(out)
-        self.assertEqual(files, [".gitignore", "src/a.txt", "src/b.txt"], files)
+        self.assertEqual(files, [".gitignore", "notes-rounds.md", "src/a.txt", "src/b.txt"], files)
 
 
 class StripTests(unittest.TestCase):
@@ -352,6 +577,66 @@ class StripTests(unittest.TestCase):
         self.assertNotIn("Target", out)
         self.assertIn("a1b2c3d", out)
 
+    def test_unterminated_loop_only_block_fails(self):
+        text = ("# Criteria: x\n\n### C1. One (50 pts)\nkeep\n<!-- loop-only -->\n**Target:** 90\n\n"
+                "### C2. Two (50 pts)\n\n## Gates\n- G1\n")
+        proc, out = self.strip(text)
+        self.assertEqual(proc.returncode, 4, proc.stdout)
+        self.assertIn("unterminated <!-- loop-only --> starting at line 5", proc.stderr)
+        self.assertIsNone(out)
+
+    def test_fenced_heading_does_not_end_a_removed_section(self):
+        text = ("# Criteria: x\n\n## Criteria (100 points)\n\nkeep me\n\n## Amendments\n\n- v2: changed C1\n"
+                "```\n## pipeline step\n```\nThe reviewer was Codex and it cost 40 minutes.\n\n## Constraints\n\nkept\n")
+        proc, out = self.strip(text)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("Codex", out)
+        self.assertNotIn("pipeline step", out)
+        self.assertIn("## Constraints", out)
+        self.assertIn("keep me", out)
+        fenced = "# Criteria: x\n\n## Context\n\n```\n**Target:** shown as an example\n```\n"
+        proc, out = self.strip(fenced)
+        self.assertEqual(proc.returncode, 4, "a fenced Target label is still residue: %s" % out)
+
+    def test_label_variants_are_removed(self):
+        header = ("# Criteria: x\n* **Target:** 91\n+ **Budget:** 2 rounds\n**Target score:** 92\nTarget: 93\n"
+                  "> **Target:** 94\n1. **Mode:** full\n- **Baseline SHA:** a1b2c3d\n\n## Criteria (100 points)\n\n"
+                  "### C1. Weight (100 pts)\nBudget: under 50 KB of JavaScript\n")
+        proc, out = self.strip(header)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for leaked in ("91", "2 rounds", "92", "93", "94", "full"):
+            self.assertNotIn(leaked, out, leaked)
+        self.assertIn("Budget: under 50 KB of JavaScript", out, "a plain label inside a criterion is content")
+        proc, _ = self.strip("# Criteria: x\n\n## Context\n\nAim high. **Target:** 90\n")
+        self.assertEqual(proc.returncode, 4)
+        self.assertIn("Target or Budget label", proc.stderr)
+
+    def test_allow_and_error_names_the_source_line(self):
+        text = "# Criteria: x\n<!-- loop-only -->\n**Mode:** lite\n<!-- /loop-only -->\n\n## Context\n\nLearning curve has no plateau.\n"
+        proc, out = self.strip(text)
+        self.assertEqual(proc.returncode, 4)
+        self.assertIn('found "plateau" at line 8 of', proc.stderr)
+        self.assertIn("Learning curve has no plateau.", proc.stderr)
+        self.assertIn('--allow-term "plateau"', proc.stderr)
+        self.assertIn("never hand-edit", proc.stderr)
+        source = os.path.join(self.tmp, "in.md")
+        proc = run_py(STRIP, source, source + ".out", "--allow-term", "plateau")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("allowed: plateau", proc.stdout)
+        proc = run_py(STRIP, source, source + ".out", "--allow-term", "[PRESERVE]")
+        self.assertEqual(proc.returncode, 2)
+        write(source, "# x\n\nRound 2 of the tutorial compiles; receiver noise floor stays low.\n")
+        self.assertEqual(run_py(STRIP, source, source + ".out", "--allow-term", "round <N>", "--allow-term", "noise floor").returncode, 0)
+
+    def test_invalid_utf8_is_a_clean_error(self):
+        source = os.path.join(self.tmp, "bad.md")
+        with open(source, "wb") as handle:
+            handle.write(b"\xe9\n")
+        proc = run_py(STRIP, source, source + ".out")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not UTF-8", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
     def test_missing_input(self):
         proc = run_py(STRIP, os.path.join(self.tmp, "missing.md"), os.path.join(self.tmp, "out.md"))
         self.assertEqual(proc.returncode, 2)
@@ -372,7 +657,10 @@ class ScoreMathTests(unittest.TestCase):
 
     def decide(self, scores, *extra, **kwargs):
         max_rounds = str(kwargs.get("max_rounds", 5))
-        args = ["decide", "--threshold", "8", "--target", "85", "--max-rounds", max_rounds, "--scores", scores] + list(extra)
+        extra = list(extra)
+        if "--gates" not in extra:
+            extra += ["--gates", "PASS"]
+        args = ["decide", "--threshold", "8", "--target", "85", "--max-rounds", max_rounds, "--scores", scores] + extra
         return run_py(SCORE, *args)
 
     def first(self, proc):
@@ -417,13 +705,19 @@ class ScoreMathTests(unittest.TestCase):
         self.assertEqual(self.baseline("52", "52", "52"),
                          "baseline=52 noise=0 threshold=3 soft=false third-run=done outlier=none")
         lines = self.baseline_lines("40", "50", "44")
-        self.assertEqual(lines[0], "baseline=42 noise=4 threshold=8 soft=false third-run=done outlier=50")
-        self.assertEqual(len(lines), 2, lines)
-        self.assertIn("outlier", lines[1])
-        self.assertIn("run 50 is an outlier against 40 and 44", lines[1])
+        self.assertEqual(lines[0], "baseline=45 noise=10 threshold=20 soft=true third-run=done outlier=none",
+                         "50 is only 6 from 44: no run is an outlier, and the noise is the full spread")
+        lines = self.baseline_lines("40", "50", "46")
+        self.assertEqual(lines[0], "baseline=45 noise=10 threshold=20 soft=true third-run=done outlier=none")
         lines = self.baseline_lines("30", "52", "50")
         self.assertEqual(lines[0], "baseline=51 noise=2 threshold=4 soft=false third-run=done outlier=30")
-        self.assertIn("run 30 is an outlier against 52 and 50", lines[1])
+        self.assertIn("run 30 is an outlier, 20 from the nearest run, against 52 and 50", lines[1])
+        lines = self.baseline_lines("40", "51", "52")
+        self.assertEqual(lines[0], "baseline=52 noise=1 threshold=3 soft=false third-run=done outlier=40")
+        lines = self.baseline_lines("10", "50", "50")
+        self.assertEqual(lines[0], "baseline=50 noise=0 threshold=3 soft=true third-run=done outlier=10",
+                         "a run 40 away is an outlier, and the instrument that produced it is soft")
+        self.assertIn("more than 20 away", lines[1])
         lines = self.baseline_lines("40", "50", "45")
         self.assertEqual(lines[0], "baseline=45 noise=10 threshold=20 soft=true third-run=done outlier=none",
                          "equal gaps: no outlier, soft")
@@ -440,12 +734,12 @@ class ScoreMathTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("two or three runs", proc.stderr)
         self.assertEqual(run_py(SCORE, "baseline", "40", "50", "144").returncode, 2)
-        data = json.loads(run_py(SCORE, "baseline", "40", "50", "44", "--json").stdout)
-        self.assertEqual(data["outlier"], 50)
+        data = json.loads(run_py(SCORE, "baseline", "30", "52", "50", "--json").stdout)
+        self.assertEqual(data["outlier"], 30)
         self.assertEqual(data["third_run"], "done")
-        self.assertEqual(data["runs"], [40, 50, 44])
-        self.assertEqual(data["baseline"], 42)
-        self.assertEqual(data["noise"], 4)
+        self.assertEqual(data["runs"], [30, 52, 50])
+        self.assertEqual(data["baseline"], 51)
+        self.assertEqual(data["noise"], 2)
         self.assertFalse(data["soft"])
         self.assertIn("outlier", data["detail"])
         data = json.loads(run_py(SCORE, "baseline", "41", "45", "43", "--json").stdout)
@@ -541,10 +835,12 @@ class ScoreMathTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, "a confirmation with a different adjusted max is a different instrument")
         self.assertIn("different adjusted max", proc.stderr)
         for target in ("101", "-1", "500"):
-            proc = run_py(SCORE, "decide", "--threshold", "3", "--target", target, "--max-rounds", "5", "--scores", "50,60")
+            proc = run_py(SCORE, "decide", "--threshold", "3", "--target", target, "--max-rounds", "5", "--scores", "50,60",
+                          "--gates", "PASS")
             self.assertEqual(proc.returncode, 2, target)
             self.assertIn("--target", proc.stderr)
-        proc = run_py(SCORE, "decide", "--threshold", "3", "--target", "100", "--max-rounds", "5", "--scores", "50,60")
+        proc = run_py(SCORE, "decide", "--threshold", "3", "--target", "100", "--max-rounds", "5", "--scores", "50,60",
+                      "--gates", "PASS")
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_decisions(self):
@@ -631,6 +927,160 @@ class ScoreMathTests(unittest.TestCase):
         self.assertEqual(data["deltas"], [None, 4])
         self.assertEqual(data["rounds_used"], 2)
 
+    def test_check_criteria(self):
+        proc = run_py(SCORE, "check-criteria", os.path.join(FIXTURES, "criteria-full.md"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "ok: 9 criteria summing to 100 (full mode), 3 gates")
+        proc = run_py(SCORE, "check-criteria", os.path.join(FIXTURES, "criteria-full.md"), "--mode", "lite")
+        self.assertEqual(proc.returncode, 3)
+        self.assertIn("9 criteria; lite mode takes 3 to 5", proc.stdout)
+        tmp = tempfile.mkdtemp(prefix="ii-crit-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        doc = os.path.join(tmp, "x-criteria.md")
+        write(doc, "# Criteria: x\n**Status:** DERIVED, not user-approved\n\n## Gates\n\n- **G1.** build passes\n\n"
+                   "## Criteria (100 points)\n\n### C1. One (50 pts)\n**How to check it:** read it\n**Anchors:**\n"
+                   "- `0`: no\n- `half`: some\n- `full`: yes\n\n### C2. Two (40 pts)\n**Source:** README.md\n"
+                   "**Anchors:**\n- `0`: no\n- `20`: some\n- `30`: yes\n")
+        proc = run_py(SCORE, "check-criteria", doc, "--mode", "lite")
+        self.assertEqual(proc.returncode, 3)
+        for problem in ("weights sum to 90, not 100", "2 criteria; lite mode takes 3 to 5",
+                        "C1 anchors must be numbers", "C1 has no **Source:** line", "C2 has no **How to check it:** line",
+                        "C2 last anchor is 30, not its weight 40", "G1 has no check: command"):
+            self.assertIn(problem, proc.stdout, problem)
+        self.assertNotIn("C2 has no **Source:**", proc.stdout)
+
+    def test_check_criteria_passes_the_shipped_examples(self):
+        tmp = tempfile.mkdtemp(prefix="ii-crit-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        # The worked full-mode doc an agent copies must lint clean as written.
+        example = read(os.path.join(REFERENCES, "example-loop.md"))
+        block = re.search(r"```markdown\n(# Criteria: tidylog.*?)```", example, re.S).group(1)
+        doc = os.path.join(tmp, "example-criteria.md")
+        write(doc, block)
+        proc = run_py(SCORE, "check-criteria", doc, "--mode", "full")
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "ok: 8 criteria summing to 100 (full mode), 3 gates")
+        # The DERIVED criterion in troubleshooting.md carries its [ASSUMED] tag on the heading.
+        trouble = read(os.path.join(REFERENCES, "troubleshooting.md"))
+        derived = re.search(r"```markdown\n(### C4\..*?)```", trouble, re.S).group(1)
+        self.assertIn("(12 pts) [ASSUMED:", derived)
+        doc = os.path.join(tmp, "derived-criteria.md")
+        write(doc, "# Criteria: site\n**Status:** DERIVED, not user-approved. Sources: README.md\n\n"
+                   "## Criteria (100 points)\n\n"
+                   + derived + "**Anchors:**\n- `0`: three or more clicks\n- `6`: two clicks\n- `12`: one click\n\n"
+                   "### C5. Hero (44 pts) [ASSUMED: weight] [ASSUMED: threshold]\n**Source:** README.md\n"
+                   "**How to check it:** read it\n**Anchors:** `0`: no. `22`: some. `44`: yes.\n\n"
+                   "### C6. Copy (44 pts)\n**Source:** docs/\n**How to check it:** count words\n"
+                   "**Anchors:**\n- `0`: no\n- `22`: some\n- `44`: yes\n")
+        proc = run_py(SCORE, "check-criteria", doc, "--mode", "lite")
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "ok: 3 criteria summing to 100 (lite mode), 0 gates")
+        # A tag is not a loophole: text other than [..] after "(w pts)" is still not a heading.
+        write(doc, read(doc).replace("### C6. Copy (44 pts)", "### C6. Copy (44 pts) extra"))
+        proc = run_py(SCORE, "check-criteria", doc, "--mode", "lite")
+        self.assertEqual(proc.returncode, 3)
+        self.assertIn("weights sum to 56, not 100", proc.stdout)
+
+    def test_example_lite_is_consistent(self):
+        """The lite exemplar's criteria doc lints and strips clean, and every decide line it
+        quotes prints what it says."""
+        tmp = tempfile.mkdtemp(prefix="ii-lite-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        example = read(os.path.join(REFERENCES, "example-lite.md"))
+        block = re.search(r"```markdown\n(# Criteria: tidylog README.*?)```", example, re.S).group(1)
+        doc = os.path.join(tmp, "readme-criteria.md")
+        write(doc, block)
+        proc = run_py(SCORE, "check-criteria", doc, "--mode", "lite")
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "ok: 3 criteria summing to 100 (lite mode), 2 gates")
+        self.assertIn(proc.stdout.strip(), example)
+        proc = run_py(STRIP, doc, os.path.join(tmp, "stripped.md"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("Target", read(os.path.join(tmp, "stripped.md")))
+        lines = re.findall(r"^S/score_math\.py (decide .*)$", example, re.M)
+        self.assertEqual(len(lines), 2)
+        first = run_py(SCORE, *lines[0].split())
+        self.assertEqual(first.stdout.splitlines()[0], "CONTINUE continue")
+        self.assertIn("+35; 1 of 2 rounds used", first.stdout)
+        second = run_py(SCORE, *lines[1].split())
+        self.assertEqual(second.stdout.splitlines()[0], "CONFIRM target-reached")
+        confirmed = run_py(SCORE, *(lines[1].split() + ["--confirm-score", "89"]))
+        self.assertEqual(confirmed.stdout.splitlines()[0], "STOP target-hit")
+        # Per-criterion points in the prose add up to each quoted total.
+        for parts, total in (((0, 15, 26), 41), ((35, 15, 26), 76), ((35, 30, 26), 91)):
+            self.assertEqual(sum(parts), total)
+            self.assertIn("C1 %d, C2 %d, C3 %d" % parts, example)
+
+    def test_check_scorer(self):
+        fixture = os.path.join(FIXTURES, "scorer-output.md")
+        proc = run_py(SCORE, "check-scorer", fixture)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(proc.stdout.splitlines()[0], "token=49/80 scaled=61 na=C4,C7 gates=G1:PASS,G2:FAIL,G3:PASS")
+        self.assertIn("a gate is not PASS", proc.stdout)
+        proc = run_py(SCORE, "check-scorer", fixture, "--criteria", os.path.join(FIXTURES, "criteria-full.md"))
+        self.assertEqual(proc.returncode, 3, "the fixture is a v1 output; the doc is v2")
+        self.assertIn("C6 max is 14, but its weight in the criteria doc is 10", proc.stdout)
+        self.assertIn("criteria missing from the output: C9", proc.stdout)
+        tmp = tempfile.mkdtemp(prefix="ii-out-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        bad = os.path.join(tmp, "out.md")
+        text = read(fixture).replace("## Score: 49/80", "## Score: 52/80").replace("- C7: needs", "- C9: needs")
+        write(bad, text)
+        proc = run_py(SCORE, "check-scorer", bad)
+        self.assertEqual(proc.returncode, 3)
+        self.assertIn("per-criterion points sum to 49, but the Score line says 52", proc.stdout)
+        self.assertIn("Scaled is 61, but round(52 * 100 / 80) is 65", proc.stdout)
+        self.assertIn("C7 is N/A but not listed under ## Unscoreable", proc.stdout)
+        full = os.path.join(tmp, "full.md")
+        write(full, "## Score: 58/100\n## Scaled: 58\n\n## Gates\n| Gate | Result | Evidence |\n|---|---|---|\n"
+                    "| G1 | PASS | log |\n\n## Per-criterion\n| # | Criterion | Points | Max | Evidence |\n|---|---|---|---|---|\n"
+                    "| C1 | a | 30 | 60 | x |\n| C2 | b | 28 | 40 | y |\n\n## Unscoreable\nnone\n\n## Notes\nnone\n")
+        proc = run_py(SCORE, "check-scorer", full)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "token=58 scaled=58 na=none gates=G1:PASS")
+
+    def test_check_scorer_tolerates_formatting_habits(self):
+        """Ordinary model formatting must not cost a billed rerun: emphasis, units, a
+        "/max" in the points cell and other heading levels read the same as the brief's
+        format, while the arithmetic stays strict."""
+        tmp = tempfile.mkdtemp(prefix="ii-out-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        base = ("## Score: 70/100\n## Scaled: 70\n\n## Gates\n| Gate | Result | Evidence |\n|---|---|---|\n"
+                "| G1 | PASS | log |\n\n## Per-criterion\n| # | Criterion | Points | Max | Evidence |\n|---|---|---|---|---|\n"
+                "| C1 | a | 30 | 50 | x |\n| C2 | b | 40 | 50 | y |\n\n## Unscoreable\nnone\n\n## Notes\nnone\n")
+        variants = {
+            "bold cells": base.replace("| C1 | a | 30 | 50 |", "| **C1** | a | **30** | **50** |"),
+            "bold score": base.replace("## Score: 70/100", "## Score: **70/100**"),
+            "points over max": base.replace("| 30 | 50 |", "| 30/50 | 50 |"),
+            "pts in points": base.replace("| 30 | 50 |", "| 30 pts | 50 |"),
+            "pts in max": base.replace("| 30 | 50 |", "| 30 | 50 pts |"),
+            "scaled over 100": base.replace("## Scaled: 70", "## Scaled: 70/100"),
+            "h1 score": base.replace("## Score:", "# Score:"),
+            "spaced points": base.replace("## Score: 70/100", "## Score: 70 / 100 points"),
+            "bold gate": base.replace("| G1 | PASS |", "| G1 | **PASS** |"),
+            "ticks and h3 sections": base.replace("| C2 | b | 40 |", "| `C2` | b | `40` |")
+                                         .replace("## Per-criterion", "### Per-criterion"),
+            "alignment row": base.replace("|---|---|---|---|---|", "|:--|:--|--:|--:|---|"),
+        }
+        for name, text in variants.items():
+            path = os.path.join(tmp, "out.md")
+            write(path, text)
+            proc = run_py(SCORE, "check-scorer", path)
+            self.assertEqual(proc.returncode, 0, "%s: %s%s" % (name, proc.stdout, proc.stderr))
+            self.assertEqual(proc.stdout.strip(), "token=70 scaled=70 na=none gates=G1:PASS", name)
+        strict = {
+            "points over another max": (base.replace("| 30 | 50 |", "| 30/60 | 50 |"), "C1 points are not a number"),
+            "wrong sum": (base.replace("| 30 | 50 |", "| **35** | 50 |"),
+                          "per-criterion points sum to 75, but the Score line says 70"),
+            "wrong scaled": (base.replace("## Scaled: 70", "## Scaled: 71/100"), "Scaled is 71"),
+        }
+        for name, (text, problem) in strict.items():
+            path = os.path.join(tmp, "out.md")
+            write(path, text)
+            proc = run_py(SCORE, "check-scorer", path)
+            self.assertEqual(proc.returncode, 3, name)
+            self.assertIn(problem, proc.stdout, name)
+
     def test_bad_input(self):
         self.assertEqual(self.decide("abc").returncode, 2)
         self.assertEqual(self.decide("").returncode, 2)
@@ -639,8 +1089,27 @@ class ScoreMathTests(unittest.TestCase):
         self.assertEqual(self.decide("58,81/80").returncode, 2)
         self.assertEqual(self.decide("58,71,80", "--rounds-used", "1").returncode, 2)
         self.assertEqual(self.decide("58,71", "--rounds-used", "2", "--first-round", "1").returncode, 2)
-        proc = run_py(SCORE, "decide", "--threshold", "0", "--target", "85", "--max-rounds", "5", "--scores", "1,2")
+        proc = run_py(SCORE, "decide", "--threshold", "0", "--target", "85", "--max-rounds", "5", "--scores", "1,2",
+                      "--gates", "PASS")
         self.assertEqual(proc.returncode, 2)
+        for bad in (("--scores", "nan,50"), ("--scores", "50/nan,60/nan"), ("--scores", "50,60/inf"),
+                    ("--threshold", "nan"), ("--threshold", "inf"), ("--target", "nan")):
+            args = {"--threshold": "3", "--target": "85", "--scores": "50,60"}
+            args[bad[0]] = bad[1]
+            proc = run_py(SCORE, "decide", "--max-rounds", "5", "--gates", "PASS", *sum(args.items(), ()))
+            self.assertEqual(proc.returncode, 2, bad)
+            self.assertNotIn("Traceback", proc.stderr, bad)
+        proc = run_py(SCORE, "decide", "--threshold", "3", "--target", "85", "--max-rounds", "2", "--scores", "40,41,42",
+                      "--rounds-used", "2")
+        self.assertEqual(proc.returncode, 2, "--gates is required")
+        self.assertIn("--gates", proc.stderr)
+
+    def test_budget_zero_rounds_feeds_decide(self):
+        max_rounds = json.loads(self.budget("--total", "15", "--spent", "14.2", "--per-round", "2.1", "--json").stdout)["max_rounds"]
+        self.assertEqual(max_rounds, 0)
+        proc = self.decide("50", "--rounds-used", "0", max_rounds=max_rounds)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.first(proc), "STOP rounds-exhausted")
 
 
 class SpawnBase(unittest.TestCase):
@@ -665,8 +1134,9 @@ class SpawnBase(unittest.TestCase):
         write(os.path.join(self.home, ".codex", "auth.json"), "{}\n")
         self.bin = os.path.join(self.tmp, "bin")
         os.makedirs(self.bin)
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("CLAUDECODE", "CODEX_SANDBOX", "CODEX_THREAD_ID", "ANTHROPIC_API_KEY", "STUB_MODE", "STUB_TOUCH")}
+        env = {k: v for k, v in clean_env().items()
+               if k not in ("CLAUDECODE", "CODEX_SANDBOX", "CODEX_THREAD_ID", "ANTHROPIC_API_KEY", "STUB_MODE", "STUB_TOUCH",
+                            "CDPATH")}
         env["HOME"] = self.home
         env["CODEX_HOME"] = os.path.join(self.home, ".codex")
         env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
@@ -682,15 +1152,25 @@ class SpawnBase(unittest.TestCase):
         write(path, body)
         os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
+    def isolated_path(self):
+        """PATH with the stubs, python3 and the system dirs only, so no real engine is found."""
+        pybin = os.path.join(self.tmp, "pybin")
+        if not os.path.isdir(pybin):
+            os.makedirs(pybin)
+            os.symlink(sys.executable, os.path.join(pybin, "python3"))
+        return os.pathsep.join([self.bin, pybin, "/usr/bin", "/bin"])
+
     def spawn(self, *args, **kwargs):
         env = dict(self.env)
         env.update(kwargs.pop("env", {}))
+        script = kwargs.pop("script", SPAWN)
         # stdin is a pipe held open on purpose: a child that reads stdin would hang
         # unless the script redirects it from /dev/null.
         read_end, write_end = os.pipe()
         try:
-            proc = subprocess.Popen(["bash", SPAWN] + list(args), stdin=read_end, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, universal_newlines=True, env=env)
+            proc = subprocess.Popen(["bash", script] + list(args), stdin=read_end, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, universal_newlines=True, env=env,
+                                    cwd=kwargs.pop("cwd", None))
             stdout, stderr = proc.communicate(timeout=kwargs.pop("timeout", 90))
         finally:
             os.close(read_end)
@@ -748,7 +1228,8 @@ class SpawnDryRunTests(SpawnBase):
         self.assertEqual(proc.returncode, 0, proc.stderr_text)
         out = proc.stdout_text
         for needle in ("--setting-sources", "--disable-slash-commands", "--strict-mcp-config", "--permission-mode", "dontAsk",
-                       "'--add-dir'", "'/<stage>'", "'Read,Grep,Glob,Write'", "Edit(//<stage>/out.md)"):
+                       "'--add-dir'", "'/<stage>'", "'Read,Grep,Glob,Write'", "Edit(//<stage>/out.md)",
+                       "--no-session-persistence"):
             self.assertIn(needle, out, needle)
         for absent in ("--bare", SKIP_PERMS, "Bash", "Write(", "'--allow'"):
             self.assertNotIn(absent, out, absent)
@@ -949,8 +1430,219 @@ class SpawnStubRunTests(SpawnBase):
         out2 = os.path.join(self.loop, "scores", "round-2.md")
         proc = self.spawn("codex", "reviewer", self.prompt, snapshot, out2, env={"STUB_TOUCH": os.path.join(self.root, "index.html")})
         self.assertEqual(proc.returncode, 4, proc.stderr_text)
-        self.assertIn("artifact root", proc.stderr_text)
+        self.assertIn("changed: index.html", proc.stdout_text)
+        self.assertIn("the artifact's files in", proc.stderr_text)
+        self.assertIn("switching engine does not help", proc.stderr_text)
         self.assertTrue(os.path.exists(out2 + ".discarded"))
+        self.assertIn("output discarded", read(os.path.join(self.loop, "rounds.md")))
+
+    @unittest.skipIf(shutil.which("git") is None, "git not on PATH")
+    def test_root_check_is_scoped_to_the_snapshot_paths(self):
+        write(os.path.join(self.root, "apps", "web", "Home.tsx"), "export {}\n")
+        write(os.path.join(self.root, "pkg", "README.md"), "# pkg\n")
+        git(self.root, "init", "-q")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "init")
+        write(os.path.join(self.root, "pkg", "notes.txt"), "untracked, in scope\n")
+        snapshot = os.path.join(self.loop, "snapshots", "round-3")
+        proc = run_py(SNAPSHOT, "create", "--root", self.root, "--path", "pkg", "--out", snapshot)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # A teammate edits a tracked file and adds an untracked one outside the scope: kept.
+        for target in (os.path.join(self.root, "apps", "web", "Home.tsx"), os.path.join(self.root, "apps", "NEW.txt")):
+            out = os.path.join(self.loop, "scores", "r-%d.md" % len(target))
+            proc = self.spawn("codex", "reviewer", self.prompt, snapshot, out, env={"STUB_TOUCH": target})
+            self.assertEqual(proc.returncode, 0, proc.stderr_text)
+            self.assertTrue(os.path.isfile(out))
+        # The content of an untracked file inside the scope changes: discarded.
+        out = os.path.join(self.loop, "scores", "r-untracked.md")
+        proc = self.spawn("codex", "reviewer", self.prompt, snapshot, out,
+                          env={"STUB_TOUCH": os.path.join(self.root, "pkg", "notes.txt")})
+        self.assertEqual(proc.returncode, 4, proc.stderr_text)
+        self.assertIn("changed: pkg/notes.txt", proc.stdout_text)
+
+    def test_root_check_works_outside_git(self):
+        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out,
+                          env={"STUB_TOUCH": os.path.join(self.root, "index.html")})
+        self.assertEqual(proc.returncode, 4, proc.stderr_text)
+        self.assertIn("changed: index.html", proc.stdout_text)
+
+    def test_kimi_root_check_covers_the_whole_root(self):
+        self.install_stub("kimi", STUB_KIMI)
+        write(os.path.join(self.root, "pkg", "a.md"), "a\n")
+        snapshot = os.path.join(self.loop, "snapshots", "round-4")
+        self.assertEqual(run_py(SNAPSHOT, "create", "--root", self.root, "--path", "pkg", "--out", snapshot).returncode, 0)
+        proc = self.spawn("kimi", "reviewer", self.prompt, snapshot, self.out, "--unsandboxed",
+                          env={"STUB_TOUCH": os.path.join(self.root, "elsewhere.txt")})
+        self.assertEqual(proc.returncode, 4, proc.stderr_text)
+        self.assertIn("added: elsewhere.txt", proc.stdout_text)
+        self.assertIn("kimi run", proc.stderr_text)
+
+    def test_mixed_case_instruction_files_are_renamed(self):
+        root = os.path.join(self.tmp, "mixed")
+        write(os.path.join(root, "index.html"), "<p>x</p>\n")
+        write(os.path.join(root, "agents.md"), "secret instruction\n")
+        write(os.path.join(root, "Claude.md"), "more\n")
+        write(os.path.join(root, ".Claude", "settings.json"), "{}\n")
+        write(os.path.join(root, "sub", "gemini.MD"), "nested\n")
+        snapshot = os.path.join(self.loop, "snapshots", "round-5")
+        self.assertEqual(run_py(SNAPSHOT, "create", "--root", root, "--out", snapshot).returncode, 0)
+        proc = self.spawn("codex", "reviewer", self.prompt, snapshot, self.out)
+        self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        listing = re.search(r"listing=(.*)", read(self.out)).group(1).split()
+        self.assertEqual(sorted(listing), sorted([".Claude.as-data", "Claude.md.as-data", "agents.md.as-data",
+                                                  "index.html", "sub"]))
+        self.assertIn("renamed=4", read(self.out))
+
+    def test_timeout_kills_the_whole_process_group(self):
+        pids = os.path.join(self.tmp, "pids")
+        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out, "--timeout", "2",
+                          env={"STUB_MODE": "sleep", "STUB_PIDS": pids, "PATH": self.isolated_path()})
+        self.assertEqual(proc.returncode, 7, proc.stderr_text)
+        self.assertIn("timed out after 2s", proc.stderr_text)
+        self.assertIn("timed out after 2s", read(os.path.join(self.loop, "rounds.md")))
+        self.assertIn("# timeout: 2s", read(self.out[:-3] + ".log"))
+        self.assert_no_survivors(pids)
+        self.assertEqual(self.stage_dirs(), [])
+
+    def test_signal_stops_the_child_and_cleans_up(self):
+        pids = os.path.join(self.tmp, "pids")
+        env = dict(self.env, STUB_MODE="sleep", STUB_PIDS=pids)
+        proc = subprocess.Popen(["bash", SPAWN, "codex", "reviewer", self.prompt, self.snapshot, self.out],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                universal_newlines=True, env=env)
+        for _ in range(200):
+            if os.path.exists(pids) and read(pids).strip():
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(pids), "the stub never started")
+        proc.send_signal(signal.SIGTERM)
+        _, stderr = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 143, stderr)
+        self.assertIn("interrupted by signal 15", stderr)
+        self.assert_no_survivors(pids)
+        self.assertEqual(self.stage_dirs(), [])
+        self.assertIn("interrupted by signal 15", read(os.path.join(self.loop, "rounds.md")))
+
+    def assert_no_survivors(self, pids_file):
+        pids = [int(p) for p in read(pids_file).split()]
+        self.assertEqual(len(pids), 2)
+        for pid in pids:
+            for _ in range(100):
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("process %d outlived the run" % pid)
+
+    def wait_for(self, path, seconds=30):
+        for _ in range(int(seconds * 20)):
+            if os.path.exists(path) and read(path).strip():
+                return read(path).strip()
+            time.sleep(0.05)
+        self.fail("%s never appeared" % path)
+
+    def test_sigkill_of_the_script_still_stops_the_engine(self):
+        """A harness that kills the shell outright runs no trap; the wrapper notices its
+        parent is gone and kills the engine's process group within a few seconds."""
+        pids = os.path.join(self.tmp, "pids")
+        env = dict(self.env, STUB_MODE="sleep", STUB_PIDS=pids)
+        proc = subprocess.Popen(["bash", SPAWN, "codex", "reviewer", self.prompt, self.snapshot, self.out],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        self.wait_for(pids)
+        proc.kill()
+        proc.communicate(timeout=30)
+        self.assert_no_survivors(pids)
+
+    def test_background_run_returns_at_once_and_records_its_exit(self):
+        base = self.out[:-3]
+        started = time.time()
+        proc = self.spawn("codex", "scorer", self.prompt, self.snapshot, self.out, "--model", "gpt-5", "--background")
+        self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        self.assertRegex(proc.stdout_text, r"^started: pid \d+ in the background")
+        self.assertEqual(self.wait_for(base + ".status"), "0")
+        self.assertLess(time.time() - started, 60)
+        self.assertIn("## Score: 50/100", read(self.out))
+        self.assertTrue(read(base + ".spawn").startswith("ok: "), read(base + ".spawn"))
+        self.assertEqual(read(base + ".cmd"), self.dry_run_record("codex", "scorer", self.prompt, self.snapshot,
+                                                                  self.out, "--model", "gpt-5"),
+                         "--background is not part of the pin")
+        self.assert_footer(base + ".log")
+        # Argument errors still surface in the foreground, before anything detaches.
+        proc = self.spawn("codex", "scorer", self.prompt, self.snapshot, self.out, "--background")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("a scorer needs --model", proc.stderr_text)
+
+    def test_background_run_is_listed_and_stops_cleanly_on_term(self):
+        pids = os.path.join(self.tmp, "pids")
+        base = self.out[:-3]
+        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out, "--background",
+                          env={"STUB_MODE": "sleep", "STUB_PIDS": pids})
+        self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        self.wait_for(pids)
+        status = run_py(os.path.join(SCRIPTS, "loop.py"), "status", "--loop", self.loop)
+        self.assertIn("children not finished: scores/round-1 (running, pid %s)" % read(base + ".pid").strip(),
+                      status.stdout)
+        os.kill(int(read(base + ".pid")), signal.SIGTERM)
+        self.assertEqual(self.wait_for(base + ".status"), "143")
+        self.assert_no_survivors(pids)
+        self.assertEqual(self.stage_dirs(), [])
+        status = run_py(os.path.join(SCRIPTS, "loop.py"), "status", "--loop", self.loop)
+        self.assertIn("children not finished: none", status.stdout)
+
+    def test_max_usd_caps_claude_and_reports_cost(self):
+        self.install_stub("claude", STUB_CLAUDE)
+        args = ("claude", "scorer", self.prompt, self.snapshot, self.out, "--model", "claude-x-1", "--max-usd", "0.50")
+        record = self.dry_run_record(*args)
+        self.assertIn("'--max-budget-usd' \\\n  '0.50'", record)
+        self.assertIn("'--output-format' \\\n  'json'", record)
+        proc = self.spawn(*args)
+        self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        self.assert_footer(self.out[:-3] + ".log", usage="cost USD 0.0123 (claude total_cost_usd)")
+        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out, "--max-usd", "0.50")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("claude only", proc.stderr_text)
+        proc = self.spawn("claude", "reviewer", self.prompt, self.snapshot, self.out, "--max-usd", "lots")
+        self.assertEqual(proc.returncode, 2)
+
+    def test_vision_preflight(self):
+        proc = self.spawn("--preflight", "codex", "--vision", env={"STUB_MODE": "vision", "II_VISION_COLOUR": "magenta"})
+        self.assertEqual(proc.returncode, 0, proc.stderr_text + proc.stdout_text)
+        self.assertRegex(proc.stdout_text.strip(), r"^preflight ok: codex .* as reviewer, vision ok \(named magenta\), \d+s$")
+        proc = self.spawn("--preflight", "codex", "--vision", env={"STUB_MODE": "vision"})
+        self.assertEqual(proc.returncode, 0, "a random colour is read too: " + proc.stderr_text)
+        proc = self.spawn("--preflight", "codex", "--vision", env={"STUB_MODE": "blind", "II_VISION_COLOUR": "blue"})
+        self.assertEqual(proc.returncode, 7)
+        self.assertIn("the image was blue, the child said red", proc.stderr_text)
+        self.assertIn("convert them to text evidence", proc.stderr_text)
+        self.assertEqual(self.stage_dirs(), [])
+
+    def test_rotated_codex_auth_is_copied_back(self):
+        auth = os.path.join(self.home, ".codex", "auth.json")
+        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out, env={"STUB_MODE": "rotate"})
+        self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        self.assertIn("copied it back", proc.stderr_text)
+        self.assertEqual(read(auth).strip(), '{"rotated":1}')
+        self.assertEqual(read(auth + ".bak"), "{}\n")
+
+    def test_record_carries_no_timeout(self):
+        default = self.dry_run_record("codex", "reviewer", self.prompt, self.snapshot, self.out)
+        longer = self.dry_run_record("codex", "reviewer", self.prompt, self.snapshot, self.out, "--timeout", "1800")
+        self.assertEqual(default, longer, "the timeout is not part of the scorer pin")
+        self.assertNotIn("timeout", default)
+
+    def test_cdpath_and_relative_codex_home(self):
+        decoy = os.path.join(self.tmp, "decoy")
+        os.makedirs(os.path.join(decoy, "scores"))
+        proc = self.spawn("codex", "reviewer", os.path.relpath(self.prompt, self.loop), "snapshots/round-1",
+                          "scores/rel.md", "--dry-run", cwd=self.loop, env={"CDPATH": decoy})
+        self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        self.assertIn("# record: %s" % os.path.join(os.path.realpath(self.loop), "scores", "rel.cmd"), proc.stdout_text)
+        proc = self.spawn("codex", "reviewer", self.prompt, self.snapshot, self.out, cwd=self.tmp,
+                          env={"CODEX_HOME": os.path.join("home", ".codex")})
+        self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        self.assertIn("auth={}", read(self.out))
 
     def test_preflight(self):
         proc = self.spawn("--preflight", "codex", "--model", "gpt-5")
@@ -967,6 +1659,48 @@ class SpawnStubRunTests(SpawnBase):
         proc = self.spawn("--preflight", "codex", env={"STUB_MODE": "fail"})
         self.assertEqual(proc.returncode, 7)
         self.assertEqual(self.stage_dirs(), [])
+
+    def test_preflight_by_bare_name_from_the_scripts_dir(self):
+        proc = self.spawn("--preflight", "codex", script="spawn_child.sh", cwd=SCRIPTS)
+        self.assertEqual(proc.returncode, 0, proc.stderr_text + proc.stdout_text)
+        self.assertIn("preflight ok: codex", proc.stdout_text)
+
+    def test_check_is_offline_and_names_what_is_missing(self):
+        env = {"PATH": self.isolated_path()}
+        proc = self.spawn("--check", "codex", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout_text + proc.stderr_text)
+        self.assertRegex(proc.stdout_text, r"(?m)^ok    python3 \d+\.\d+")
+        self.assertRegex(proc.stdout_text, r"(?m)^ok    codex: .*\(codex-cli 0\.0-stub\)$")
+        self.assertIn("ok    codex: auth.json at", proc.stdout_text)
+        self.assertIn("outside any repo", proc.stdout_text)
+        proc = self.spawn("--check", "claude", env=env)
+        self.assertEqual(proc.returncode, 7)
+        self.assertIn("FAIL  claude: not on PATH; install it with", proc.stdout_text)
+        proc = self.spawn("--check", env=env)
+        self.assertEqual(proc.returncode, 0, "one usable engine is enough when none is named")
+        self.assertIn("FAIL  kimi: not on PATH", proc.stdout_text)
+        os.remove(os.path.join(self.home, ".codex", "auth.json"))
+        proc = self.spawn("--check", "codex", env=env)
+        self.assertEqual(proc.returncode, 7)
+        self.assertIn("keyring", proc.stdout_text)
+        proc = self.spawn("--check", "claude", env=dict(env, CLAUDECODE="1"))
+        self.assertIn("needs --same-engine", proc.stdout_text)
+        self.assertEqual(self.stage_dirs(), [])
+
+    def test_missing_engine_is_named_before_any_model_call(self):
+        env = {"PATH": self.isolated_path()}
+        proc = self.spawn("--preflight", "claude", env=env)
+        self.assertEqual(proc.returncode, 7)
+        self.assertIn("not on PATH", proc.stderr_text)
+        self.assertIn("no model call was made", proc.stderr_text)
+        self.assertEqual(self.stage_dirs(), [])
+        proc = self.spawn("claude", "reviewer", self.prompt, self.snapshot, self.out, env=env)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("claude is not on PATH", proc.stderr_text)
+        self.assertFalse(os.path.exists(self.out[:-3] + ".cmd"))
+        proc = self.spawn("claude", "reviewer", self.prompt, self.snapshot, self.out, "--dry-run", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr_text)
+        self.assertIn("warning: claude is not on PATH", proc.stderr_text)
 
     def test_real_run_refuses_unpinned_scorer_and_unknown_loop_dir(self):
         proc = self.spawn("codex", "scorer", self.prompt, self.snapshot, self.out)
@@ -989,13 +1723,13 @@ class SpawnStubRunTests(SpawnBase):
 
 class HelpTests(unittest.TestCase):
     def test_python_scripts_help(self):
-        for script in (SNAPSHOT, STRIP, SCORE):
+        for script in (SNAPSHOT, STRIP, SCORE, os.path.join(SCRIPTS, "loop.py"), os.path.join(SCRIPTS, "evidence.py")):
             proc = run_py(script, "--help")
             self.assertEqual(proc.returncode, 0, script)
             self.assertIn("usage", proc.stdout.lower())
 
     def test_score_math_subcommand_help(self):
-        for sub in ("baseline", "budget", "decide"):
+        for sub in ("baseline", "budget", "decide", "check-criteria", "check-scorer"):
             proc = run_py(SCORE, sub, "--help")
             self.assertEqual(proc.returncode, 0, sub + "\n" + proc.stderr)
             self.assertIn("usage", proc.stdout.lower())
@@ -1011,6 +1745,8 @@ class HelpTests(unittest.TestCase):
         self.assertIn("--unsandboxed", proc.stdout)
         self.assertTrue(proc.stdout.rstrip().endswith("failed the preflight."), proc.stdout[-120:])
         self.assertNotIn("set -eu", proc.stdout)
+        for phrase in ("--check", "process group", "--path scope"):
+            self.assertIn(phrase, proc.stdout, phrase)
 
 
 if __name__ == "__main__":

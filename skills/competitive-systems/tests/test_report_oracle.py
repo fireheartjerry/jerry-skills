@@ -5,6 +5,9 @@ names every unfilled field under Not verified, never prints a ratio without the 
 medians, fills Card facts from the catalog, records the oracle command's exit code.
 oracle: the scaffold passes for a correct implementation of `sorted`, fails for a wrong one,
 fails the anti-cache test for one that caches by id(), and never overwrites without --force.
+For a function of several arguments it calls fn(*case), so a stub fails instead of both sides
+raising TypeError; a reference that raises on most cases, or returns one constant, fails as
+vacuous; the anti-cache test mutates a list inside the argument tuple.
 """
 import json
 import os
@@ -161,6 +164,40 @@ class ReportTests(unittest.TestCase):
         self.assertIn("the oracle failed, so the timing is not evidence",
                       field_line(r.stdout, "Not verified"))
 
+    def test_bench_oracle_cmd_gates_timing_and_reaches_the_report(self):
+        bad = "%s -c \"import sys; print('FAILED (failures=1)'); sys.exit(1)\"" % sys.executable
+        p = run_dev(["bench", "--arm", "a=%s -c pass" % sys.executable, "--arm",
+                     "b=%s -c pass" % sys.executable, "--runs", "2", "--warmup", "0",
+                     "--oracle-cmd", bad, "--out", self.path("x.json"), "--repo", self.dir])
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("not timing an unverified candidate", p.stderr)
+        self.assertFalse(os.path.exists(self.path("x.json")))
+        ok = "%s -c \"print('OK')\"" % sys.executable
+        p = run_dev(["bench", "--arm", "a=%s -c pass" % sys.executable, "--arm",
+                     "b=%s -c pass" % sys.executable, "--runs", "2", "--warmup", "0",
+                     "--oracle-cmd", ok, "--out", self.path("b.json"), "--repo", self.dir])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        q = run_dev(["compare", self.path("b.json"), "--json", "--repo", self.dir])
+        with open(self.path("c.json"), "w") as f:
+            f.write(q.stdout)
+        r = run_dev(["report", "--compare", self.path("c.json")])
+        self.assertIn("run by bench before timing", field_line(r.stdout, "Oracle"))
+        self.assertNotIn("Oracle", field_line(r.stdout, "Not verified"))
+
+    def test_class_line_flags_a_constant_factor_gain(self):
+        synthetic_compare([2.0] * 5 + [2.1] * 5, [1.0] * 5 + [1.05] * 5, self.path("c.json"))
+        for name, exp, ci, sizes in (("sb.json", 2.05, [2.04, 2.11], [4000, 16000]),
+                                     ("sa.json", 2.51, [2.40, 2.59], [20000, 160000])):
+            with open(self.path(name), "w") as f:
+                json.dump({"schema": "devkit-scale/1", "exponent": exp, "exponent_ci": ci,
+                           "sizes": [{"n": n} for n in sizes]}, f)
+        r = run_dev(["report", "--compare", self.path("c.json"), "--scale-before",
+                     self.path("sb.json"), "--scale-after", self.path("sa.json")])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = field_line(r.stdout, "Class")
+        self.assertIn("a constant-factor gain, not an algorithmic one", line)
+        self.assertIn("the two fits cover different sizes", line)
+
     def test_usage_errors_exit_2_without_traceback(self):
         with open(self.path("junk.json"), "w") as f:
             f.write('{"schema": "something-else"}')
@@ -206,6 +243,39 @@ IMPLS = textwrap.dedent('''
 
     def strip_all(s):
         return s.strip()
+
+
+    def reconcile(bank, ledger):
+        return sorted(set(bank) & set(ledger))
+
+
+    def reconcile_fast(bank, ledger):
+        seen = set(ledger)
+        return sorted({b for b in bank if b in seen})
+
+
+    def reconcile_stub(bank, ledger):
+        return []
+
+
+    def reconcile_cached(bank, ledger):
+        key = (id(bank), id(ledger))
+        if key not in _cache:
+            _cache[key] = reconcile(bank, ledger)
+        return _cache[key]
+
+
+    def always_raises(xs):
+        raise ValueError("rejects everything")
+
+
+    def constant(xs):
+        return 0
+
+
+    def pair_case(rng):
+        return ([rng.randint(0, 20) for _ in range(rng.randint(0, 15))],
+                [rng.randint(0, 20) for _ in range(rng.randint(0, 15))])
 ''')
 
 
@@ -232,7 +302,7 @@ class OracleTests(unittest.TestCase):
         for name, want_rc in (("good", 0), ("wrong", 1), ("cached", 1)):
             p = self.scaffold("--ref", "builtins:sorted", "--new", "impls:%s" % name)
             self.assertEqual(p.returncode, 0, p.stderr)
-            rel = "tests/test_oracle_%s.py" % name
+            rel = "tests/test_oracle_impls_%s.py" % name
             self.assertIn("wrote %s" % rel, p.stdout)
             t = self.run_tests(rel)
             self.assertEqual(t.returncode, want_rc, t.stdout)
@@ -253,7 +323,7 @@ class OracleTests(unittest.TestCase):
 
     def test_refuses_to_overwrite_without_force(self):
         self.assertEqual(self.scaffold("--ref", "builtins:sorted", "--new", "impls:good").returncode, 0)
-        target = os.path.join(self.dir, "tests", "test_oracle_good.py")
+        target = os.path.join(self.dir, "tests", "test_oracle_impls_good.py")
         with open(target, "a") as f:
             f.write("# hand edit\n")
         p = self.scaffold("--ref", "builtins:sorted", "--new", "impls:good")
@@ -279,6 +349,47 @@ class OracleTests(unittest.TestCase):
                       "--out", "t_str.py")
         self.assertEqual(self.run_tests("t_str.py").returncode, 0)
 
+    def test_multi_argument_function_is_called_with_star_args(self):
+        for name, want_rc, marker in (("reconcile_fast", 0, None),
+                                      ("reconcile_stub", 1, "FAIL: test_matches_reference"),
+                                      ("reconcile_cached", 1,
+                                       "FAIL: test_anti_cache_mutated_input")):
+            p = self.scaffold("--ref", "impls:reconcile", "--new", "impls:%s" % name,
+                              "--gen", "custom:impls:pair_case")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("calls fn(*case)", p.stdout)
+            self.assertIn("reference ok on 10 of 10 sample cases", p.stdout)
+            t = self.run_tests("tests/test_oracle_impls_%s.py" % name)
+            self.assertEqual(t.returncode, want_rc, t.stdout)
+            self.assertNotIn("skipped", t.stdout)
+            if marker:
+                self.assertIn(marker, t.stdout)
+            else:
+                self.assertIn("reference ok on 300 of 300 random cases", t.stdout)
+
+    def test_wrong_call_convention_warns_and_the_test_fails_as_vacuous(self):
+        p = self.scaffold("--ref", "impls:reconcile", "--new", "impls:reconcile_stub",
+                          "--gen", "custom:impls:pair_case", "--call", "one", "--out", "v.py")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("--call one passes one", p.stderr)
+        self.assertIn("raised on 10 of 10 sample cases", p.stderr)
+        t = self.run_tests("v.py")
+        self.assertEqual(t.returncode, 1, t.stdout)
+        self.assertIn("vacuous oracle: the reference raised on", t.stdout)
+        p = self.scaffold("--ref", "impls:reconcile", "--new", "impls:reconcile_stub")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("--gen must be custom", p.stderr)
+
+    def test_raising_or_constant_reference_is_vacuous(self):
+        for ref, msg in (("always_raises", "the reference raised on"),
+                         ("constant", "returned 0 on every random case")):
+            p = self.scaffold("--ref", "impls:%s" % ref, "--new", "impls:%s" % ref,
+                              "--out", "%s.py" % ref)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            t = self.run_tests("%s.py" % ref)
+            self.assertEqual(t.returncode, 1, t.stdout)
+            self.assertIn(msg, t.stdout)
+
     def test_usage_errors(self):
         for args in (["--ref", "nosuchmodule:f", "--new", "impls:good"],
                      ["--ref", "builtins:sorted", "--new", "impls:missing"],
@@ -288,6 +399,82 @@ class OracleTests(unittest.TestCase):
             p = self.scaffold(*args)
             self.assertEqual(p.returncode, 2, (args, p.stderr))
             self.assertTrue(p.stderr.startswith("dev.py oracle:"), p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
+
+
+class CommandOracleTests(unittest.TestCase):
+    """dev.py oracle --ref-cmd: stdout of two commands compared over generated cases."""
+
+    GEN = ("import random, sys\nr = random.Random(int(sys.argv[1]))\n"
+           "print(' '.join(str(r.randint(-5, 5)) for _ in range(r.randint(0, 30))))\n")
+    OLD = ("import sys\nout = []\nfor x in sys.stdin.read().split():\n"
+           "    if x not in out:\n        out.append(x)\nprint(' '.join(out))\n")
+    NEW = "import sys\nprint(' '.join(dict.fromkeys(sys.stdin.read().split())))\n"
+    BAD = "import sys\nprint(' '.join(sorted(set(sys.stdin.read().split()))))\n"
+    FLOAT = "import sys\nprint(sum(float(x) for x in sys.stdin.read().split()) / 3.0)\n"
+    FLOAT2 = ("import sys\nxs = [float(x) for x in sys.stdin.read().split()]\n"
+              "print(sum(x / 3.0 for x in xs) + 1e-12)\n")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        for name in ("gen", "old", "new", "bad", "float", "float2"):
+            with open(os.path.join(self.dir, name + ".py"), "w") as f:
+                f.write(getattr(self, name.upper()))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def oracle(self, ref, new, *extra):
+        py = sys.executable
+        return run_dev(["oracle", "--ref-cmd", "%s %s.py" % (py, ref), "--new-cmd",
+                        "%s %s.py" % (py, new), "--gen-cmd", "%s gen.py {seed}" % py,
+                        "--cases", "25"] + list(extra), cwd=self.dir)
+
+    def test_equal_commands_pass_and_print_the_rerun_line(self):
+        p = self.oracle("old", "new")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("oracle: PASS on 25 cases", p.stdout)
+        self.assertIn("rerun it in CI", p.stdout)
+        self.assertIn("sensitivity:", p.stdout)
+
+    def test_a_broken_candidate_fails_with_the_seed_and_both_outputs(self):
+        p = self.oracle("old", "bad")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("oracle: FAIL on case 1", p.stdout)
+        self.assertIn("seed 0: outputs differ", p.stdout)
+        data = json.loads(self.oracle("old", "bad", "--json").stdout)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["first_mismatch"], 0)
+
+    def test_tolerance_applies_to_numeric_tokens_only(self):
+        self.assertEqual(self.oracle("float", "float2").returncode, 1)
+        p = self.oracle("float", "float2", "--tol", "1e-9")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        sys.path.insert(0, SCRIPTS)
+        try:
+            from devkit.oracle import same_output
+        finally:
+            sys.path.remove(SCRIPTS)
+        self.assertTrue(same_output(b"a 1.0 nan", b"a 1.0000000001 nan", 1e-6))
+        self.assertFalse(same_output(b"a 1.0", b"b 1.0", 1e-6))
+        self.assertFalse(same_output(b"1 2", b"1 2 3", 1e-6))
+
+    def test_a_vacuous_run_fails(self):
+        py = sys.executable
+        p = run_dev(["oracle", "--ref-cmd", "echo same", "--new-cmd", "echo same",
+                     "--gen-cmd", "%s gen.py {seed}" % py, "--cases", "5"], cwd=self.dir)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("same output on every case", p.stdout)
+
+    def test_usage_errors(self):
+        for args in (["--ref-cmd", "cat", "--new-cmd", "cat"],
+                     ["--ref-cmd", "cat", "--new-cmd", "cat", "--gen-cmd", "echo 1"],
+                     ["--ref-cmd", "cat", "--gen-cmd", "echo {seed}"],
+                     ["--ref", "impls:f", "--ref-cmd", "cat"],
+                     []):
+            p = run_dev(["oracle"] + args, cwd=self.dir)
+            self.assertEqual(p.returncode, 2, (args, p.stderr))
             self.assertNotIn("Traceback", p.stderr)
 
 

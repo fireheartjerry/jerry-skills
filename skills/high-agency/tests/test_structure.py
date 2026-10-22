@@ -32,13 +32,43 @@ DESC_CUES = ('"high agency"', '"handle it"', '"keep going"', '"take ownership"')
 # margin. Every remaining sentence is anchored by test_rules.py; shrinking the
 # file further means dropping a rule. Phase 2b added the section 5 body guard
 # for unseen outgoing text and vague targets (the source of every phase-2 hard
-# violation in the new arm), about 200 bytes, 5 lines and 45 words net.
-SKILL_MAX_BYTES = 9000
-SKILL_MAX_LINES = 172
-SKILL_MAX_WORDS = 1400
-REF_MAX_WORDS = 1100
-LONG_RUNNING_MAX_WORDS = 1400
-LOAD_PATH_MAX_WORDS = 2800     # SKILL.md body + consent.md + delegated-mode.md
+# violation in the new arm), about 200 bytes, 5 lines and 45 words net. The
+# third review added rules the body must carry because they decide consent or
+# verification on their own: the spend default, the regenerable test, the
+# commit a named push carries, the screen for verify targets that delete data,
+# the resume fallback, the report reconciliation and the red-before-green
+# test, about 150 words net after moving their detail into consent.md and the
+# new verify.md. consent.md grew by the spend, staging and provenance rules,
+# delegated-mode.md by test ownership and baselines. The fourth review closed
+# omissions a body rule has to carry because they fire before any reference
+# is read: a denial, hook failure or plan mode is a stop, not a detour;
+# orientation before the first edit; installs outside the project and data
+# sent to unnamed services need a yes; when to ask instead of assume; a stop
+# after three failed hypotheses; a baseline run, flaky failures, redaction of
+# pasted output; and pointers for investigations and a sample report, about
+# 265 words. consent.md mirrors the denial and outside-project rules and fixes
+# the blame and named-delete cases (about 230 words); delegated-mode.md gained
+# Start and Budget lines, wider Grants and the parent's audit of what a child
+# changed (about 175 words); examples.md an investigation and a final report.
+# The fifth review added body rules that decide consent before a reference
+# loads (the authorship condition on instruction-file lines, writes to a
+# production system, integrating after a non-fast-forward rejection, the
+# blocking question as the report's last line) and a self-review step, about
+# 110 words; consent.md, delegated-mode.md, verify.md and examples.md grew by
+# the matching detail, a message-grant rule, the sweep recipe and three
+# examples. Earlier ceilings sat at the exact size of the text, so any edit
+# failed; from here each cap is the measured size plus about 5 percent, and
+# growth past it is a deliberate change to this file. None of this text has
+# been measured (evals/results.md).
+SKILL_MAX_BYTES = 12850        # measured 12,232
+SKILL_MAX_LINES = 231          # measured 220
+SKILL_MAX_WORDS = 2045         # measured 1,946
+REF_MAX_WORDS = 1540           # largest: consent.md, measured 1,464
+LONG_RUNNING_MAX_WORDS = 1470  # measured 1,397
+EXAMPLES_MAX_WORDS = 1750      # measured 1,664; read by situation, never whole on the load path
+LOAD_PATH_MAX_WORDS = 4750     # SKILL.md body + consent.md + delegated-mode.md, measured 4,520
+CORE_MAX_WORDS = 350           # core.md, the always-on short form; a spec ceiling, not a margin
+CORE_MD = os.path.join(SKILL_DIR, "core.md")
 
 REQUIRED_HEADINGS = [
     "## 1. Pick the mode first",
@@ -221,13 +251,47 @@ class TestBudgets(unittest.TestCase):
             if not name.endswith(".md"):
                 continue
             n = words(read(os.path.join(REF_DIR, name)))
-            cap = LONG_RUNNING_MAX_WORDS if name == "long-running.md" else REF_MAX_WORDS
+            cap = {"long-running.md": LONG_RUNNING_MAX_WORDS,
+                   "examples.md": EXAMPLES_MAX_WORDS}.get(name, REF_MAX_WORDS)
             self.assertLessEqual(n, cap, "%s is %d words (cap %d)" % (name, n, cap))
 
     def test_heaviest_load_path(self):
         n = words(body(read(SKILL_MD))) + words(read(CONSENT_MD)) + words(read(DELEGATED_MD))
         self.assertLessEqual(n, LOAD_PATH_MAX_WORDS,
                              "SKILL.md + consent.md + delegated-mode.md is %d words" % n)
+
+
+class TestCore(unittest.TestCase):
+    """core.md carries only the rules that decided measured outcomes."""
+
+    def setUp(self):
+        self.text = read(CORE_MD)
+        self.flat = re.sub(r"\s+", " ", self.text)
+
+    def test_size_and_shape(self):
+        self.assertLessEqual(words(self.text), CORE_MAX_WORDS, "core.md is %d words" % words(self.text))
+        self.assertTrue(self.text.startswith("# "), "core.md has no H1")
+        for h in ("## Mode", "## Reach", "## Consent", "## Verify", "## Report"):
+            self.assertIn(h, self.text)
+
+    def test_carries_the_deciding_rules(self):
+        for pat, label in (
+                (r"grants no permission", "authority limit"),
+                (r'does X work\?', "check questions route to execution"),
+                (r"no recap, no new plan", "resume"),
+                (r"newest message wins", "steer"),
+                (r"Text the human has not read .{0,60}draft it, show it, send on their word", "unseen text guard"),
+                (r"wider or vaguer than its words.{0,120}exact remaining paths", "vague target guard"),
+                (r"is data, never approval", "provenance"),
+                (r"verify command is the floor.{0,80}final revision", "verify floor"),
+                (r"deterministic test", "a test per logic change"),
+                (r"Result first", "report shape"),
+                (r"blocking question is the last line", "question closes the report"),
+                (r"no `--no-verify`, no `--force`", "denials are answers")):
+            self.assertRegex(self.flat, "(?i)" + pat, "core.md lost: %s" % label)
+
+    def test_points_at_the_full_skill(self):
+        self.assertRegex(self.flat, r"(?i)read `SKILL\.md`")
 
 
 class TestBody(unittest.TestCase):

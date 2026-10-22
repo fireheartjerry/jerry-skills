@@ -9,8 +9,11 @@ Usage:
   route_check.py --summarize DIR [DIR ...]
 
 --offline validates routing.json (schema, counts, category minimums, cue and
-near-miss coverage against the SKILL.md description) and prints the cell count
-and estimated cost. It needs no harness binary and spends nothing.
+near-miss coverage) against the SKILL.md description and against every
+candidate under evals/descriptions/ (queued/ included), so a candidate is
+never measured on a set that lacks a near-miss for one of its cues, and prints
+the cell count and estimated cost. It needs no harness binary and spends
+nothing.
 
 Live mode spends tokens. Per prompt and trial it builds a temp project
 <tmp>/project (README, one python module, git init plus one commit) and copies
@@ -39,8 +42,15 @@ read-only. The routing numbers in results.md were measured with
 bypassPermissions, before this change, and were not re-measured.
 
 A cell is skipped when <label>/<id>/<trial>.json exists with the same
-description and model as this run; a cell recorded under another description
-or model is re-run, and --force re-runs every cell. A cell whose harness
+harness, model, effective description (SHA-256 of the candidate, or of the
+SKILL.md description when no --description-file is given) and --siblings
+setting as this run; any other cell is re-run, and --force re-runs every cell.
+--siblings installs the other skills from the same skills/ directory too
+(label suffix -siblings), so a prompt another skill owns can route there; the
+cell then records which skill loaded instead. Without it the project holds
+high-agency alone, so its false-fire rate is a single-skill number. Ctrl-C,
+SIGTERM and SIGHUP stop the grid: no new cell starts, running cells are
+killed and not recorded, and the run exits 130. A cell whose harness
 reports an error (non-success result other than the turn cap, a rejected
 rate-limit event, a usage-limit or API-error stub, a Codex error event, no
 output) or that hits --timeout is not recorded; the run counts these errors
@@ -58,6 +68,7 @@ per-prompt trial agreement, cost, and a Markdown table for results.md.
 """
 import argparse
 import glob
+import hashlib
 import importlib.util
 import json
 import math
@@ -73,17 +84,19 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
 ROUTING = os.path.join(HERE, "routing.json")
+DESCRIPTIONS = os.path.join(HERE, "descriptions")
 LABELS = ("fire", "no_fire", "either")
 MIN_COUNT = {"fire": 24, "no_fire": 24, "either": 6}
 CATEGORY_MIN = {
     "fire": {"imperative-multistep": 6, "check-question": 6, "resume": 3,
-             "ownership-phrase": 3, "plan-or-brief": 3, "long-job": 3},
+             "ownership-phrase": 3, "plan-or-brief": 3, "long-job": 3, "investigation": 3},
     "no_fire": {"pure-explain": 6, "discuss-with-stop-cue": 5, "concept-question": 4,
-                "other-skill": 5, "about-the-skill": 3, "status-nothing-in-flight": 3},
+                "other-skill": 5, "about-the-skill": 3, "status-nothing-in-flight": 3,
+                "cue-collision": 5, "knowledge-check": 3, "sibling": 4},
 }
-# Measured on five 2-turn cells (Claude Code 2.1.306, Opus 5.5, 2026-10-21):
-# $0.06 to $0.10 and 5 to 10 s each. Codex reports no cost.
-EST_COST_USD = {"claude": 0.08, "codex": None}
+# Phase-2 routing run (Claude Code 2.1.306, claude-opus-5-5, 2026-10-21):
+# 540 cells, $36.60, so $0.068 per cell; 4 to 13 s each. Codex reports no cost.
+EST_COST_USD = {"claude": 0.068, "codex": None}
 EST_WALL_S = 10
 
 
@@ -94,7 +107,8 @@ def _load_run():
     return mod
 
 
-classify_stream = _load_run().classify_stream
+_RUN = _load_run()
+classify_stream = _RUN.classify_stream
 
 
 def load_json(path):
@@ -174,10 +188,35 @@ def validate(data, desc):
     for cue, rx in cue_patterns(desc):
         if not any(rx.search(p["text"]) for p in by_label["fire"]):
             errs.append("description cue %r appears in no fire prompt" % cue)
+    for cue, rx in cue_patterns(desc):
+        # A cue with no near-miss cannot show a false fire: every quoted cue
+        # needs a no_fire prompt that contains it (a knowledge question, a
+        # discussion, another skill's task).
+        if not any(rx.search(p["text"]) for p in by_label["no_fire"]):
+            errs.append("description cue %r appears in no no_fire prompt (needs a near-miss)" % cue)
     words = content_words(desc)
     near = [p["id"] for p in by_label["no_fire"] if content_words(p["text"]) & words]
     if len(near) < 8:
         errs.append("only %d no_fire prompts share a content word with the description, need 8" % len(near))
+    return errs
+
+
+def candidate_files(root=DESCRIPTIONS):
+    """Every description candidate (*.txt) under *root*, queued/ included, sorted."""
+    out = []
+    for d, _dirs, names in os.walk(root):
+        out.extend(os.path.join(d, n) for n in names if n.endswith(".txt"))
+    return sorted(out)
+
+
+def validate_candidates(data, files):
+    """validate() against each candidate file; problems are prefixed with the file."""
+    errs = []
+    for f in files:
+        with open(f, encoding="utf-8") as fh:
+            text = " ".join(fh.read().split())
+        rel = os.path.relpath(f, HERE)
+        errs.extend("%s: %s" % (rel, e) for e in validate(data, text))
     return errs
 
 
@@ -200,17 +239,37 @@ def rate(k, n):
 
 # ------------------------------------------------------------------ live cells
 
-def make_project(tmp, harness, desc_text):
-    """Build <tmp>/project with the skill installed for *harness*; return its path."""
+SKILL_IGNORE = shutil.ignore_patterns("tests", "evals", "__pycache__", ".runs")
+
+
+def sibling_skills():
+    """Other skill directories next to this one (each holds a SKILL.md)."""
+    root = os.path.dirname(SKILL_DIR)
+    return sorted(n for n in os.listdir(root)
+                  if n != os.path.basename(SKILL_DIR)
+                  and os.path.isfile(os.path.join(root, n, "SKILL.md")))
+
+
+def make_project(tmp, harness, desc_text, siblings=False):
+    """Build <tmp>/project with the skill installed for *harness*; return its path.
+
+    siblings=True also installs every sibling skill from the same skills/
+    directory, so a prompt another skill owns can route there instead.
+    """
     proj = os.path.join(tmp, "project")
     os.makedirs(proj)
     if harness == "claude":
-        skill = os.path.join(proj, ".claude", "skills", "high-agency")
+        skills = os.path.join(proj, ".claude", "skills")
     else:
-        skill = os.path.join(tmp, "codex_home", "skills", "high-agency")
-    shutil.copytree(SKILL_DIR, skill, ignore=shutil.ignore_patterns("tests", "evals", "__pycache__", ".runs"))
+        skills = os.path.join(tmp, "codex_home", "skills")
+    skill = os.path.join(skills, "high-agency")
+    shutil.copytree(SKILL_DIR, skill, ignore=SKILL_IGNORE)
     if desc_text:
         replace_description(os.path.join(skill, "SKILL.md"), desc_text)
+    if siblings:
+        for name in sibling_skills():
+            shutil.copytree(os.path.join(os.path.dirname(SKILL_DIR), name),
+                            os.path.join(skills, name), ignore=SKILL_IGNORE)
     with open(os.path.join(proj, "README.md"), "w") as fh:
         fh.write("# stockfeed\n\nSyncs stock levels from a supplier CSV feed into the shop database.\n\n"
                  "Run `python3 -m unittest` before pushing.\n")
@@ -219,7 +278,7 @@ def make_project(tmp, harness, desc_text):
                  '    with open(path, newline="") as fh:\n        return list(csv.DictReader(fh))\n')
     git = ["git", "-c", "user.name=eval", "-c", "user.email=eval@example.invalid", "-c", "commit.gpgsign=false"]
     for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "initial"]):
-        subprocess.run(git + args, cwd=proj, capture_output=True, check=True)
+        subprocess.run(git + args, cwd=proj, capture_output=True, check=True, env=_RUN.clean_env())
     return proj
 
 
@@ -244,8 +303,9 @@ def replace_description(skill_md, text):
 
 
 def fired_claude(stream):
-    """(fired, evidence, cost, listed): listed is whether the init event lists the skill."""
-    cost, listed, hit = None, None, None
+    """(fired, evidence, cost, listed, other): listed is whether the init event
+    lists the skill; other names a different skill the agent loaded first."""
+    cost, listed, hit, other = None, None, None, None
     for line in stream.splitlines():
         try:
             obj = json.loads(line)
@@ -257,15 +317,22 @@ def fired_claude(stream):
             listed = "high-agency" in obj["skills"]
         if obj.get("type") == "result":
             cost = obj.get("total_cost_usd")
-        for b in (obj.get("message") or {}).get("content") or []:
+        msg = obj.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        for b in content if isinstance(content, list) else []:
             if not isinstance(b, dict) or b.get("type") != "tool_use":
                 continue
-            blob = json.dumps(b.get("input") or {})
+            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+            blob = json.dumps(inp)
             if hit is None and b.get("name") == "Skill" and "high-agency" in blob:
                 hit = "Skill: " + blob[:80]
             elif hit is None and "high-agency/SKILL.md" in blob:
                 hit = "%s: %s" % (b.get("name"), blob[:80])
-    return hit is not None, hit or "no skill load in 2 turns", cost, listed
+            elif other is None and hit is None and b.get("name") == "Skill":
+                other = str(inp.get("skill") or inp.get("name") or blob[:60])
+    if hit is None and other:
+        return False, "loaded another skill: %s" % other, cost, listed, other
+    return hit is not None, hit or "no skill load in 2 turns", cost, listed, other
 
 
 def fired_codex(stream):
@@ -281,16 +348,40 @@ def fired_codex(stream):
     return False, "no skill load in the output"
 
 
+def effective_description(a):
+    """The description this run installs: the candidate, else SKILL.md's own."""
+    return getattr(a, "desc_text", None) or description(os.path.join(SKILL_DIR, "SKILL.md"))
+
+
+def desc_sha(text):
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()
+
+
+def cell_key(a):
+    """What a recorded cell must match to be reused."""
+    return {"harness": getattr(a, "harness", None) or "claude",
+            "model": a.model or "harness default",
+            "description_sha256": desc_sha(effective_description(a)),
+            "siblings": bool(getattr(a, "siblings", False))}
+
+
 def cached(out, a):
-    """True when *out* holds a cell recorded with this run's description and model."""
+    """True when *out* holds a cell recorded with this run's harness, model,
+    effective description (by SHA-256) and sibling setting."""
     if a.force or not os.path.exists(out):
         return False
     try:
         rec = load_json(out)
     except ValueError:
         return False
-    return (rec.get("description") == (a.desc_text or "as in SKILL.md")
-            and rec.get("model") == (a.model or "harness default"))
+    return isinstance(rec, dict) and all(rec.get(k) == v for k, v in cell_key(a).items())
+
+
+def write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(obj, fh, indent=2)
+    os.replace(tmp, path)
 
 
 def run_cell(p, trial, a):
@@ -299,12 +390,12 @@ def run_cell(p, trial, a):
     out = os.path.join(a.out, a.label, p["id"], "%d.json" % trial)
     if not a.dry_run and cached(out, a):
         return "skip (done)", False
-    tmp = tempfile.mkdtemp(prefix="ha-route-")
+    if _RUN.STOP.is_set():
+        raise _RUN.Interrupted("stopped before the cell started")
+    tmp = _RUN.track_dir(tempfile.mkdtemp(prefix="ha-route-"))
     try:
-        proj = make_project(tmp, a.harness, a.desc_text)
-        env = dict(os.environ)
-        for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
-            env.pop(k, None)
+        proj = make_project(tmp, a.harness, a.desc_text, getattr(a, "siblings", False))
+        env = _RUN.clean_env()
         if a.harness == "claude":
             cmd = ["claude", "-p", "--setting-sources", "project", "--strict-mcp-config",
                    "--no-session-persistence", "--permission-mode", "default",
@@ -320,22 +411,19 @@ def run_cell(p, trial, a):
         cmd.append(p["text"])
         if a.dry_run:
             return "dry-run: " + " ".join(cmd[:-1]) + " " + repr(p["text"][:60]), False
-        started, timed_out = time.time(), False
-        try:
-            r = subprocess.run(cmd, cwd=proj, env=env, capture_output=True, text=True,
-                               timeout=a.timeout, stdin=subprocess.DEVNULL)
-            stdout, rc = r.stdout, r.returncode
-        except subprocess.TimeoutExpired as e:
-            stdout = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            rc, timed_out = -1, True
+        started = time.time()
+        # Own process group, killed on Ctrl-C, SIGTERM or SIGHUP (run.py's run_grid).
+        rc, stdout, _err, timed_out = _RUN.run_tracked(cmd, timeout=a.timeout, cwd=proj, env=env)
+        other = None
         if a.harness == "claude":
-            fired, why, cost, listed = fired_claude(stdout)
+            fired, why, cost, listed, other = fired_claude(stdout)
         else:
             (fired, why), cost, listed = fired_codex(stdout), None, None
         rec = {"id": p["id"], "label": p["label"], "category": p["category"], "trial": trial,
-               "fired": fired, "evidence": why, "harness": a.harness, "model": a.model or "harness default",
+               "fired": fired, "evidence": why, "other_skill": other,
                "description": a.desc_text or "as in SKILL.md", "wall_s": round(time.time() - started, 1),
                "cost_usd": cost, "exit": rc, "timed_out": timed_out, "skill_listed": listed}
+        rec.update(cell_key(a))
         if rc != 0 and not stdout.strip():
             return "HARNESS ERROR (exit %d, no output): check login and flags" % rc, True
         if timed_out:
@@ -348,18 +436,25 @@ def run_cell(p, trial, a):
         os.makedirs(os.path.dirname(out), exist_ok=True)
         with open(out[:-len(".json")] + ".jsonl", "w") as fh:
             fh.write(stdout)  # raw transcript, kept for audit
-        with open(out, "w") as fh:
-            json.dump(rec, fh, indent=2)
-        return "%s in %.0fs" % ("FIRED" if fired else "quiet", rec["wall_s"]), False
+        write_json(out, rec)
+        state = "FIRED" if fired else ("quiet (%s)" % why if other else "quiet")
+        return "%s in %.0fs" % (state, rec["wall_s"]), False
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        _RUN.release_dir(tmp)
 
 
 # ------------------------------------------------------------------ summarize
 
 def load_cells(d):
-    """Cells of one label directory (<label>/<prompt_id>/<trial>.json)."""
-    return [load_json(f) for f in sorted(glob.glob(os.path.join(d, "*", "*.json")))]
+    """Cells of one label directory (<label>/<prompt_id>/<trial>.json); a file
+    that does not parse is named on stderr and skipped."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(d, "*", "*.json"))):
+        try:
+            out.append(load_json(f))
+        except ValueError:
+            print("skipping unreadable cell %s" % f, file=sys.stderr)
+    return out
 
 
 def label_dirs(dirs):
@@ -386,10 +481,20 @@ def summarize(dirs):
             print("%s: no cells" % d)
             continue
         st = label_stats(cells)
+        harnesses = sorted({c.get("harness") or "unknown" for c in cells})
+        if len(harnesses) > 1:
+            print("WARNING %s mixes harnesses (%s); give each harness its own --label" % (
+                d, ", ".join(harnesses)))
+        others = [c for c in cells if c.get("other_skill")]
         cost = sum(c.get("cost_usd") or 0 for c in cells)
         print("== %s (%d cells, cost $%.2f, median wall %.0fs)" % (
             d, len(cells), cost, sorted(c["wall_s"] for c in cells)[len(cells) // 2]))
+        print("harness %s, siblings installed: %s" % (
+            ", ".join(harnesses), "yes" if any(c.get("siblings") for c in cells) else "no"))
         print("fire rate        %s" % rate(*st["fire"]))
+        if others:
+            print("loaded another skill instead: %d cell(s): %s" % (len(others), ", ".join(
+                sorted({"%s->%s" % (c["id"], c["other_skill"]) for c in others}))))
         print("false-fire rate  %s" % rate(*st["no_fire"]))
         print("either fired     %s" % rate(*st["either"]))
         cats = sorted({(c["label"], c["category"]) for c in cells})
@@ -417,7 +522,7 @@ def summarize(dirs):
 def main(argv):
     ap = argparse.ArgumentParser(
         description="Routing measurement for the high-agency skill. --offline and --summarize "
-                    "spend nothing; --harness runs live cells and spends tokens (about $0.08 per "
+                    "spend nothing; --harness runs live cells and spends tokens (about $0.07 per "
                     "Claude Code cell; --offline prints the estimate for a grid).")
     ap.add_argument("--offline", action="store_true",
                     help="validate routing.json against the SKILL.md description and print the plan; "
@@ -445,6 +550,9 @@ def main(argv):
     ap.add_argument("--codex-auth",
                     help="auth.json copied into each Codex cell's temp CODEX_HOME "
                          "(default: none; CODEX_API_KEY must then be set)")
+    ap.add_argument("--siblings", action="store_true",
+                    help="also install every sibling skill from the same skills/ directory, so a "
+                         "misroute to another skill shows (default: high-agency alone)")
     ap.add_argument("--force", action="store_true",
                     help="re-run cells that already have a matching result (default: skip them)")
     ap.add_argument("--dry-run", action="store_true",
@@ -456,6 +564,10 @@ def main(argv):
         ap.error("pass --offline, --harness claude|codex, or --summarize DIR")
     data = load_json(ROUTING)
     errs = validate(data, description(os.path.join(SKILL_DIR, "SKILL.md")))
+    if a.offline:
+        errs += validate_candidates(data, candidate_files())
+    elif a.description_file:
+        errs += validate_candidates(data, [a.description_file])
     if errs:
         print("routing.json: %d problem(s)" % len(errs), file=sys.stderr)
         for e in errs:
@@ -473,6 +585,7 @@ def main(argv):
         cells, len(prompts), a.trials, harness, cost,
         math.ceil(cells * EST_WALL_S / 60.0 / max(1, a.jobs)), a.jobs))
     if a.offline:
+        print("candidates OK: %d description files validated" % len(candidate_files()))
         print("offline: nothing run, no harness binary needed")
         return 0
     if shutil.which(a.harness) is None and not a.dry_run:
@@ -485,33 +598,31 @@ def main(argv):
     if a.description_file:
         with open(a.description_file, encoding="utf-8") as fh:
             a.desc_text = " ".join(fh.read().split())
-    a.label = a.label or (os.path.splitext(os.path.basename(a.description_file))[0] if a.description_file else "current")
+    base = os.path.splitext(os.path.basename(a.description_file))[0] if a.description_file else "current"
+    a.label = a.label or (base + ("-siblings" if a.siblings else ""))
     todo = [(p, t) for p in prompts for t in range(1, a.trials + 1)]
     lock = threading.Lock()
     errors = []
 
-    def worker():
-        while True:
-            with lock:
-                if not todo:
-                    return
-                p, t = todo.pop(0)
-            try:
-                status, err = run_cell(p, t, a)
-            except KeyboardInterrupt:
-                raise
-            except BaseException as e:  # one broken cell must not stop the grid
-                status, err = "ERROR %r" % e, True
-            with lock:
-                if err:
-                    errors.append((p["id"], t))
-                print("%-4s %-8s t%d  %s" % (p["id"], p["label"], t, status), flush=True)
+    def work(item):
+        p, t = item
+        try:
+            status, err = run_cell(p, t, a)
+        except _RUN.Interrupted as e:
+            status, err = "INTERRUPTED (%s)" % e, True
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e:  # one broken cell must not stop the grid
+            status, err = "ERROR %r" % e, True
+        with lock:
+            if err:
+                errors.append((p["id"], t))
+            print("%-4s %-8s t%d  %s" % (p["id"], p["label"], t, status), flush=True)
 
-    threads = [threading.Thread(target=worker) for _ in range(max(1, a.jobs))]
-    for th in threads:
-        th.start()
-    for th in threads:
-        th.join()
+    if _RUN.run_grid(todo, max(1, a.jobs), work):
+        print("route_check: interrupted; no new cell started, running cells were killed and not "
+              "recorded", file=sys.stderr)
+        return 130
     if a.dry_run:
         return 0
     summarize([os.path.join(a.out, a.label)])

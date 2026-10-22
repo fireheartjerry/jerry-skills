@@ -16,7 +16,8 @@ from agent_sessions.common import CHANGED_FILES_CAP, STATE_ROOT, append_jsonl, r
 __all__ = [
     "git", "worktree_summary", "changed_files", "repo_root", "resolve_commit", "is_dirty", "dirty_files",
     "copy_into", "snapshot", "snapshot_ref_of_commit", "snapshot_records", "list_snapshots", "delete_ref",
-    "branch_tip", "commits_ahead", "is_merged", "SNAPSHOT_NS",
+    "branch_tip", "commits_ahead", "is_merged", "SNAPSHOT_NS", "status_entries", "names_z", "tree_diff",
+    "ignored_entries", "UNTRACKED_DIFF_FILES", "repo_features", "tree_fingerprint", "changed_since",
 ]
 
 SNAPSHOT_NS = "refs/agent-sessions"
@@ -64,16 +65,38 @@ def commits_ahead(root, base, head):
     return 0
 
 
+def names_z(cp):
+    """Paths from a `-z` listing (NUL separated, never quoted)."""
+    if cp.returncode != 0:
+        return []
+    return [p for p in cp.stdout.split("\0") if p]
+
+
+def status_entries(path, untracked="all"):
+    """[(XY, path)] from `git status --porcelain -z`, paths relative to the
+    repository root and never C-quoted (spaces, non-ASCII, a literal ' -> ').
+    A rename or copy record carries its source path in the next field, which
+    is skipped: the entry names the new path."""
+    cp = git(path, "status", "--porcelain", "-z", "--untracked-files=%s" % untracked)
+    if cp.returncode != 0:
+        return []
+    fields = cp.stdout.split("\0")
+    found, i = [], 0
+    while i < len(fields):
+        rec = fields[i]
+        i += 1
+        if len(rec) < 4:
+            continue
+        xy, entry = rec[:2], rec[3:]
+        if "R" in xy or "C" in xy:
+            i += 1
+        found.append((xy, entry))
+    return found
+
+
 def dirty_files(path):
     """Modified tracked and untracked non-ignored paths of a working tree."""
-    found = []
-    for line in _lines(git(path, "status", "--porcelain", "--untracked-files=all")):
-        entry = line[3:] if len(line) > 3 else ""
-        if " -> " in entry:
-            entry = entry.split(" -> ", 1)[1]
-        if entry:
-            found.append(entry)
-    return sorted(set(found))
+    return sorted(set(p for _xy, p in status_entries(path)))
 
 
 def is_dirty(path):
@@ -86,9 +109,142 @@ def changed_files(path, base):
     untracked non-ignored files, sorted and unique."""
     found = set()
     if base:
-        found.update(_lines(git(path, "diff", "--name-only", base)))
+        found.update(names_z(git(path, "diff", "--name-only", "-z", base)))
     found.update(dirty_files(path))
     return sorted(found)
+
+
+# Untracked files above this count are left out of a judge or review diff
+# (and named in its note): hashing thousands of build outputs nobody ignored
+# would take longer than the review.
+UNTRACKED_DIFF_FILES = 200
+
+
+def _git_path(path, what):
+    cp = git(path, "rev-parse", "--git-path", what)
+    out = cp.stdout.strip()
+    if cp.returncode != 0 or not out:
+        return None
+    return out if os.path.isabs(out) else os.path.normpath(os.path.join(path, out))
+
+
+def tree_diff(path, base, index, exclude=()):
+    """(CompletedProcess of `git diff`, note) of the working tree at `path`
+    against `base`: committed and uncommitted tracked changes plus untracked
+    non-ignored files. It stages into a private index (`index`) and writes
+    blobs to a private object directory next to it, so neither the
+    repository's index nor its object store changes; both are removed before
+    returning. `exclude` lists repository-relative paths to leave out (the
+    user's work already uncommitted when a shared-tree child started). The
+    note says what was left out, or is None."""
+    objdir = index + ".objects"
+    notes = []
+    objects = _git_path(path, "objects")
+    env = dict(SNAPSHOT_ENV, GIT_INDEX_FILE=index, GIT_OBJECT_DIRECTORY=objdir)
+    if objects:
+        env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = objects
+    spec = [":/"] + [":(top,exclude,literal)%s" % p for p in exclude]
+    untracked = names_z(git(path, "ls-files", "--others", "--exclude-standard", "-z", "--", *spec))
+    try:
+        os.makedirs(objdir, exist_ok=True)
+        cp = git(path, "read-tree", "HEAD", env=env)
+        if cp.returncode == 0:
+            if len(untracked) > UNTRACKED_DIFF_FILES:
+                notes.append("%d untracked files left out (more than %d; commit them, or list build output in "
+                             ".gitignore)" % (len(untracked), UNTRACKED_DIFF_FILES))
+                cp = git(path, "add", "-u", "--", *spec, env=env)
+            else:
+                cp = git(path, "add", "-A", "--", *spec, env=env)
+        if cp.returncode == 0:
+            cp = git(path, "diff", "--cached", "--no-color", base, "--", *spec, env=env)
+    finally:
+        for p in (index, index + ".lock"):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        shutil.rmtree(objdir, ignore_errors=True)
+    if exclude:
+        notes.append("%d path%s already uncommitted at spawn left out (%s)" % (
+            len(exclude), "" if len(exclude) == 1 else "s", ", ".join(list(exclude)[:5]) +
+            (", ..." if len(exclude) > 5 else "")))
+    return cp, "; ".join(notes) or None
+
+
+# Ignored entries a worktree warning does not mention: caches and OS litter
+# that no task needs.
+_IGNORED_NOISE = (".DS_Store", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".idea",
+                  ".vscode", "Thumbs.db")
+
+
+def ignored_entries(root):
+    """Ignored files and directories of a checkout, as git collapses them
+    (`node_modules`, `.env`), minus caches. A new worktree has none of them."""
+    cp = git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    found = []
+    for entry in names_z(cp):
+        entry = entry.rstrip("/")
+        if not entry or os.path.basename(entry) in _IGNORED_NOISE or entry.endswith(".pyc"):
+            continue
+        found.append(entry)
+    return sorted(found)
+
+
+def repo_features(root):
+    """What in a repository commonly breaks a commit or a checkout in a new
+    worktree: [(key, detail)] for commit hooks, commit signing, submodules and
+    Git LFS. Hooks live in the common git directory (or core.hooksPath), so a
+    worktree runs the parent's hooks without the parent's node_modules or venv."""
+    found = []
+    hooks_path = git(root, "config", "--get", "core.hooksPath").stdout.strip()
+    hooks = []
+    if hooks_path:
+        hooks.append("core.hooksPath=%s" % hooks_path)
+    else:
+        hooks_dir = _git_path(root, "hooks")
+        if hooks_dir and os.path.isdir(hooks_dir):
+            for entry in sorted(os.listdir(hooks_dir)):
+                p = os.path.join(hooks_dir, entry)
+                if not entry.endswith(".sample") and os.path.isfile(p) and os.access(p, os.X_OK):
+                    hooks.append(entry)
+    for marker in (".husky", ".pre-commit-config.yaml", "lefthook.yml", "lefthook.yaml", ".lefthook.yml"):
+        if os.path.exists(os.path.join(root, marker)):
+            hooks.append(marker)
+    if hooks:
+        found.append(("hooks", "commit hooks (%s)" % ", ".join(hooks[:5])))
+    if git(root, "config", "--type=bool", "--get", "commit.gpgsign").stdout.strip() == "true":
+        found.append(("signing", "commit.gpgsign=true"))
+    if os.path.isfile(os.path.join(root, ".gitmodules")):
+        found.append(("submodules", "submodules (.gitmodules)"))
+    try:
+        with open(os.path.join(root, ".gitattributes"), encoding="utf-8", errors="replace") as fh:
+            if re.search(r"filter=lfs\b", fh.read()):
+                found.append(("lfs", "Git LFS (filter=lfs in .gitattributes)"))
+    except OSError:
+        pass
+    return found
+
+
+def tree_fingerprint(root, cap=2000):
+    """{path: [size, mtime_ns]} of a working tree's dirty paths (None for a
+    deleted one): enough to tell later which of them changed."""
+    fp = {}
+    for rel in dirty_files(root)[:cap]:
+        try:
+            st = os.lstat(os.path.join(root, rel))
+            fp[rel] = [st.st_size, st.st_mtime_ns]
+        except OSError:
+            fp[rel] = None
+    return fp
+
+
+def changed_since(root, before):
+    """Paths of `root` whose dirty state differs from fingerprint `before`:
+    newly dirty, changed again, or no longer dirty."""
+    if not isinstance(before, dict):
+        return []
+    now = tree_fingerprint(root)
+    return sorted(p for p in set(now) | set(before) if now.get(p, "clean") != before.get(p, "clean"))
 
 
 def worktree_summary(meta):
@@ -117,9 +273,28 @@ def worktree_summary(meta):
     if len(files) > CHANGED_FILES_CAP:
         warnings.append("changed_files capped at %d of %d paths" % (CHANGED_FILES_CAP, len(files)))
         files = files[:CHANGED_FILES_CAP]
+    dirty = is_dirty(path)
     block = {"branch": wt.get("branch"), "base_commit": base, "head_commit": head, "commits": commits,
              "files_changed": files_changed, "insertions": insertions, "deletions": deletions,
-             "dirty": is_dirty(path), "changed_files": files}
+             "dirty": dirty, "changed_files": files}
+    if dirty:
+        left = dirty_files(path)
+        features = dict(meta.get("repo_features") or [])
+        why = ""
+        if features.get("hooks") or features.get("signing"):
+            why = (" The repository has %s: a commit that failed there is the usual cause; read the log for the "
+                   "hook or signing error." % " and ".join(v for k, v in sorted(features.items())
+                                                           if k in ("hooks", "signing")))
+        warnings.append("the worktree has uncommitted changes (%s%s), so collect refuses it until they are "
+                        "committed.%s Inspect with agent-session diff %s." % (
+                            ", ".join(left[:5]), ", ..." if len(left) > 5 else "", why, meta.get("name")))
+    root = wt.get("root")
+    if root and os.path.isdir(root) and isinstance(meta.get("parent_at_start"), dict):
+        moved = changed_since(root, meta["parent_at_start"])
+        if moved:
+            warnings.append("the parent tree %s changed during the run: %s%s. That is you, another writer, or this "
+                            "child writing by absolute path outside its worktree; check before collecting" % (
+                                root, ", ".join(moved[:5]), ", ..." if len(moved) > 5 else ""))
     return block, warnings
 
 

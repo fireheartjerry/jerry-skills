@@ -3,13 +3,15 @@
 
 Usage: python3 probe.py <check> [fixture-root]
 Checks: class_sites, unicode_export, csv_quoting, task_steps, index_built,
-        name_whitespace, bom_report, json_iso_dates, readme_json_usage
+        name_whitespace, bom_report, json_iso_dates, readme_json_usage,
+        october_total, js_money
 Prints PASS or FAIL <reason> and exits 0 or 1. Stdlib only. Every probe runs
 the fixture code in a subprocess so a stale import cache cannot mask a fix.
 """
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -241,6 +243,50 @@ def readme_json_usage():
     return ok()
 
 
+def october_total():
+    """S25: report totals are exact to the cent, for the reported file and others."""
+    cases = [(os.path.join(ROOT, "data", "october.csv"), "18.05")]
+    tmp = tempfile.mkdtemp(prefix="probe-")
+    src = os.path.join(tmp, "in.csv")
+    write_csv(src, [["2026-01-02", "A", "0.29"], ["2026-01-03", "B", "0.57"], ["2026-01-04", "C", "2.01"]])
+    cases.append((src, "2.87"))
+    cases.append((os.path.join(ROOT, "data", "sample.csv"), "51.25"))
+    for path, want in cases:
+        rc, out, err = run_cli(["report", path])
+        if rc != 0:
+            return fail("report %s failed: %s" % (os.path.basename(path), err.strip().splitlines()[-1:]))
+        last = out.strip().splitlines()[-1:] or [""]
+        if last[0] != "TOTAL " + want:
+            return fail("%s: %r, expected 'TOTAL %s'" % (os.path.basename(path), last[0], want))
+    return ok()
+
+
+JS_MONEY = """
+const { formatPrice } = require('./web/money');
+const { receiptLine, receiptTotal } = require('./web/receipt');
+const { csvRow } = require('./web/csv');
+console.log(JSON.stringify([
+  formatPrice(450), formatPrice(700), receiptLine({name: 'Tea', cents: 450}),
+  receiptTotal([{cents: 450}, {cents: 100}]), csvRow({name: 'Tea', cents: 450})]));
+"""
+
+
+def js_money():
+    """S32: every web price formatter keeps two decimals (needs node)."""
+    node = shutil.which("node")
+    if node is None:
+        return fail("node not found")
+    p = subprocess.run([node, "-e", JS_MONEY], cwd=ROOT, capture_output=True, text=True, timeout=60)
+    if p.returncode != 0:
+        return fail("node failed: %s" % p.stderr.strip().splitlines()[-1:])
+    want = ["$4.50", "$7.00", "Tea  $4.50", "TOTAL $5.50", "Tea,4.50"]
+    got = json.loads(p.stdout)
+    bad = [(g, w) for g, w in zip(got, want) if g != w]
+    if bad:
+        return fail("got/expected: %r" % bad)
+    return ok()
+
+
 PROBES = {
     "class_sites": class_sites,
     "unicode_export": unicode_export,
@@ -251,6 +297,8 @@ PROBES = {
     "bom_report": bom_report,
     "json_iso_dates": json_iso_dates,
     "readme_json_usage": readme_json_usage,
+    "october_total": october_total,
+    "js_money": js_money,
 }
 
 

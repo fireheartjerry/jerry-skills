@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Behavioral checks for the templates in references/long-running.md.
 
-Every bash block must parse. The launch, identity, poll-loop and until-loop
-blocks are then run against staged states in a temp directory: a real
-background job for the launch block, a real process carrying a distinctive
-argv marker for the identity block, and files with controlled mtimes plus
-live and dead PIDs for the two loops. Stdlib only; spends no tokens; skips
+Every bash block must parse. The launch, identity, poll and stop blocks are
+then run against staged states in a temp directory: a real background job for
+the launch and stop blocks, a real process carrying a distinctive argv marker
+for the identity block, and staged files plus live and dead PIDs for the poll
+block (which also serves as the condition monitor's script). Stdlib only; spends no tokens; skips
 when bash is absent. Works with bash 3.2 (macOS) and Linux bash.
 
 Run:  python3 -I skills/high-agency/tests/test_templates.py
@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 
@@ -67,14 +68,14 @@ def bracketed(word):
     return "[" + word[0] + "]" + word[1:]
 
 
-def substitute_job(block, token, replacement):
-    """Replace the job token on every line marked with a trailing '# job'
+def substitute_job(block, token, replacement, marker="job"):
+    """Replace the token on every line marked with a trailing '# <marker>'
     comment, in both plain and bracketed form. Returns the new block and the
     number of lines changed."""
     out = []
     changed = 0
     for line in block.splitlines():
-        if re.search(r"#\s*job\s*$", line):
+        if re.search(r"#\s*%s\s*$" % marker, line):
             new = line.replace(bracketed(token), bracketed(replacement))
             new = new.replace(token, replacement)
             if new != line:
@@ -102,6 +103,19 @@ def kill_tree(pid):
         pass
 
 
+def alive(pid):
+    """True while *pid* runs and is not a zombie (a reaped-later child of ours)."""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout
+    except OSError:
+        return True
+    return bool(out.strip()) and not out.strip().startswith("Z")
+
+
 def run_script(script_text, cwd, timeout=RUN_TIMEOUT):
     path = os.path.join(cwd, "script-%s.sh" % uuid.uuid4().hex[:8])
     put(path, script_text)
@@ -118,18 +132,13 @@ class Templates(object):
         self.launch = one_block(self.blocks, "nohup", "launch")
         self.identity = one_block(self.blocks, "pgrep -f", "identity")
         self.poll_block = one_block(self.blocks, "deadline=", "poll")
-        until = [b for b in self.blocks if b.strip().startswith("until ")]
-        if len(until) != 1:
-            raise AssertionError("expected exactly one until-loop block, found %d" % len(until))
-        self.until = until[0].strip()
+        self.stop = one_block(self.blocks, "pkill -P", "stop")
         m = re.search(r"^fail_re=.*$", self.poll_block, re.M)
         if not m:
             raise AssertionError("poll block has no fail_re= line")
         self.fail_re_line = m.group(0)
-        # The loop under test is self-contained from fail_re= to the final done.
-        start = self.poll_block.index("fail_re=")
-        end = self.poll_block.rindex("done") + len("done")
-        self.poll = self.poll_block[start:end] + "\n"
+        # The script under test runs from fail_re= to the end of the block.
+        self.poll = self.poll_block[self.poll_block.index("fail_re="):].rstrip() + "\n"
 
     def poll_script(self, work):
         """The poll loop with sleep shadowed and the deadline set to now."""
@@ -138,13 +147,11 @@ class Templates(object):
             raise AssertionError("could not rewrite the deadline in the poll loop")
         return "sleep() { :; }\ncd '%s' || exit 97\n%s" % (work, loop)
 
-    def until_script(self, work):
-        """The until-loop with sleep counting calls and exiting 9 on the third."""
-        return ("%s\n"
-                "n=0\n"
-                "sleep() { n=$((n + 1)); if [ \"$n\" -ge 3 ]; then exit 9; fi; }\n"
-                "cd '%s' || exit 97\n"
-                "%s\n") % (self.fail_re_line, work, self.until)
+    def artifact(self):
+        m = re.search(r"\[ ! -e (\S+) \] \|\| mv", self.launch)
+        if not m:
+            raise AssertionError("launch block does not move an earlier artifact aside")
+        return m.group(1)
 
     def launch_token(self):
         m = re.search(r"echo '([^']+)' > run\.cmd", self.launch)
@@ -222,19 +229,29 @@ class TestDocument(unittest.TestCase):
         self.assertRegex(re.sub(r"\s+", " ", text),
                          r"failure prefix to `fail_re`, anchored with `\^`, regex characters escaped")
         why = text[text.index("Why each line is there"):]
-        self.assertIn("`fail_re`", why)
-        self.assertIn("liveness exit", why)
+        for needle in ("`fail_re`", "liveness exit", "whole seconds", "run.pid", "children"):
+            self.assertIn(needle, why)
         self.assertNotIn("'Traceback|ERROR'", text, "the fixed grep must be gone")
-        guarded = 'grep -qE "${fail_re:?set fail_re first}" run.log 2>/dev/null'
-        for loop in (t.poll, t.until):
-            self.assertEqual(loop.count("fail_re:?"), 1)
-            self.assertIn(guarded, loop)
-            self.assertNotIn('"$fail_re"', loop, "an unguarded fail_re matches every line when unset")
+        self.assertNotIn("-nt run.pid ]", t.poll, "bash 3.2 compares -nt in whole seconds")
+        self.assertNotIn("until ", "\n".join(t.blocks), "one watch script (the poll block), not two")
+        for guard in ("NO_FAIL_RE", "NO_PID", "BAD_FAIL_RE"):
+            self.assertIn(guard, t.poll)
+
+    def test_placeholders_are_explained(self):
+        flat = re.sub(r"\s+", " ", self.text)
+        self.assertIn("lines marked `# job` hold the example command", flat)
+        self.assertIn("`# artifact`", flat)
+        t = templates()
+        art = t.artifact()
+        for block in (t.launch, t.poll):
+            for line in block.splitlines():
+                if art in line:
+                    self.assertRegex(line, r"#\s*artifact\s*$", "unmarked artifact line: %r" % line)
 
     def test_job_markers(self):
         t = templates()
         _, n = substitute_job(t.launch, t.launch_token(), "X")
-        self.assertEqual(n, 2, "launch block: run.cmd and nohup lines must carry '# job'")
+        self.assertEqual(n, 2, "launch block: the run.cmd and nohup lines must carry '# job'")
         _, n = substitute_job(t.identity, t.identity_token(), "X")
         self.assertEqual(n, 1, "identity block: the pgrep line must carry '# job'")
         self.assertIn(t.identity_token(), t.launch_token(),
@@ -297,21 +314,71 @@ class TestLaunchBlock(unittest.TestCase):
         self.work = tempfile.mkdtemp(prefix="ha-launch-")
         self.addCleanup(shutil.rmtree, self.work, True)
 
-    def test_launch_starts_and_records_the_job(self):
-        job = 'sh -c "echo started; sleep 20"'
+    def launch(self, job):
         block, n = substitute_job(self.t.launch, self.t.launch_token(), job)
         self.assertEqual(n, 2)
         p = run_script(block, self.work)
         pid_path = os.path.join(self.work, "run.pid")
-        self.assertTrue(os.path.exists(pid_path), p.stderr)
-        pid = int(read(pid_path).strip())
-        self.addCleanup(kill_tree, pid)
+        pid = int(read(pid_path).strip()) if os.path.exists(pid_path) else None
+        if pid:
+            self.addCleanup(kill_tree, pid)
+        return p, pid
+
+    def test_launch_starts_and_records_the_job(self):
+        p, pid = self.launch('sh -c "echo started; sleep 20"')
+        self.assertIsNotNone(pid, p.stderr)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertTrue(p.stdout.rstrip().endswith("STARTED"), p.stdout)
         os.kill(pid, 0)   # raises if the job is not alive
         self.assertIn("started", read(os.path.join(self.work, "run.log")))
         self.assertIn("echo started", read(os.path.join(self.work, "run.cmd")))
         self.assertIn("started", p.stdout, "the block must print the head of the log")
+
+    def test_launch_moves_a_stale_artifact_aside(self):
+        art = os.path.join(self.work, self.t.artifact())
+        os.makedirs(os.path.dirname(art))
+        put(art, '{"stale": true}')
+        p, pid = self.launch('sh -c "sleep 20"')
+        self.assertFalse(os.path.exists(art), "a stale artifact left in place reads as DONE")
+        moved = [n for n in os.listdir(os.path.dirname(art)) if n.startswith(os.path.basename(art) + ".prev")]
+        self.assertEqual(len(moved), 1, os.listdir(os.path.dirname(art)))
+        poll = run_script(self.t.poll_script(self.work), self.work)
+        self.assertEqual(poll.stdout.strip(), "TIMEOUT", "a live job with no new artifact is not done")
+
+    def test_launch_reports_a_job_that_died(self):
+        p, _ = self.launch('sh -c "echo boom; exit 3"')
+        self.assertTrue(p.stdout.rstrip().endswith("NOT_RUNNING"), p.stdout)
+
+    def test_fast_job_in_the_launch_second_is_done(self):
+        # bash 3.2 compares -nt in whole seconds: an artifact written 50 ms
+        # after run.pid used to read as EXITED_NO_RESULT.
+        p, _ = self.launch('sh -c "mkdir -p out; echo {} > %s"' % self.t.artifact())
+        poll = run_script(self.t.poll_script(self.work), self.work)
+        self.assertEqual(poll.stdout.strip(), "DONE", poll.stdout + poll.stderr)
+
+
+@unittest.skipUnless(BASH and PKILL, "bash and pkill needed")
+class TestStopBlock(unittest.TestCase):
+    def test_stop_kills_the_job_and_its_children(self):
+        t = templates()
+        work = tempfile.mkdtemp(prefix="ha-stop-")
+        self.addCleanup(shutil.rmtree, work, True)
+        marker = "ha-stop-%s" % uuid.uuid4().hex[:12]
+        block, _ = substitute_job(t.launch, t.launch_token(),
+                                  'sh -c "sleep 31 & echo \\$! > child.pid; wait; : %s"' % marker)
+        p = run_script(block, work)
+        self.assertIn("STARTED", p.stdout, p.stdout + p.stderr)
+        pid = int(read(os.path.join(work, "run.pid")).strip())
+        child = int(read(os.path.join(work, "child.pid")).strip())
+        self.addCleanup(kill_tree, pid)
+        self.addCleanup(lambda: os.kill(child, signal.SIGKILL) if alive(child) else None)
+        self.assertTrue(alive(pid) and alive(child))
+        run_script(t.stop, work)
+        deadline = time.time() + 5
+        while time.time() < deadline and (alive(pid) or alive(child)):
+            time.sleep(0.1)
+        self.assertFalse(alive(pid), "the job survived the stop block")
+        self.assertFalse(alive(child), "the job's child survived the stop block")
 
 
 @unittest.skipUnless(BASH and shutil.which("pgrep") and shutil.which("ps"),
@@ -356,138 +423,101 @@ class TestIdentityBlock(unittest.TestCase):
 
 @unittest.skipUnless(BASH, "bash not available")
 class TestPollLoop(unittest.TestCase):
+    """The poll block, which is also the condition monitor's script: exactly
+    one output line for every staged state."""
+
     def setUp(self):
         self.t = templates()
         self.work = tempfile.mkdtemp(prefix="ha-poll-")
         self.addCleanup(shutil.rmtree, self.work, True)
-        os.makedirs(os.path.join(self.work, "out"))
-        self.result = os.path.join(self.work, "out", "result.json")
+        self.result = os.path.join(self.work, self.t.artifact())
+        os.makedirs(os.path.dirname(self.result))
         self.pid = os.path.join(self.work, "run.pid")
         self.log = os.path.join(self.work, "run.log")
         self.script = self.t.poll_script(self.work)
 
-    def run_loop(self):
-        return run_script(self.script, self.work)
+    def run_loop(self, script=None):
+        p = run_script(script or self.script, self.work)
+        self.assertEqual(p.stderr.strip(), "", "the loop must stay quiet on stderr: %s" % p.stderr)
+        self.assertEqual(len(p.stdout.split()), 1, "exactly one output line: %r" % p.stdout)
+        return p.stdout.strip()
 
-    def stage(self, pid, result_fresh=None, log=None):
-        """pid: a live or dead PID. result_fresh: None for no artifact, False
-        for one older than run.pid, True for one newer. log: text or None."""
-        for path in (self.result, self.log):
+    def stage(self, pid, result=False, log=None):
+        """pid: a live or dead PID, or None for no run.pid. result: whether
+        this run's artifact exists. log: text or None."""
+        for path in (self.result, self.log, self.pid):
             if os.path.exists(path):
                 os.unlink(path)
-        put(self.pid, "%d\n" % pid)
-        set_old(self.pid)
-        if result_fresh is not None:
+        if pid is not None:
+            put(self.pid, "%d\n" % pid)
+        if result:
             put(self.result, "{}")
-            if not result_fresh:
-                os.utime(self.result, (999999000, 999999000))
         if log is not None:
             put(self.log, log)
 
-    def test_stale_artifact_live_job_times_out(self):
-        self.stage(os.getpid(), result_fresh=False, log="")
-        self.assertEqual(self.run_loop().stdout.strip(), "TIMEOUT")
+    def test_live_job_without_artifact_times_out(self):
+        self.stage(os.getpid(), log="")
+        self.assertEqual(self.run_loop(), "TIMEOUT")
 
     def test_fresh_artifact_is_done(self):
-        self.stage(os.getpid(), result_fresh=True, log="")
-        self.assertEqual(self.run_loop().stdout.strip(), "DONE")
+        self.stage(os.getpid(), result=True, log="")
+        self.assertEqual(self.run_loop(), "DONE")
 
     def test_dead_job_without_result_or_log(self):
         self.stage(dead_pid())
-        p = self.run_loop()
-        self.assertEqual(p.stdout.strip(), "EXITED_NO_RESULT")
-        self.assertEqual(p.stderr.strip(), "", "the loop must stay quiet without a log")
+        self.assertEqual(self.run_loop(), "EXITED_NO_RESULT")
+
+    def test_live_job_without_log_keeps_waiting_quietly(self):
+        self.stage(os.getpid())
+        self.assertEqual(self.run_loop(), "TIMEOUT")
 
     def test_traceback_fails(self):
         self.stage(os.getpid(), log="Traceback (most recent call last):\n  File x\n")
-        self.assertEqual(self.run_loop().stdout.strip(), "FAILED")
+        self.assertEqual(self.run_loop(), "FAILED")
 
     def test_error_at_line_start_fails(self):
         self.stage(os.getpid(), log="step 1 ok\nERROR: boom\n")
-        self.assertEqual(self.run_loop().stdout.strip(), "FAILED")
+        self.assertEqual(self.run_loop(), "FAILED")
 
     def test_benign_counts_do_not_fail(self):
         self.stage(os.getpid(), log="found 0 ERRORS in 12 files\nno error here\n")
-        self.assertEqual(self.run_loop().stdout.strip(), "TIMEOUT")
+        self.assertEqual(self.run_loop(), "TIMEOUT")
 
     def test_dead_job_with_fresh_result_is_done(self):
-        self.stage(dead_pid(), result_fresh=True)
-        self.assertEqual(self.run_loop().stdout.strip(), "DONE")
+        self.stage(dead_pid(), result=True)
+        self.assertEqual(self.run_loop(), "DONE")
+
+    def test_failure_wins_over_timeout_but_not_over_result(self):
+        # The artifact is checked before the log, so a job that logged an
+        # error line and still produced its result reports DONE.
+        self.stage(os.getpid(), result=True, log="ERROR: retried once\n")
+        self.assertEqual(self.run_loop(), "DONE")
+
+    def test_missing_run_pid_stops_instead_of_reading_dead_or_done(self):
+        # The run_in_background path once never wrote run.pid: the loop read
+        # that as a dead job, or as DONE beside a leftover artifact.
+        for result in (False, True):
+            self.stage(None, result=result, log="")
+            self.assertEqual(self.run_loop(), "NO_PID", "result=%r" % result)
+        put(self.pid, "")
+        self.assertEqual(self.run_loop(), "NO_PID", "an empty run.pid is no PID")
 
     def test_unset_fail_re_stops_loudly(self):
         # An empty pattern matches every line; the guard must stop the loop
-        # with a message instead of reporting FAILED for a healthy job.
+        # with a named line instead of reporting FAILED for a healthy job.
         self.stage(os.getpid(), log="benchmark: 10/240s, 0 ERRORS\n")
         script = self.script.replace(self.t.fail_re_line, "unset fail_re", 1)
         self.assertIn("unset fail_re", script)
-        p = run_script(script, self.work)
-        self.assertNotIn("FAILED", p.stdout)
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn("set fail_re first", p.stderr)
+        self.assertEqual(self.run_loop(script), "NO_FAIL_RE")
 
-    def test_failure_wins_over_timeout_but_not_over_result(self):
-        # A fresh artifact is checked before the log, so a job that logged an
-        # error line and still produced its result reports DONE.
-        self.stage(os.getpid(), result_fresh=True, log="ERROR: retried once\n")
-        self.assertEqual(self.run_loop().stdout.strip(), "DONE")
-
-
-@unittest.skipUnless(BASH, "bash not available")
-class TestUntilLoop(unittest.TestCase):
-    def setUp(self):
-        self.t = templates()
-        self.work = tempfile.mkdtemp(prefix="ha-until-")
-        self.addCleanup(shutil.rmtree, self.work, True)
-        os.makedirs(os.path.join(self.work, "out"))
-        self.result = os.path.join(self.work, "out", "result.json")
-        self.pid = os.path.join(self.work, "run.pid")
-        self.log = os.path.join(self.work, "run.log")
-        self.script = self.t.until_script(self.work)
-
-    def stage(self, pid, result_fresh=None, log=None):
-        for path in (self.result, self.log):
-            if os.path.exists(path):
-                os.unlink(path)
-        put(self.pid, "%d\n" % pid)
-        set_old(self.pid)
-        if result_fresh is not None:
-            put(self.result, "{}")
-            if not result_fresh:
-                os.utime(self.result, (999999000, 999999000))
-        if log is not None:
-            put(self.log, log)
-
-    def rc(self):
-        p = run_script(self.script, self.work)
-        self.assertEqual(p.stderr.strip(), "", p.stderr)
-        return p.returncode
-
-    def test_fresh_artifact_exits(self):
-        self.stage(os.getpid(), result_fresh=True, log="")
-        self.assertEqual(self.rc(), 0)
-
-    def test_dead_job_exits(self):
-        self.stage(dead_pid(), result_fresh=False, log="")
-        self.assertEqual(self.rc(), 0)
-
-    def test_fail_line_exits(self):
-        self.stage(os.getpid(), result_fresh=False, log="FATAL: out of memory\n")
-        self.assertEqual(self.rc(), 0)
-
-    def test_live_job_keeps_waiting(self):
-        self.stage(os.getpid(), result_fresh=False, log="found 0 ERRORS\n")
-        self.assertEqual(self.rc(), 9, "the loop must still be sleeping after three checks")
-
-    def test_unset_fail_re_stops_loudly(self):
-        self.stage(os.getpid(), result_fresh=False, log="found 0 ERRORS\n")
-        script = self.script.replace(self.t.fail_re_line, "unset fail_re", 1)
-        p = run_script(script, self.work)
-        self.assertNotIn(p.returncode, (0, 9), "an unset fail_re must neither match nor wait")
-        self.assertIn("set fail_re first", p.stderr)
-
-    def test_live_job_without_log_keeps_waiting_quietly(self):
-        self.stage(os.getpid(), result_fresh=False)
-        self.assertEqual(self.rc(), 9)
+    def test_malformed_fail_re_stops_loudly(self):
+        # grep exits 2 on a bad regex, which `if grep` reads as "no failure".
+        self.stage(os.getpid(), log="FATAL (code 7): disk full\n")
+        for bad in ("^FATAL (code", "[unclosed"):
+            script = self.script.replace(self.t.fail_re_line, "fail_re='%s'" % bad, 1)
+            self.assertEqual(self.run_loop(script), "BAD_FAIL_RE", bad)
+        fixed = self.script.replace(self.t.fail_re_line, "fail_re='^FATAL \\(code'", 1)
+        self.assertEqual(self.run_loop(fixed), "FAILED", "the escaped form must still match")
 
 
 if __name__ == "__main__":

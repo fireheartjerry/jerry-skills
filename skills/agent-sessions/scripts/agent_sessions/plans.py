@@ -17,7 +17,7 @@ import sys
 import uuid
 
 from agent_sessions.common import (
-    DEFAULT_BUDGET, ENGINES, NAME_RE, die, fmt_cost, kv, now_iso, options_of, out, parse_args, parse_count,
+    DEFAULT_BUDGET, ENGINES, NAME_RE, die, fmt_cost, valid_name, kv, now_iso, options_of, out, parse_args, parse_count,
     parse_usd, read_text, sha256_text,
 )
 from agent_sessions.procs import owner_token
@@ -32,7 +32,7 @@ __all__ = ["cmd_plan", "load_plan", "PLAN_KEYS"]
 PLAN_KEYS = ("name", "dir", "defaults", "nodes")
 NODE_ONLY = ("name", "engine", "prompt", "prompt_file", "prompt-file", "after")
 SPAWN_VALUED, SPAWN_FLAGS = options_of("spawn")["valued"], options_of("spawn")["flags"]
-NOT_IN_PLANS = ("n", "engines", "replace", "json", "queue", "prompt-file")
+NOT_IN_PLANS = ("n", "engines", "replace", "json", "queue", "ledger")
 
 
 def _option_argv(opts, where):
@@ -73,8 +73,8 @@ def load_plan(path):
         if key not in PLAN_KEYS:
             die("plan file: unknown key '%s' (expected %s)" % (key, ", ".join(PLAN_KEYS)))
     name = plan.get("name")
-    if not isinstance(name, str) or not NAME_RE.match(name):
-        die("plan file: name must match [A-Za-z0-9_-]{1,40}")
+    if not isinstance(name, str) or not valid_name(name):
+        die("plan file: name must match [A-Za-z0-9_-]{1,40} and not be ledgers, groups or pauses")
     base_dir = os.path.dirname(os.path.realpath(path))
     pdir = plan.get("dir") or "."
     if not isinstance(pdir, str):
@@ -86,6 +86,9 @@ def load_plan(path):
     defaults = plan.get("defaults") or {}
     if not isinstance(defaults, dict):
         die("plan file: defaults must be an object")
+    for key in defaults:
+        if key in NODE_ONLY and key != "engine":
+            die("plan file: defaults: '%s' belongs on a node (each node names its own %s)" % (key, key))
     nodes = plan.get("nodes")
     if not isinstance(nodes, list) or not nodes:
         die("plan file: nodes must be a non-empty list")
@@ -223,6 +226,7 @@ def plan_run(path, replace_failed):
         spec["group"] = pname
         if ledger_id:
             spec["ledger"] = ledger_id
+            spec["ledger_doc"] = ledger   # checked by the dry run before the ledger is written
         specs.append((node, spec, phash, ohash))
     # Decide every node before spawning any.
     decisions = {}
@@ -328,6 +332,7 @@ def plan_status(pname, as_json):
     rows = []
     total = 0.0
     counts = {}
+    uncosted = []
     for node, info in group.get("nodes", {}).items():
         child = info["child"]
         meta = load_meta(child)
@@ -340,22 +345,33 @@ def plan_status(pname, as_json):
             state = res.get("status")
         res = normalize_result(res or {})
         cost = res.get("cost_usd")
+        usage = res.get("usage") if isinstance(res.get("usage"), dict) else {}
         if isinstance(cost, (int, float)):
             total += cost
+        elif usage.get("total_tokens"):
+            # Spent, but the engine reports tokens only (no price configured):
+            # the total is a lower bound, never a silent $0.
+            uncosted.append((child, int(usage["total_tokens"])))
         v = res.get("verify") if isinstance(res.get("verify"), dict) else None
         rows.append({"node": node, "child": child, "state": state, "failure_class": res.get("failure_class"),
-                     "verify": v.get("status") if v else None, "cost_usd": cost})
+                     "verify": v.get("status") if v else None, "cost_usd": cost,
+                     "tokens": usage.get("total_tokens")})
         counts[state] = counts.get(state, 0) + 1
     if as_json:
-        out(json.dumps({"plan": pname, "nodes": rows, "cost_usd": round(total, 6), "states": counts}, indent=2))
+        out(json.dumps({"plan": pname, "nodes": rows, "cost_usd": round(total, 6), "cost_complete": not uncosted,
+                        "uncosted_children": [c for c, _t in uncosted], "states": counts}, indent=2))
     else:
         out("%-16s %-28s %-9s %-14s %-8s %s" % ("NODE", "CHILD", "STATE", "FAILURE", "VERIFY", "COST"))
         for r in rows:
             out("%-16s %-28s %-9s %-14s %-8s %s" % (r["node"][:16], r["child"][:28], r["state"],
                                                    r["failure_class"] or "-", r["verify"] or "-",
                                                    fmt_cost(r["cost_usd"])))
-        kv("total", "%s; %s" % (fmt_cost(round(total, 6)),
-                                ", ".join("%d %s" % (v, k) for k, v in sorted(counts.items()))))
+        money = fmt_cost(round(total, 6))
+        if uncosted:
+            money = "at least %s (%s reports tokens only: %s, cost unknown)" % (
+                money, ", ".join(c for c, _t in uncosted),
+                ", ".join("%d tokens" % t for _c, t in uncosted))
+        kv("total", "%s; %s" % (money, ", ".join("%d %s" % (v, k) for k, v in sorted(counts.items()))))
     if any(r["state"] in ("running", "queued") for r in rows):
         return 3
     return 0 if all(r["state"] == "ok" for r in rows) else 1

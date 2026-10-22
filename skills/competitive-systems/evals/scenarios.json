@@ -77,7 +77,7 @@
     "must": false
    }
   ],
-  "guards_phase1": false,
+  "guards_prior_strength": false,
   "skill_tool_musts": [
    1,
    2
@@ -140,7 +140,7 @@
     "must": false
    }
   ],
-  "guards_phase1": true,
+  "guards_prior_strength": true,
   "skill_tool_musts": [
    1
   ]
@@ -226,7 +226,7 @@
     "must": false
    }
   ],
-  "guards_phase1": true,
+  "guards_prior_strength": true,
   "skill_tool_musts": [
    2,
    3
@@ -303,7 +303,7 @@
     "must": false
    }
   ],
-  "guards_phase1": true,
+  "guards_prior_strength": true,
   "skill_tool_musts": [
    6
   ]
@@ -391,7 +391,7 @@
     "must": false
    }
   ],
-  "guards_phase1": true
+  "guards_prior_strength": true
  },
  {
   "id": "S-F",
@@ -457,7 +457,7 @@
     "must": false
    }
   ],
-  "guards_phase1": false
+  "guards_prior_strength": false
  },
  {
   "id": "S-G",
@@ -529,7 +529,7 @@
     "must": false
    }
   ],
-  "guards_phase1": true
+  "guards_prior_strength": true
  },
  {
   "id": "S-H",
@@ -605,7 +605,7 @@
     "must": false
    }
   ],
-  "guards_phase1": true
+  "guards_prior_strength": true
  },
  {
   "id": "S-I",
@@ -671,7 +671,7 @@
     "must": false
    }
   ],
-  "guards_phase1": false,
+  "guards_prior_strength": false,
   "skill_tool_musts": [
    1
   ]
@@ -690,7 +690,7 @@
    "Opens no technique card."
   ],
   "failure_modes": [
-   "Any dict or set change to the loop (the phase-1 failure every arm hit).",
+   "Any dict or set change to the loop (the failure every arm of the previous skill version hit).",
    "Ignores user and sys against real.",
    "Claims a speedup without a measurement plan."
   ],
@@ -731,7 +731,7 @@
     "must": false
    }
   ],
-  "guards_phase1": true
+  "guards_prior_strength": true
  },
  {
   "id": "S-K",
@@ -740,7 +740,7 @@
   "user_message": "make `normalizeKeys` faster, the profile says it's hot",
   "fixture": "hot-function",
   "musts": [
-   "Computes the Amdahl cap (dev.py bound amdahl --p 0.12 --s 100 gives 1.14x end to end) before editing.",
+   "Computes the Amdahl cap (dev.py bound amdahl --p 0.12 --s 100 gives 1.13x end to end and a 1.14x cap) before editing.",
    "Asks whether about 14% is worth it, or redirects to the larger frames (BuildIndex 60%, tokenizeBody 38%).",
    "If proceeding: oracle first, compare after, absolute numbers."
   ],
@@ -779,7 +779,7 @@
     "must": false
    }
   ],
-  "guards_phase1": false
+  "guards_prior_strength": false
  },
  {
   "id": "S-L",
@@ -861,9 +861,141 @@
     "must": false
    }
   ],
-  "guards_phase1": true,
+  "guards_prior_strength": true,
   "skill_tool_musts": [
    7
+  ]
+ },
+ {
+  "id": "S-M",
+  "title": "go-quadratic-dedup",
+  "situation": "Go module: dedup.Unique keeps the first occurrence of each key with a nested loop; cmd/dedup reads keys on stdin; gen_keys.py prints n seeded keys; NOTES.txt gives 400,000 keys per batch and 9 minutes. Go toolchain on PATH.",
+  "user_message": "dedup.Unique in this Go repo is O(n^2) and the batch takes 9 minutes. make it fast and show me it's actually faster and still correct",
+  "fixture": "go-dedup",
+  "musts": [
+   "Builds both versions once with go build and times the binaries, not go run.",
+   "Proves equal output on generated inputs before timing (dev.py oracle --ref-cmd/--new-cmd/--gen-cmd, or an equivalent differential test of the two binaries).",
+   "Keeps first-seen order (a map for membership plus the output slice, not iteration over a map).",
+   "Reports before and after medians from repeated interleaved runs (dev.py bench or compare), and the exponent drop or the scale figures.",
+   "Keeps the old function callable as the reference."
+  ],
+  "failure_modes": [
+   "Times go run, so the compiler sits inside every sample.",
+   "Builds the output by ranging over a map, which randomises the order.",
+   "Claims a speedup without an output comparison."
+  ],
+  "probes": [
+   {
+    "id": "go-build",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "go build",
+    "must": true
+   },
+   {
+    "id": "cmd-oracle",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+oracle[^\\n]*--ref-cmd|cmp |diff ",
+    "must": true
+   },
+   {
+    "id": "order",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "(first[- ]seen|insertion|original|input) order",
+    "must": true
+   },
+   {
+    "id": "medians",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "median",
+    "must": true
+   },
+   {
+    "id": "timed-go-run",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+(bench|scale|aa)[^\\n]*go run",
+    "must": false
+   },
+   {
+    "id": "map-range-output",
+    "kind": "regex",
+    "scope": "edits",
+    "pattern": "for\\s+\\w+(,\\s*\\w+)?\\s*:?=\\s*range\\s+seen\\b",
+    "must": false
+   }
+  ],
+  "guards_prior_strength": false
+ },
+ {
+  "id": "S-N",
+  "title": "cannot-reproduce-prod-only",
+  "situation": "reconcile.py matches 2M bank rows to 2M ledger rows with a nested loop over rows loaded from the production database; DATABASE_URL exists only on the batch host and no data copy exists; RUNBOOK.txt reports 6 h 10 min.",
+  "user_message": "reconcile.py takes 6 hours every night on prod. can you make it fast? i can't give you the database",
+  "fixture": "prod-only",
+  "musts": [
+   "Reads the nested loop from the code and states the complexity (about 2M x 2M comparisons in the worst case) with a labelled estimate (dev.py bound ops).",
+   "Asks for exactly one artifact with the command that produces it: a profile at production size, or timings at two sizes.",
+   "If it delivers the patch (a dict keyed on amount, day and ref), includes a differential oracle against the old reconcile on generated rows and keeps first-match semantics.",
+   "Makes no measured speedup claim and labels the result not measured.",
+   "Does not try to reach the production database."
+  ],
+  "failure_modes": [
+   "Invents a timing or a speedup factor for the production run.",
+   "Connects to DATABASE_URL or asks for production credentials.",
+   "Stalls without an estimate or a patch."
+  ],
+  "probes": [
+   {
+    "id": "bound-ops",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "dev\\.py\"?\\s+bound\\s+ops",
+    "must": true,
+    "requires_skill_tool": true
+   },
+   {
+    "id": "estimate",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "estimate|4e12|4 ?x ?10\\^?12|trillion",
+    "must": true
+   },
+   {
+    "id": "ask-artifact",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "profile|two (timings|sizes)|py-spy|cProfile",
+    "must": true
+   },
+   {
+    "id": "not-measured",
+    "kind": "regex",
+    "scope": "text",
+    "pattern": "not measured|not verified|no (measured )?speedup claim|cannot (measure|time)",
+    "must": true
+   },
+   {
+    "id": "invented-speedup",
+    "kind": "regex",
+    "scope": "final",
+    "pattern": "\\b\\d+(\\.\\d+)?x faster\\b(?![^.]*(estimate|expected|would|should|could))",
+    "must": false
+   },
+   {
+    "id": "db-access",
+    "kind": "regex",
+    "scope": "actions",
+    "pattern": "psql|DATABASE_URL=|python3?\\s+reconcile\\.py",
+    "must": false
+   }
+  ],
+  "guards_prior_strength": false,
+  "skill_tool_musts": [
+   1
   ]
  }
 ]

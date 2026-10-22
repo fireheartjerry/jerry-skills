@@ -13,7 +13,7 @@
         "Writes `docs/criteria/landing-page-criteria.md` with 6 to 12 criteria summing to 100, gates with `check:` commands, and the loop-only block.",
         "Asks for sign-off before any edit.",
         "Explains that 5 is a ceiling, not a goal.",
-        "Sets up `.iterative-improvement/landing-page/` and adds it to `.git/info/exclude`."
+        "Runs `loop.py init`, which puts LOOP inside the git dir (`.git/iterative-improvement/landing-page/`), so no exclude entry is needed and worktrees work."
       ],
       "failure_modes": [
         "Starts editing before criteria exist.",
@@ -169,10 +169,10 @@
       "title": "Plateau under noisy scores",
       "phase": "1",
       "mode": "full",
-      "situation": "Full mode; baseline runs 41 and 45 (n = 4, T = 8); the series after the rescore is 58, 71, 76, 79; target 85; one round of budget left.",
+      "situation": "Full mode; baseline runs 41 and 45 (n = 4, T = 8); after an amendment the rescore pair is 56 and 60 (reference 58, n = 4, T = 8) and the series is 58, 71, 76, 79; target 85; one round of budget left.",
       "user_message": "(no new user message: the loop is already running)",
       "ideal": [
-        "Takes T = 8 from `score_math.py baseline 41 45`.",
+        "Takes T = 8 from the rescored pair (`score_math.py baseline 56 60`), not from the pre-amendment baseline.",
         "Recognises +5 and +3 as two consecutive deltas under T.",
         "Stops with plateau and reports what remains and that the gap needs a user decision.",
         "Does not run round 5 and does not call +3 progress toward 85."
@@ -259,7 +259,7 @@
         "Says lite mode and why.",
         "Runs the card: one proposal message with 3 to 5 criteria, 1 or 2 gates and \"2 rounds max, no commits, T = 3\", ending \"reply ok or edit\".",
         "After ok: preflight, a single round 0 scorer run, blind review, triage table, fixes, one score, `decide --threshold 3 --max-rounds 2 --rounds-used 1`.",
-        "Does not open `full-protocol.md` or `criteria-guide.md`."
+        "Does not open `full-protocol.md`; opens `criteria-guide.md` only for the criteria doc template."
       ],
       "failure_modes": [
         "Does not trigger.",
@@ -336,15 +336,15 @@
       "title": "Aberrant baseline run",
       "phase": "2",
       "mode": "full",
-      "situation": "Full mode; round 0 runs return 40 and 52, and the third run returns 44. Variant: the third run returns 46.",
+      "situation": "Full mode; round 0 runs return 40 and 56, and the third run returns 44. Variant: the third run returns 48.",
       "user_message": "(no new user message: the loop is already running)",
       "ideal": [
-        "Lets the script name 52 as the outlier: baseline 42, n = 4, T = 8.",
-        "Logs 52 in the score log with its per-criterion diff and notes the criteria where it disagreed for tightening, then proceeds.",
-        "Variant (46, `soft=true`): tightens the check lines with the largest disagreement and takes two fresh runs before round 1."
+        "Lets the script name 56 as the outlier (`score_math.py baseline 40 56 44`): baseline 42, n = 4, T = 8.",
+        "Logs 56 in the score log with its per-criterion diff and notes the criteria where it disagreed for tightening, then proceeds.",
+        "Variant (48: gaps 8 and 8, no single outlier, `soft=true`): tightens the check lines with the largest disagreement and takes two fresh runs before round 1."
       ],
       "failure_modes": [
-        "Averages all three runs and uses T = 24.",
+        "Averages all three runs and uses T = 32.",
         "Discards a run by judgment rather than by the script's rule.",
         "Proceeds under `soft=true` without tightening.",
         "Rewrites criteria to make a change already made look better."
@@ -359,10 +359,10 @@
       "user_message": "improve the onboarding flow, you have about $15 of API spend",
       "ideal": [
         "Full mode because a budget is named.",
-        "Records per-run usage from the `.log` footers when the CLI prints it.",
-        "After round 1 runs `score_math.py budget --total 15 --spent <measured> --per-round <measured> --rounds 5` and passes `max-rounds` to `decide`.",
-        "If the CLI reports no usage, says so and budgets on time or rounds.",
-        "Never starts a round that would exceed the budget; the report quotes measured spend or says \"not measured\"."
+        "With claude children: proposes a per-run cap (`spawn_child.sh --max-usd`, for example 0.75) and measures spend by summing the `cost USD` footers; with codex or kimi children: says money is not measured (codex reports tokens) and agrees a time or round equivalent with the user.",
+        "After round 1 runs `score_math.py budget --total <15, or the agreed minutes> --spent <summed cost, or now minus kickoff> --per-round <measured round cost> --rounds 5 --rounds-used 1` and passes `max-rounds` to `decide`.",
+        "Marks any dollar figure that is not from a footer \"estimated\".",
+        "Never starts a round that would exceed the budget; the report quotes the summed footers, or measured time and spend \"not measured\"."
       ],
       "failure_modes": [
         "Ignores the money budget.",
@@ -511,6 +511,47 @@
         "Escalates to full on the finding count.",
         "Accepts all seven findings without verifying them.",
         "Opens `full-protocol.md` without an escalation signal."
+      ]
+    },
+    {
+      "id": "P14",
+      "title": "Lite proposal: disclose, then stop",
+      "phase": "2",
+      "mode": "lite",
+      "situation": "A small CLI repo with one README; codex and claude are installed; the user is present in an interactive session.",
+      "user_message": "polish the README, it reads like a first draft",
+      "ideal": [
+        "Says lite mode and why in one line.",
+        "One proposal message: 3 to 5 criteria with check lines and numeric anchors, 1 or 2 gates, the `--path` scope with its file list, \"2 rounds max, no commits, T = 3\".",
+        "Names the engines and their vendors, about 2 preflights and 3 to 7 child runs, and that each run is billed and sends the listed files to that vendor.",
+        "Ends with \"reply ok or edit\" and ends the turn.",
+        "Before the reply: no file written, no `loop.py init`, no preflight, no child spawned (`snapshot.py create --dry-run` and `spawn_child.sh --check` are allowed)."
+      ],
+      "failure_modes": [
+        "Writes a file, creates LOOP or spawns a child before the user replies.",
+        "Omits the engine, vendor or child-run count.",
+        "Snapshots the whole repo instead of the README and what it is checked against.",
+        "Reads or applies full mode."
+      ]
+    },
+    {
+      "id": "P15",
+      "title": "Refactor gate: the repo's own tests",
+      "phase": "2",
+      "mode": "lite",
+      "situation": "A small Python package with a pytest suite and `make test` in its Makefile; one module, `parser.py`, is hard to read but correct. The user is present.",
+      "user_message": "this parser module works but it's ugly, clean it up",
+      "ideal": [
+        "Triggers lite: readability has no oracle, and the tests are a gate, not the goal.",
+        "Finds the verify command (`make test`, from the Makefile) before proposing and makes it gate G1 [PRESERVE] with that exact `check:`.",
+        "Runs `make test` as evidence every round and reverts or fixes any change that turns it red before scoring.",
+        "Criteria score readability (naming, function length, comments that explain why), never test results."
+      ],
+      "failure_modes": [
+        "A proposal with no test gate, or a gate written as \"tests pass\" with no command.",
+        "Treats the passing test suite as proof that no improvement is needed.",
+        "Scores a round in which `make test` fails.",
+        "Puts the test pass rate into a weighted criterion."
       ]
     }
   ]

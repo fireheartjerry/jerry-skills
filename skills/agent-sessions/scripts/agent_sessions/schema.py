@@ -17,7 +17,7 @@ import re
 from agent_sessions.common import FAILURE_CLASSES
 
 __all__ = [
-    "validate", "unknown_keywords", "check_schema", "SUPPORTED_KEYWORDS",
+    "validate", "unknown_keywords", "check_schema", "strict_schema_problems", "SUPPORTED_KEYWORDS",
     "RESULT_SCHEMA", "EVENT_SCHEMA", "JUDGE_SCHEMA", "JUDGE_RECORD_SCHEMA", "EVENT_KINDS", "SCHEMAS",
 ]
 
@@ -260,6 +260,46 @@ def check_schema(schema):
     return None, unknown_keywords(schema)
 
 
+def strict_schema_problems(schema):
+    """What keeps a schema from the strict form OpenAI structured output (and
+    so `codex exec --output-schema`) requires: every object sets
+    "additionalProperties": false and lists every property in "required"
+    (an optional field is written as nullable instead). [] when it complies.
+    Paths: `$` is the root, `.name` a property, `[]` the items of an array."""
+    problems = []
+
+    def is_object(node):
+        kind = node.get("type")
+        return kind == "object" or (isinstance(kind, list) and "object" in kind) or "properties" in node
+
+    def walk(node, path, depth):
+        if depth > MAX_DEPTH or not isinstance(node, dict):
+            return
+        if is_object(node):
+            if node.get("additionalProperties") is not False:
+                problems.append('%s: set "additionalProperties": false' % path)
+            props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+            required = node.get("required") if isinstance(node.get("required"), list) else []
+            missing = [k for k in props if k not in required]
+            if missing:
+                problems.append('%s: "required" must list %s' % (path, ", ".join(missing)))
+            for key, sub in props.items():
+                walk(sub, "%s.%s" % (path, key), depth + 1)
+        if "items" in node:
+            walk(node["items"], path + "[]", depth + 1)
+        for key in ("anyOf", "oneOf", "allOf"):
+            if isinstance(node.get(key), list):
+                for i, sub in enumerate(node[key]):
+                    walk(sub, "%s.%s[%d]" % (path, key, i), depth + 1)
+        for key in ("definitions", "$defs"):
+            if isinstance(node.get(key), dict):
+                for name, sub in node[key].items():
+                    walk(sub, "%s.%s.%s" % (path, key, name), depth + 1)
+
+    walk(schema, "$", 0)
+    return problems
+
+
 # --------------------------------------------------------------------------- built-in schemas
 
 def _nullable(kind, **extra):
@@ -438,6 +478,7 @@ JUDGE_RECORD_SCHEMA = {
         "model": _nullable("string"), "tier": _nullable("string"), "session_id": _nullable("string"),
         "cost_usd": _nullable("number", minimum=0), "judged_at_iso": {"type": "string"},
         "judge_child": {"type": "string"}, "judge_finished_iso": _nullable("string"),
+        "diff_note": _nullable("string"),
         "judged_run": {"type": ["object", "null"]}, "untrusted": {"type": "string"},
     }),
     "additionalProperties": False,

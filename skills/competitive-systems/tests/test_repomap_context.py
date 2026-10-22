@@ -490,6 +490,48 @@ class ContextTests(unittest.TestCase):
         finally:
             fx.close()
 
+    def test_emitted_packet_with_headers_fits_the_budget(self):
+        fx = Fixture("py")
+        try:
+            for i in range(40):
+                fx.write("gen/m%02d.py" % i, "".join(
+                    "def retry_%d_%d(x):\n    return x\n\n\n" % (i, k) for k in range(6)))
+            budget = 1500
+            p = fx.dev("context", "retry budget parse", "--budget", str(budget), "--emit",
+                       "--min-score", "0", "--must-keep-text",
+                       "python3 -m unittest tests/test_core.py")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            body = p.stdout[p.stdout.index("==>"):]
+            self.assertLessEqual((len(body) + 3) // 4, int(budget * 0.9))
+            self.assertIn("==> <text> <==\npython3 -m unittest tests/test_core.py", p.stdout)
+            self.assertRegex(p.stdout, r"emitted \d+ tokens")
+            j = json.loads(fx.dev("context", "retry budget parse", "--budget", str(budget),
+                                  "--min-score", "0", "--must-keep-text", "make test",
+                                  "--json").stdout)
+            self.assertEqual(j["chunks"][0]["path"], "<text>")
+            self.assertEqual(j["used"], sum(c["tokens"] for c in j["chunks"]))
+            self.assertLessEqual(j["used"], j["limit"])
+        finally:
+            fx.close()
+
+    def test_min_score_floor_and_instruction_words(self):
+        self.assertEqual(context.names_in("fix paginate after the empty status line; run "
+                                          "python -m unittest test_httplib"),
+                         ["paginate", "test_httplib"])
+        loose = self.packet("frobnicate core", "--budget", "20000", "--min-score", "0")
+        tight = self.packet("frobnicate core", "--budget", "20000", "--min-score", "0.9")
+        self.assertLessEqual(len(tight["chunks"]), len(loose["chunks"]))
+        self.assertTrue(all(c["score"] >= 0.9 or c["must_keep"] for c in tight["chunks"]))
+        if tight["dropped_below_min_score"]:
+            self.assertTrue(any("under --min-score" in n for n in tight["notes"]))
+
+    def test_adjacent_chunks_emit_as_one_block(self):
+        blocks = context.emit_blocks([
+            {"path": "a.py", "start": 1, "end": 3, "lines": None, "text": "x\ny\nz"},
+            {"path": "a.py", "start": 4, "end": 5, "lines": None, "text": "u\nv"},
+            {"path": "a.py", "start": 9, "end": 9, "lines": None, "text": "w"}])
+        self.assertEqual([h for h, _ in blocks], ["==> a.py:1-5 <==", "==> a.py:9-9 <=="])
+
     def test_chunk_ranges_partition_and_split(self):
         lines = ["x = 1"] * 3 + ["def f():"] + ["    pass"] * 300 + ["", "def g():", "    pass"]
         defs = [{"name": "f", "depth": 0, "start": 4, "line": 4},

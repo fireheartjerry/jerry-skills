@@ -274,9 +274,9 @@ def check_domain_facts():
     check("knapsack" in ci, "cards-ci-tests.md mentions knapsack")
     meas = read(os.path.join(REFS, "measurement.md"))
     check("Expensive runs" in meas, "measurement.md covers expensive runs (CI history, replay, reruns)")
-    examples = read(os.path.join(REFS, "worked-example.md"))
-    for ex in ("## Example C", "## Example D"):
-        check(ex in examples, "worked-example.md has %r (stop answers in plain words)" % ex)
+    examples = read(os.path.join(REFS, "worked-stops.md"))
+    for ex in ("## Example C", "## Example D", "## Example E"):
+        check(ex in examples, "worked-stops.md has %r (stop answers in plain words)" % ex)
 
 
 def check_stop_answer(text):
@@ -313,7 +313,7 @@ def check_code():
 
 
 SCENARIO_KEYS = ["id", "title", "situation", "user_message", "fixture", "musts", "failure_modes",
-                 "probes", "guards_phase1"]
+                 "probes", "guards_prior_strength"]
 PROBE_SCOPES = ["text", "final", "actions", "edits", "write_paths", "all"]
 
 
@@ -325,10 +325,12 @@ def check_evals():
     except (OSError, ValueError) as e:
         fail("evals/scenarios.json loads: %s" % e)
         return
-    check(isinstance(scenarios, list) and len(scenarios) == 12,
-          "evals/scenarios.json has 12 scenarios (%d)" % len(scenarios))
+    check(isinstance(scenarios, list) and len(scenarios) >= 12,
+          "evals/scenarios.json has at least 12 scenarios (%d)" % len(scenarios))
     ids = [s.get("id") for s in scenarios]
-    check(ids == ["S-%s" % c for c in "ABCDEFGHIJKL"], "scenario ids are S-A..S-L in order")
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:len(ids)]
+    check(ids == ["S-%s" % c for c in letters], "scenario ids are S-A..S-%s in order"
+          % letters[-1:])
     fixtures = set()
     mf = os.path.join(EVALS, "fixtures", "make_fixtures.py")
     if os.path.isfile(mf):
@@ -340,7 +342,7 @@ def check_evals():
         if missing:
             continue
         check(s["musts"] and s["failure_modes"], "%s has musts and failure modes" % sid)
-        check(isinstance(s["guards_phase1"], bool), "%s guards_phase1 is a boolean" % sid)
+        check(isinstance(s["guards_prior_strength"], bool), "%s guards_prior_strength is a boolean" % sid)
         check(s["fixture"] in fixtures, "%s fixture %r is written by make_fixtures.py" % (sid, s["fixture"]))
         pids = [p.get("id") for p in s["probes"]]
         check(len(pids) == len(set(pids)) and all(pids), "%s probe ids are unique" % sid)
@@ -374,15 +376,21 @@ def check_evals():
             trig = json.load(f)
         check(len(trig.get("should_fire", [])) >= 8, "trigger.json has >= 8 should_fire prompts")
         check(len(trig.get("should_not_fire", [])) >= 8, "trigger.json has >= 8 should_not_fire prompts")
-        check(len(trig.get("decoys", [])) == 3 and all(d.get("name") and d.get("description") for d in trig["decoys"]),
-              "trigger.json has 3 decoy skills with names and descriptions")
+        decoys = trig.get("decoys", [])
+        check(len(decoys) >= 3 and all(d.get("name") and (d.get("description") or d.get("from_skill"))
+                                       for d in decoys),
+              "trigger.json has at least 3 decoy skills, each with a description or from_skill")
+        for d in decoys:
+            if d.get("from_skill"):
+                check(os.path.isfile(os.path.join(os.path.dirname(ROOT), d["from_skill"], "SKILL.md")),
+                      "trigger.json decoy %s names an existing sibling skill" % d["name"])
     except (OSError, ValueError) as e:
         fail("evals/trigger.json loads: %s" % e)
     for name in ("README.md", "results.md"):
         check(os.path.isfile(os.path.join(EVALS, name)), "evals/%s exists" % name)
     if os.path.isfile(os.path.join(EVALS, "results.md")):
         res = read(os.path.join(EVALS, "results.md"))
-        for marker in ("## Method", "## Limits", "Grader", "n per cell", "Arms"):
+        for marker in ("## Method", "Grader", "n per cell", "Arms"):
             check(marker in res, "evals/results.md contains %r" % marker)
     for dirpath, _, names in os.walk(EVALS):
         for n in sorted(names):

@@ -20,7 +20,7 @@ from agent_sessions.procs import process_matches, ps_lstart, runner_alive, wait_
 
 __all__ = [
     "tmux_bin", "ENV_SOCKET", "env_socket", "socket_of", "tmux_argv", "tmux", "session_of", "target",
-    "tmux_alive", "live_sessions", "Liveness", "pane_id", "tmux_kill", "server_env", "start",
+    "tmux_alive", "live_sessions", "Liveness", "pane_id", "tmux_kill", "server_env", "start", "new_session",
     "BACKENDS", "choose_backend", "backend_of", "capture", "end_session", "alive", "kill",
 ]
 
@@ -157,26 +157,45 @@ def server_env():
     return dict((k, os.environ[k]) for k in keep if k in os.environ)
 
 
-def start(name, workdir, env, sdir, backend="tmux", sock=ENV_SOCKET):
-    """Start the runner for one child. Returns None on success, else the error
-    text. `env` holds only non-secret variables: for tmux they travel through
-    `new-session -e`, which `ps` can show; secrets go through env.json."""
-    if backend == "process":
-        return _start_process(workdir, env, sdir)
+EXIT_UNATTACHED = ("tmux removed the session right after creating it: the tmux server option exit-unattached is "
+                   "on (from AGENT_SESSIONS_TMUX_CONF or ~/.tmux.conf), which ends a server that has no attached "
+                   "client; set it off (or use another AGENT_SESSIONS_TMUX_SOCKET with a config that does not set "
+                   "it), or use --backend process")
+
+
+def new_session(name, workdir, env, command, sock=ENV_SOCKET):
+    """Create a detached tmux session running `command` (argv). Returns None
+    on success, else the error text. In the same tmux command list, before
+    the server can act on them, the user's tmux.conf options that would end
+    or keep this session are switched off for it: destroy-unattached (the
+    session is never attached) and remain-on-exit (a dead pane would keep it
+    forever). exit-unattached is a server option: switching it off would
+    change the user's server, so a session it would end is refused instead."""
     argv = tmux_argv("new-session", "-d", "-s", session_of(name), "-c", workdir, sock=sock)
     for key in sorted(env):
         argv += ["-e", "%s=%s" % (key, env[key])]
-    argv += ["--", sys.executable, SCRIPT, "_run", sdir]
+    argv += ["--"] + list(command)
+    argv += [";", "set-option", "destroy-unattached", "off", ";", "set-option", "-w", "remain-on-exit", "off",
+             ";", "show-options", "-s", "-v", "exit-unattached"]
     # If this call starts the tmux server, the server inherits this
     # environment for its lifetime and hands it to every later child.
     # Give it the minimum, so no API key or stale setting lives there.
     cp = run(argv, env=server_env())
     if cp.returncode != 0:
         return "tmux could not start the session: %s" % (cp.stderr.strip() or cp.stdout.strip())
-    # A user tmux.conf with `remain-on-exit on` would keep a dead pane, and
-    # with it the session, alive forever; this child's session must not.
-    tmux("set-option", "-w", "-t", target(name) + ":", "remain-on-exit", "off", sock=sock)
+    if (cp.stdout.strip().splitlines() or [""])[-1].strip() == "on":
+        tmux("kill-session", "-t", target(name), sock=sock)
+        return EXIT_UNATTACHED
     return None
+
+
+def start(name, workdir, env, sdir, backend="tmux", sock=ENV_SOCKET):
+    """Start the runner for one child. Returns None on success, else the error
+    text. `env` holds only non-secret variables: for tmux they travel through
+    `new-session -e`, which `ps` can show; secrets go through env.json."""
+    if backend == "process":
+        return _start_process(workdir, env, sdir)
+    return new_session(name, workdir, env, [sys.executable, SCRIPT, "_run", sdir], sock=sock)
 
 
 def _start_process(workdir, env, sdir):

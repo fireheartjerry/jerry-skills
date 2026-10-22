@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Phase-1 compatibility entry: time commands with warm-up, several runs, median and IQR,
-CPU time next to wall time, interleaved A/B, a noise-rule verdict, and a doubling-test
-exponent fitted after the process-startup baseline is subtracted. Same CLI, output lines and
-JSON keys as phase 1; the engine lives in devkit.
+"""Deprecated: kept so existing scripts keep working. New work uses dev.py bench, compare and
+scale, whose verdict (a bootstrap CI against a measured noise floor) replaces this one.
+
+Times commands with warm-up, several runs, median and IQR, CPU time next to wall time,
+interleaved A/B, the IQR noise-rule verdict, and a doubling-test exponent fitted after the
+process-startup baseline is subtracted. The engine lives in devkit.
 
 Subcommands:
   run      [--runs N] [--warmup W] [--json] -- CMD [ARG...]

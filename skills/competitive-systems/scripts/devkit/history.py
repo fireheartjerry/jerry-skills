@@ -449,6 +449,7 @@ def required_targets(root, files, base, cfg, info):
     """(required [(target, language, reason)], affected result, graphs)."""
     from devkit import affected as aff
     changed = aff.gather_changed(root, files, base)
+    aff.warn_if_empty(changed, files, base)
     langs = list(info["languages"])
     graphs = dict((lang, aff.build_graph(root, lang, info, cfg)) for lang in langs)
     graphs = dict((k, v) for k, v in graphs.items() if v is not None)

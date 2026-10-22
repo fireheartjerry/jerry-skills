@@ -1,7 +1,8 @@
 # Lookup and dedup cards
 
 Covers nested loops over the same or two collections, `x in list` inside a loop, duplicate
-detection, range joins, and windowed aggregates recomputed per window. If the issue is
+detection, range joins, windowed aggregates recomputed per window, repeated minimum
+extraction, rank and range queries, and points within a distance of each other. If the issue is
 repeated calls with the same arguments rather than a nested loop, go to
 `cards-repeated-work.md`. If the "duplicates" turn out to be similar rather than equal, the
 exact cards fail their precondition and the Blocking card below applies.
@@ -253,5 +254,185 @@ def window_distinct(a, w):
 - Time windows with duplicate timestamps: define whether the window is half-open.
 
 **Not when:**
-- The aggregate is not decomposable (median, percentiles): a different structure is needed
-  (two heaps, or a sorted container), and only if Gate 2 says the input is big enough.
+- The aggregate is not decomposable (median, percentiles): a running median is two heaps
+  (Heap card below); a windowed one needs a sorted container or the Ordered index card, and
+  only if Gate 2 says the input is big enough.
+- The array changes between queries: prefix sums go stale on every update; use the Ordered
+  index card (Fenwick tree).
+
+## Heap for repeated minimum, merge and running median
+
+**Problem shape:** `m = min(items); items.remove(m)` in a loop, often with new items pushed in
+between; `sorted(pending)[0]` after every insert; k sorted files merged by concatenating and
+sorting; a median recomputed with `sorted` after every new value.
+
+**Precondition test:** At each step only the smallest (or largest) item is needed, not the
+whole order; or the inputs are already sorted runs (k-way merge); or the query is the median
+of everything seen so far. Ties have a defined order (a sequence number). If arbitrary items
+must also be removed or re-prioritised often, this card fails: use the Ordered index card.
+
+**Complexity:** O(n^2) -> O(n log n); a k-way merge of N items O(N log k).
+
+**Sketch:**
+
+```python
+import heapq
+
+def merge_cost(sizes):                    # repeatedly merge the two smallest; total cost
+    heap = list(sizes)
+    heapq.heapify(heap)
+    cost = 0
+    while len(heap) > 1:
+        a, b = heapq.heappop(heap), heapq.heappop(heap)
+        cost += a + b
+        heapq.heappush(heap, a + b)
+    return cost
+
+def k_way_merge(runs):                    # runs: sorted lists; ties keep run order
+    return list(heapq.merge(*runs))
+
+def running_medians(xs):                  # lower half as a max-heap (negated), upper a min-heap
+    lo, hi, out = [], [], []
+    for x in xs:
+        if lo and x > -lo[0]:
+            heapq.heappush(hi, x)
+        else:
+            heapq.heappush(lo, -x)
+        if len(lo) > len(hi) + 1:
+            heapq.heappush(hi, -heapq.heappop(lo))
+        elif len(hi) > len(lo):
+            heapq.heappush(lo, -heapq.heappop(hi))
+        out.append(-lo[0] if len(lo) > len(hi) else (-lo[0] + hi[0]) / 2)
+    return out
+```
+
+**Oracle:** The list version (min and remove, `sorted` of the concatenation,
+`statistics.median` of each prefix) on 0 to 50 random integers with duplicates, exact.
+
+**Traps:**
+- `heapq` is a min-heap only: negate numbers for a max-heap; for other keys push
+  `(key, seq, item)` with an increasing `seq`, or equal keys compare the items (a TypeError
+  for dicts, an order that depends on item values otherwise).
+- Changing a priority in place breaks the heap: push a new entry and skip stale ones when
+  they are popped (lazy deletion).
+- Removing an arbitrary item is O(n); a workload that does it often needs an ordered index.
+
+**Not when:**
+- One minimum, once: `min()` is O(n) already.
+- The full sorted order is needed: sort once.
+
+## Ordered index for rank and range queries
+
+**Problem shape:** `sum(1 for x in xs if lo <= x <= hi)` for every query; a player's rank
+computed by counting the higher scores on every lookup; prefix sums rebuilt after every
+update; `sorted(...)` inside a loop to find the k-th item.
+
+**Precondition test:** Every query is about order: a count or sum over a key range, a rank, a
+predecessor or successor. Static data: one sort, then `bisect` per query. Updates interleaved
+with queries over keys known up front (compressible to 0..m-1): a Fenwick tree. If new keys
+arrive unannounced and must be deleted with order statistics, this card fails: a balanced tree
+or a sorted container (a new dependency) is needed, and Gate 2 decides whether it pays.
+
+**Complexity:** O(n) per query -> O(log n) per query and per update, after O(n log n) setup.
+
+**Sketch:**
+
+```python
+import bisect
+
+def count_in_range(sorted_xs, lo, hi):        # static data: sort once, bisect per query
+    return bisect.bisect_right(sorted_xs, hi) - bisect.bisect_left(sorted_xs, lo)
+
+class Fenwick:                                # point update and prefix sum, both O(log m)
+    def __init__(self, m):
+        self.t = [0] * (m + 1)
+
+    def add(self, i, delta):                  # position i in 0..m-1
+        i += 1
+        while i < len(self.t):
+            self.t[i] += delta
+            i += i & -i
+
+    def prefix(self, i):                      # sum of positions 0..i-1
+        s = 0
+        while i > 0:
+            s += self.t[i]
+            i -= i & -i
+        return s
+
+    def range_sum(self, lo, hi):              # sum of positions lo..hi-1
+        return self.prefix(hi) - self.prefix(lo)
+```
+
+A leaderboard rank: compress the possible scores to positions, keep a Fenwick tree of counts,
+and a score's rank is 1 + the count of positions above it.
+
+**Oracle:** 200 random updates and queries over m <= 50 positions against a plain list
+recomputed per query; inclusive and exclusive bounds both checked.
+
+**Traps:**
+- Off-by-one: the tree is 1-based inside; `bisect_left` against `bisect_right` decides whether
+  a bound is inclusive. The oracle catches both.
+- Coordinate compression needs every key before the build: collect them from the whole
+  workload first, or this card fails.
+- `bisect.insort` into a list is O(n) per insert (a memory move, cheap per call), so n inserts
+  are quadratic; measure before relying on it for large n.
+- Float keys: round to the unit the comparison uses before compressing.
+
+**Not when:**
+- Few queries per build: one scan per query is cheaper (`cards-repeated-work.md`, Index
+  once).
+- Range minimum or maximum with updates: the aggregate is not invertible, so a segment tree
+  is needed instead of a Fenwick tree.
+
+## Spatial grid for radius queries
+
+**Problem shape:** For each point, every other point is checked for distance <= r: "all pairs
+of sensors within 50 m", "stores near each customer", collision checks between all objects.
+
+**Precondition test:** Two or three dimensions, a fixed radius r, a Euclidean (or Manhattan or
+Chebyshev) distance, and density spread enough that a cell of side r holds few points: bucket
+the real data and compare the largest cell with the mean. If one cell holds a large share of
+the points, the inner loop is quadratic again and this card fails.
+
+**Complexity:** O(n^2) -> O(n + pairs found) for roughly even density.
+
+**Sketch:**
+
+```python
+import math
+from collections import defaultdict
+
+def pairs_within(points, r):                  # r > 0; index pairs (i, j), i < j, sorted
+    cells = defaultdict(list)
+    for i, (x, y) in enumerate(points):
+        cells[(math.floor(x / r), math.floor(y / r))].append(i)
+    r2, out = r * r, []
+    for (cx, cy), members in cells.items():
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in cells.get((cx + dx, cy + dy), ()):
+                    for i in members:
+                        if i < j:
+                            (xi, yi), (xj, yj) = points[i], points[j]
+                            if (xi - xj) ** 2 + (yi - yj) ** 2 <= r2:
+                                out.append((i, j))
+    return sorted(out)
+```
+
+**Oracle:** The all-pairs loop on 0 to 60 random points, including duplicates, negative
+coordinates and pairs exactly r apart; compare the sorted pair lists.
+
+**Traps:**
+- Compare squared distances: a `sqrt` adds rounding exactly at the boundary.
+- Latitude and longitude are not planar: project to metres first, or size the cell in degrees
+  for the latitude, and check the boundary with the haversine distance.
+- Clustered data (one site, many duplicates) puts most points in one cell; check the largest
+  cell before trusting the gain.
+- Beyond about three dimensions the 3^d neighbouring cells dominate; use a k-d tree library
+  or the Blocking card's LSH.
+
+**Not when:**
+- Gate 2 says stop: a few thousand points is a few million distance checks.
+- k nearest neighbours with no radius bound: a k-d tree (for example `scipy.spatial.cKDTree`)
+  answers it; a grid needs a radius that grows.

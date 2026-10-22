@@ -240,18 +240,97 @@
     },
     {
       "message": "fix this typo in the README",
-      "exclusion": "out-of-domain",
-      "note": "a one-off edit; nothing to judge"
+      "exclusion": "tiny-edit",
+      "note": "a one-line edit; nothing to judge"
     },
     {
       "message": "brainstorm a few names for the CLI",
       "exclusion": "out-of-domain",
-      "note": "discussion, not iteration on an artifact"
+      "note": "discussion and planning, not iteration on an artifact"
     },
     {
       "message": "what does this regex match",
       "exclusion": "out-of-domain",
       "note": "a question"
+    },
+    {
+      "message": "build me a world-class landing page for my bakery from scratch",
+      "exclusion": "scratch",
+      "note": "no artifact exists yet; \"world class\" alone must not fire"
+    },
+    {
+      "message": "write a next-level README for this new project",
+      "exclusion": "scratch",
+      "note": "a new document; nothing to improve yet"
+    },
+    {
+      "message": "design a new onboarding flow from scratch",
+      "exclusion": "scratch",
+      "note": "creation, not improvement"
+    },
+    {
+      "message": "write a design doc for a new caching layer",
+      "exclusion": "scratch",
+      "note": "a new document; measured misfire 2/8 in the routing run"
+    },
+    {
+      "message": "improve this commit message: fix stuff",
+      "exclusion": "tiny-edit",
+      "note": "one line; a direct rewrite beats a loop"
+    },
+    {
+      "message": "polish this sentence: we is the best tool for logs",
+      "exclusion": "tiny-edit",
+      "note": "one sentence"
+    },
+    {
+      "message": "tighten this one line in the changelog",
+      "exclusion": "tiny-edit",
+      "note": "one line, despite \"tighten this\""
+    },
+    {
+      "message": "iterate on the prompt until the eval pass rate is above 90%",
+      "exclusion": "oracle",
+      "note": "an eval pass rate is the measure; measured misfire 3/8"
+    },
+    {
+      "message": "audit our dependencies for known vulnerabilities and fix them",
+      "exclusion": "oracle",
+      "note": "\"audit and fix\" where a scanner is the oracle"
+    },
+    {
+      "message": "make the checkout page pass WCAG AA: run axe and fix whatever it reports",
+      "exclusion": "oracle",
+      "note": "axe is the measure"
+    },
+    {
+      "message": "give me feedback on my landing page, don't change anything",
+      "exclusion": "out-of-domain",
+      "note": "a critique, explained, with no edits"
+    },
+    {
+      "message": "spin up codex to review my diff and give me a second opinion",
+      "exclusion": "neighbour",
+      "owner": "agent-sessions",
+      "note": "a delegation request; the neighbour owns it"
+    },
+    {
+      "message": "ok keep going, finish the migration to the new API client",
+      "exclusion": "neighbour",
+      "owner": "high-agency",
+      "note": "finishing a task with a done state"
+    },
+    {
+      "message": "the nightly ETL has a quadratic join, make it faster",
+      "exclusion": "neighbour",
+      "owner": "competitive-systems",
+      "note": "performance with a measurable oracle"
+    },
+    {
+      "message": "review this PR for bugs",
+      "exclusion": "neighbour",
+      "owner": "code-review",
+      "note": "a one-shot correctness review, no loop"
     }
   ]
 }

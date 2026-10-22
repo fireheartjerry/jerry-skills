@@ -23,8 +23,8 @@ COMMANDS_MD = os.path.join(SKILL, "references", "commands.md")
 
 SCENARIO_KEYS = ("id", "situation", "user_message", "ideal", "failure_modes", "probes")
 PROBES = ("phase1", "phase2")
-N_SCENARIOS = 12
-N_TRIGGERS = 20
+N_SCENARIOS = 24
+N_TRIGGERS = 30
 COMMAND_RE = re.compile(r"agent-session\s+([a-z][a-z-]*)")
 FLAG_RE = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]*)")
 

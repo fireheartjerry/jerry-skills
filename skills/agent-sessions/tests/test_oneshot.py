@@ -57,11 +57,12 @@ class OneShotTests(SessionTest):
         self.spawn("claude", "x", "hi")
         self.assertEqual(self.wait("x").returncode, 0)
         argv = self.calls("x")[0]["argv"]
+        # --strict-mcp-config: MCP servers are off unless --mcp inherit.
         for flag in ("-p", "--output-format", "stream-json", "--verbose", "--session-id",
-                     "--dangerously-skip-permissions", "--model", "haiku"):
+                     "--dangerously-skip-permissions", "--strict-mcp-config", "--model", "haiku"):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index("--session-id") + 1], self.meta("x")["conversation_id"])
-        self.assertEqual(len(argv), 9, argv)
+        self.assertEqual(len(argv), 10, argv)
 
     def test_codex_flags(self):
         self.spawn("codex", "x", "hi")

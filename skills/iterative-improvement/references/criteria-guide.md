@@ -12,17 +12,24 @@ criterion is not finished.
 
 ## The template
 
-Save at `docs/criteria/<slug>-criteria.md` under the repo root. Outside a git repo,
-save as `<slug>-criteria.md` in the folder holding the artifact (ROOT). In a repo,
-commit the criteria doc; it is the spec the loop ran against. In lite mode keep it in
-the loop dir unless the user asks to keep it. Never commit `.iterative-improvement/`.
+Save at `docs/criteria/<slug>-criteria.md` under the repo root in full mode, or as
+`<slug>-criteria.md` in ROOT outside a repo; in lite mode keep it in LOOP unless the
+user asks to keep it. In a repo it stays uncommitted unless the user allowed the loop
+to commit: tell the user the path either way. A criteria doc in a repo is publishable
+content (a public repo, a Pages site built from `docs/`), and a DERIVED one carries
+`[ASSUMED]` guesses, so the user decides whether it is committed.
 
 The `<!-- loop-only -->` markers are load bearing: `scripts/strip_criteria.py` removes
-everything between them, plus the `## Score log` and `## Amendments` sections and the
-gate class tags, before the scorer sees the document. Anything the scorer must not
-read goes inside a marked block; the markers may appear more than once. The strip
-check is whole-word, so "around 16px" and "<baseline SHA>" are fine, but a check line
-should carry the literal SHA anyway (the scorer has to be able to run it).
+everything between them, plus the `## Score log` and `## Amendments` sections, the
+gate class tags and any Target, Budget, Mode, Baseline, Scorer pin, Loop dir or Rubric
+version label line, before the scorer sees the document. Anything the scorer must not
+read goes inside a marked block; the markers may appear more than once, and each needs
+its end marker. The strip then fails closed on loop words left in the text: "score
+log", "round 2", "noise floor", "move threshold" and "plateau" are reserved. When a
+criterion means the ordinary word ("the learning curve has no plateau"), reword it or
+pass `--allow-term plateau`; never edit the stripped copy. "around 16px" and
+"<baseline SHA>" are fine. A check line that reads git history carries the literal SHA,
+and you run it as evidence: the snapshot the scorer gets has no `.git`.
 
 ```markdown
 # Criteria: <what we are improving>
@@ -36,8 +43,8 @@ should carry the literal SHA anyway (the scorer has to be able to run it).
 **Target:** <score>/100   **Budget:** <N rounds | until target>
 **Baseline score:** <mean of two runs>   **Noise floor:** n=<a-b>   **Move threshold:** T=<max(3,2n)>
 **Baseline SHA:** <git rev-parse HEAD at round 0, or "none">
-**Scorer pin:** <engine, model; flags as recorded in .iterative-improvement/<slug>/scores/round-0a.cmd>
-**Loop dir:** .iterative-improvement/<slug>/
+**Scorer pin:** <engine, full model id; flags as recorded in LOOP/scores/round-0a.cmd>
+**Loop dir:** <the LOOP path loop.py init printed>
 <!-- /loop-only -->
 
 ## Context
@@ -70,8 +77,8 @@ cannot perform it (browser, build tool, network), it must be an exact command th
 orchestrator can run and hand over as evidence.>
 **Anchors:**
 - `0`: <what total failure looks like>
-- `half`: <what partial looks like>
-- `full`: <what success looks like>
+- `<half the weight>`: <what partial looks like>
+- `<the weight>`: <what success looks like>
 
 ### C2. ...
 
@@ -99,7 +106,11 @@ already made.>
 rescored total of the previous snapshot under the new version.>
 ```
 
-A filled copy of this template, with every round logged, is in
+Anchors are numbers: `0`, a middle value, and the weight. `scripts/score_math.py
+check-criteria <doc> --mode lite|full` checks the weights sum to 100, the criterion
+count fits the mode, every criterion has a check line and numeric anchors ending at its
+weight, every gate has `check:`, and a DERIVED doc has a Source per criterion. A
+filled copy of this template, with every round logged, is in
 `references/example-loop.md`.
 
 ---
@@ -118,9 +129,9 @@ will swing 20 points between rounds for no reason.
 ### C3. Typographic hierarchy (12 pts)
 **What it means:** A reader scanning for 3 seconds can identify the page's single
 most important message without reading body copy.
-**How to check it:** Screenshot at 1440px, blur to 8px (`convert shot.png -blur 0x8
-blurred.png`). The primary message should still be the first thing the eye lands on,
-by size or weight contrast alone.
+**How to check it:** `node tools/shot.mjs http://localhost:4321 1440 900 shot.png &&
+convert shot.png -blur 0x8 blurred.png`, then look at `blurred.png`. The primary message
+should still be the first thing the eye lands on, by size or weight contrast alone.
 **Anchors:**
 - `0`: blurred, nothing dominates; three elements compete at the same weight
 - `6`: one element dominates but a secondary element competes at the same level
@@ -169,12 +180,46 @@ the indices of identical consecutive frames.
 - `8`: no overflow, no dead stretch, every frame carries content
 ```
 
-`tools/frames.mjs` is a helper in the fictional project this example is drawn from; the
-skill ships no such tool. Your check line names whatever your repo has, or the exact
-`npx` command.
+`tools/frames.mjs` and `tools/shot.mjs` are helpers in the fictional project these
+examples are drawn from; the skill ships no such tool. Your check line names whatever
+your repo has, or the exact `npx` command.
 
 The check names a command rather than "take screenshots" because the scorer has no
 browser: the orchestrator runs exactly that command once and hands over the frames.
+
+---
+
+## Evidence tooling
+
+Checks the scorer cannot run need a command you can, and a place to keep any helper
+you write. Put helpers in `LOOP/tools/` (made by `loop.py init`): never in ROOT, where a
+helper changes `git status` and enters the next snapshot. A check line then names the
+helper's path relative to LOOP, and you run it with `evidence.py run --cwd LOOP
+--collect '<glob>' ...`: with `--cwd`, the working directory is LOOP, so a capture lands
+there and only `--collect` (a glob relative to `--cwd`, repeatable) moves it into the
+evidence dir the scorer receives. A page served by a dev server adds `--serve '<start
+command>' --wait-for <url>`, and the server stops when the check ends. Common recipes,
+each one command that writes its capture into the working directory:
+
+| Check | Command |
+|---|---|
+| Screenshot at a width | `npx playwright screenshot --viewport-size=1440,900 <url> shot-1440.png` |
+| Full-page capture | `npx playwright screenshot --full-page --viewport-size=390,844 <url> page-390.png` |
+| Horizontal overflow | a helper that loads the page at the width and prints `document.documentElement.scrollWidth` |
+| Accessibility | `npx @axe-core/cli <url> --exit` (counts by impact in the output) |
+| Performance | `npx lighthouse <url> --only-categories=performance --output=json --output-path=lh.json --quiet` |
+
+`evidence.py run` runs a check once and refuses a second capture of the same check in
+a round. A retake (`--retake REASON`) is allowed only when the tool failed before it
+measured (a crash, a server that never came up, a timeout); the last complete capture
+counts, and every attempt stays in the manifest. A disappointing number is never a
+reason to retake.
+
+**Noisy metrics.** Lighthouse and other timing measurements vary run to run, and one
+capture per round puts that noise straight into the score. Write the aggregation into
+the check line itself, so the single evidence run is the aggregate: "run lighthouse 3
+times and take the median performance score" (or a helper that does exactly that).
+Run it as written.
 
 ---
 
@@ -206,6 +251,13 @@ Keep them separate and report them separately. Every gate check is a command the
 orchestrator runs before each scoring run; the scorer reads the result from the
 evidence directory and reports PASS, FAIL or UNKNOWN (no evidence supplied).
 
+**The repo's verify command is the first PRESERVE gate.** Find it before writing any
+other gate: the `test`, `lint`, `check` or `build` scripts in package.json, a Makefile
+target, the CI workflow's steps, the verify line in AGENTS.md or CLAUDE.md. A hostile
+reviewer's refactor can raise every criterion while breaking behaviour, and only this
+gate sees it. For docs, the default is the link check plus a run of any code sample the
+doc shows. When there is none, the proposal says "no verify command found".
+
 **Gates that fail today are fine.** The rejection question often names things the
 work currently gets wrong ("I would reject it if it still overflows on a phone").
 Those become ACHIEVE gates: they are scored alongside from round 0, they are the first
@@ -225,28 +277,13 @@ example's G3 does); otherwise the loop scores its own activity.
 
 ## Amending criteria mid-loop
 
-The round-1 blind review exists partly to find gaps in the criteria. When it
-surfaces something genuinely important that no criterion covers:
-
-1. Add the criterion, with anchors.
-2. Rebalance weights back to 100 (say which criteria lost points).
-3. Tell the user what you added and why. A criteria document that quietly mutates
-   makes the score log meaningless.
-4. Bump the rubric version and add a line to `## Amendments`.
-5. **Rescore the previous round's snapshot under the amended rubric.** The snapshot is
-   in `.iterative-improvement/<slug>/snapshots/round-N/`. Run the pinned scorer on it
-   with the v2 criteria (stripped as usual). Full mode: run it twice, take the mean as
-   the new reference and recompute `n` and `T` with `score_math.py baseline`, because
-   the rubric is a new instrument. Lite: once. Log it as `61 -> 58 (rubric v2,
-   rescored)` and use the v2 series for every later comparison, passing the real round
-   number to `score_math.py decide --rounds-used`. Do not re-tally by hand: re-weighting
-   non-linear anchors has no defined arithmetic, and scoring the new criterion yourself
-   is the orchestrator grading its own work.
-
-   Adding a criterion the work fails, funded by shaving points off criteria near full
-   marks, lowers the total mechanically. That drop is bookkeeping, never a regression;
-   the rescored v2 number is the new reference point. The score log rows, the new
-   series and a worked instance are in `references/full-protocol.md` section 5.
+The round-1 blind review exists partly to find gaps in the criteria. When it surfaces
+something genuinely important that no criterion covers, add the criterion with anchors,
+rebalance to 100 (say which criteria lost points), bump the rubric version, add a line
+to `## Amendments`, and tell the user what you added and why: a criteria document that
+quietly mutates makes the score log meaningless. Which snapshot is rescored, how often,
+and how the series restarts: `references/full-protocol.md` section 5, the one place
+that procedure is written.
 
 Do **not** amend criteria to make a change you already made look better. That is
 moving the goalposts, and it is the fastest way to turn the score into decoration.

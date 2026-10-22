@@ -76,6 +76,14 @@ class Repo(object):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+def run_dev_in(root, args):
+    env = {"PATH": os.path.join(root, "no-path"), "HOME": root, "LC_ALL": "C",
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    return subprocess.run([sys.executable, "-I", "-S", DEV, args[0], "--repo", root] + args[1:],
+                          cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          universal_newlines=True, timeout=120)
+
+
 class RepoCase(unittest.TestCase):
     name = "py"
 
@@ -99,7 +107,8 @@ class CheckTests(RepoCase):
                                    "config or pyright); set commands.python.typecheck in tools/dev.json")
         self.assertRegex(lines[2], r"^tests \(python\) +pass +.* PYTHONPATH=tests python3 -m "
                                    r"unittest tests/test_api\.py tests/test_core\.py$")
-        self.assertEqual(lines[-1], "check: PASS (1 file(s), 1 gate(s) skipped)")
+        self.assertEqual(lines[-1], "check: PASS (1 file(s), 2 gate(s) ran, 1 skipped; --strict "
+                                    "fails on a skipped gate)")
         self.assertNotIn("Traceback", p.stderr)
         self.assertFalse(any("__pycache__" in d for d, _, _ in os.walk(self.repo.root)),
                          "compileall must not write bytecode into the repository")
@@ -153,7 +162,7 @@ class CheckTests(RepoCase):
         p = self.repo.dev("check", "README.md")
         self.assertEqual(p.returncode, 0)
         self.assertIn("note: tests: none affected (only ignored paths changed)", p.stdout)
-        self.assertEqual(p.stdout.splitlines()[-1], "check: PASS (1 file(s), 0 gate(s) skipped)")
+        self.assertEqual(p.stdout.splitlines()[-1], "check: PASS (1 file(s), 0 gate(s) ran, 0 skipped)")
         p = self.repo.dev("check", "conftest.py")
         self.assertEqual(p.returncode, 0, p.stdout)
         self.assertIn("note: tests: full run (sensitive file: conftest.py)", p.stdout)
@@ -171,6 +180,16 @@ class CheckTests(RepoCase):
         self.assertTrue(lint["command"].endswith("pkg/api.py"))
         self.assertEqual(typed["status"], "pass")
         self.assertTrue(tests["command"].endswith("-m unittest tests/test_api.py"))
+
+    def test_config_command_quotes_files_with_spaces(self):
+        py = sys.executable
+        self.repo.write("pkg/my mod.py", "X = 1\n")
+        self.repo.write("tools/dev.json", json.dumps({"commands": {"python": {
+            "lint": "%s -c \"import sys; print('argv', len(sys.argv) - 1)\" {files}" % py}}}))
+        j = json.loads(self.repo.dev("check", "pkg/my mod.py", "--no-tests", "--json").stdout)
+        lint = j["gates"][0]
+        self.assertEqual(lint["status"], "pass", lint)
+        self.assertIn("'pkg/my mod.py'", lint["command"])
 
     def test_no_files_and_no_git(self):
         p = self.repo.dev("check")
@@ -194,14 +213,17 @@ class CheckTests(RepoCase):
 
 
 class ToolchainAbsentTests(unittest.TestCase):
-    """JS, Go and Rust fixtures: targets resolve and every step reports skipped."""
+    """JS, Go and Rust fixtures: targets resolve and every step reports skipped, so the check
+    fails with "nothing was checked" instead of passing having run no gate."""
 
     def check(self, name, path, targets, skipped_reason):
         repo = Repo(name)
         try:
             p = repo.dev("check", path, "--json")
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
             j = json.loads(p.stdout)
+            self.assertEqual((j["executed"], j["status"]), (0, "fail"))
+            self.assertTrue(j["failed_gate"].startswith("nothing was checked"), j["failed_gate"])
             lang = j["languages"][0]
             self.assertEqual(j["affected"]["targets"], {lang: targets})
             self.assertTrue(j["gates"])
@@ -209,7 +231,8 @@ class ToolchainAbsentTests(unittest.TestCase):
             self.assertIn(skipped_reason, j["gates"][0]["reason"])
             self.assertEqual(repo.dev("check", path, "--strict").returncode, 1)
             text = repo.dev("check", path).stdout
-            self.assertIn("check: PASS (1 file(s), %d gate(s) skipped)" % len(j["gates"]), text)
+            self.assertIn("check: FAIL at nothing was checked: 1 relevant changed file(s) and no "
+                          "gate ran", text)
         finally:
             repo.close()
 
@@ -227,6 +250,24 @@ class ToolchainAbsentTests(unittest.TestCase):
             self.assertTrue(j["gates"][0]["command"].endswith("compileall -q pkg/core.py"))
         finally:
             repo.close()
+
+    def test_unsupported_language_fails_and_says_so(self):
+        tmp = tempfile.mkdtemp(prefix="devkit-maven-")
+        try:
+            os.makedirs(os.path.join(tmp, "core", "src"))
+            with open(os.path.join(tmp, "pom.xml"), "w") as f:
+                f.write("<project/>\n")
+            with open(os.path.join(tmp, "core", "src", "Money.java"), "w") as f:
+                f.write("class Money {}\n")
+            for cmd in (["check", "core/src/Money.java", "--strict"],
+                        ["check", "core/src/Money.java"], ["lint", "core/src/Money.java"]):
+                p = run_dev_in(tmp, cmd)
+                self.assertEqual(p.returncode, 1, (cmd, p.stdout, p.stderr))
+                self.assertIn("no language dev.py supports was detected", p.stdout)
+                self.assertNotIn("check: PASS", p.stdout)
+                self.assertNotIn("tests: full run (", p.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_js_without_pnpm(self):
         self.check("js", "src/paginate.ts", ["src/paginate.test.ts"], "pnpm is not installed")

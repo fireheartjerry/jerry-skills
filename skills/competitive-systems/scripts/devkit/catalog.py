@@ -5,6 +5,11 @@ skill's lint so the numeric facts printed here are the strings the cards contain
 Scoring: the number of distinct query tokens found in an entry's symptom, aliases, title and
 class (lowercase, split on non-alphanumerics, a plural `s` dropped, stopwords removed), plus
 one per alias of three or more characters that appears verbatim in the query. Ties: title.
+A top match is weak when its score is under WEAK_SCORE or when none of its hits is a title or
+alias word (two generic symptom words such as "loop" and "inside" are not evidence that a card
+applies). Some questions need no card at all (a claimed speedup to check, a
+benchmark that crept up, a stock structure such as a deque); ROUTES names the path for
+those before any card.
 """
 import json
 import os
@@ -18,6 +23,75 @@ REQUIRED_KEYS = ("id", "title", "file", "class", "tier", "symptom", "aliases", "
 STOPWORDS = frozenset("""a an and are as at be but by can do does for from how i if in into is
 it its make me my of on or our per should so than that the their this to too very was we what
 when where which why will with you your takes take slow fast faster""".split())
+
+
+WEAK_SCORE = 2
+
+# (triggers, kind, route) for questions whose answer is a measurement, a stock structure or a
+# known non-scaling cause rather than a card. A trigger is a phrase that must appear in the
+# lowercased query, or a tuple of phrases that must all appear (a co-term, so "regression
+# tests are slow" does not read as a benchmark regression).
+ROUTES = [
+    (("speedup real", "is it faster", "is this faster", "really faster", "claimed speedup",
+      "is the speedup", "speedup is real", "% faster", "noise or real", "within noise"),
+     "measurement",
+     "no card: this is a measurement question. Run SKILL.md steps 0, 3 (noise floor only), 6 "
+     "and 7 on the claim: dev.py aa for the noise floor, dev.py bench --check-output on both "
+     "arms, dev.py compare; references/measurement.md section 3 and references/guards.md "
+     "(fake speedups)."),
+    (("crept up", "got slower over", "history.csv", "slower since commit",
+      ("regress", "benchmark"), ("regress", "median"), ("regress", "commits"),
+      ("regress", "history"), ("regress", "perf"), ("which commit", "slow"),
+      ("which commit", "benchmark")),
+     "changepoint",
+     "no card: find the step in the history of medians with dev.py changepoint FILE (or "
+     "--perf NAME), then dev.py bisect --good REF --bad REF over the range it names (a "
+     "throwaway worktree, repeated runs per commit); references/measurement.md section 8."),
+    (("pop(0)", "list.pop", "insert(0", "queue from a list", "deque"),
+     "stock-structure",
+     "no card needed: a queue built on list.pop(0) or insert(0) is a stock structure fix "
+     "(collections.deque). Apply it under Gates 1 to 3 and prove it with dev.py oracle."),
+    (("top k", "top-k", "largest k", "smallest k", "k largest", "k smallest", "nlargest",
+      "nsmallest"),
+     "stock-structure",
+     "no card needed: top k is heapq.nlargest/nsmallest (O(n log k)). Apply it under Gates 1 "
+     "to 3 and prove it with dev.py oracle. Repeated minimum extraction or a k-way merge: "
+     "dev.py catalog --id heap-selection-merge."),
+    (("string concatenation", "concatenating strings", "+= in a loop", "str +="),
+     "stock-structure",
+     "no card needed: repeated string += is str.join over a list. Apply it under Gates 1 to 3 "
+     "and prove it with dev.py oracle."),
+    (("catastrophic backtracking", "redos", "backtracking", ("regex", "hangs"),
+      ("regex", "exponential"), ("regex", "times out")),
+     "redos",
+     "no card: catastrophic backtracking is exponential in the length of one input line, not "
+     "a scaling problem in the number of inputs. Rewrite the pattern (no nested or "
+     "overlapping quantifiers such as (a+)+ or (a|a)*) or run it on a linear-time engine "
+     "(RE2, Rust regex, Go regexp); dev.py catalog --id combined-alternation. Prove it with "
+     "dev.py oracle on the old pattern's matches plus the input that hangs, capped by a "
+     "timeout."),
+    (("re.compile", ("compile", "regex", "loop"), ("compile", "pattern", "loop")),
+     "stock-structure",
+     "no card needed: hoist the compiled pattern out of the loop. Python's re module already "
+     "caches recent patterns, so expect a constant factor; Gate 1 decides whether it matters."),
+]
+
+
+# Routes whose answer replaces the cards outright: catastrophic backtracking is not a scaling
+# problem in the number of inputs, so a regex-set card that shares the word "regex" misleads.
+FINAL_ROUTES = frozenset(["redos"])
+
+
+def _hit(trigger, low):
+    if isinstance(trigger, tuple):
+        return all(t in low for t in trigger)
+    return trigger in low
+
+
+def routes_for(query):
+    low = (query or "").lower()
+    return [(kind, text) for triggers, kind, text in ROUTES
+            if any(_hit(t, low) for t in triggers)]
 
 
 def catalog_path():
@@ -67,6 +141,23 @@ def score(entry, query):
     low = query.lower()
     s += sum(1 for alias in entry["aliases"] if len(alias) >= 3 and alias.lower() in low)
     return s
+
+
+def strong(entry, query):
+    """True when the query hits the entry's title or an alias, not only its symptom words."""
+    named = tokens(" ".join([entry["title"]] + list(entry["aliases"])))
+    if tokens(query) & named:
+        return True
+    low = query.lower()
+    return any(len(a) >= 3 and a.lower() in low for a in entry["aliases"])
+
+
+def is_weak(found, symptom):
+    """A top match under WEAK_SCORE, or one whose hits are all generic symptom words."""
+    if not (symptom and found):
+        return False
+    s, e = found[0]
+    return s < WEAK_SCORE or not strong(e, symptom)
 
 
 def search(entries, symptom=None, ident=None, klass=None):
@@ -125,6 +216,8 @@ def print_entry(entry, s=None):
     print("  complexity: %s" % entry["complexity"])
     print("  oracle: %s" % entry["oracle"])
     print("  facts to quote: %s" % ("; ".join(entry["facts"]) if entry["facts"] else "none listed"))
+    if entry.get("tool"):
+        print("  repo tool: %s" % entry["tool"])
     for sentence in fact_sentences(entry):
         print("    card says: %s" % sentence)
 
@@ -158,8 +251,11 @@ def cmd_catalog(args):
     if not (a.symptom or a.ident or a.klass):
         raise UsageError("give --symptom TEXT, --id ID, --class CLASS or --list")
     found = search(entries, a.symptom, a.ident, a.klass)
-    if not found:
-        raise UsageError("no card matches; try --list")
+    routes = routes_for(a.symptom) if a.symptom else []
+    weak = is_weak(found, a.symptom)
+    if not found and not routes:
+        raise UsageError("no card matches; try --list, or treat it as no card: if the fix is a "
+                         "stock structure apply it under Gates 1 to 3 with dev.py oracle")
     if a.json:
         matches = []
         for s, e in found:
@@ -168,8 +264,25 @@ def cmd_catalog(args):
             m["fact_sentences"] = fact_sentences(e)
             matches.append(m)
         print_json({"schema": SCHEMA, "query": {"symptom": a.symptom, "id": a.ident,
-                                                "class": a.klass}, "matches": matches})
+                                                "class": a.klass}, "weak": weak,
+                    "routes": [{"kind": k, "text": t} for k, t in routes],
+                    "matches": matches})
         return 0
+    for _, text in routes:
+        print(text)
+    final = any(k in FINAL_ROUTES for k, _ in routes)
+    if routes and (final or not found or weak or found[0][0] < WEAK_SCORE + 1):
+        return 0                    # the route answers it; weak card matches would mislead
+    if routes and found:
+        print()
+    if weak:
+        top = found[0][0]
+        why = ("shares %d word with the symptom" % top if top < WEAK_SCORE else
+               "shares %d generic symptom words and no title or alias word" % top)
+        print("weak match: the best card %s, which is not evidence it applies; read its "
+              "precondition and reject-when below before opening the card, and treat a "
+              "failed check as no card" % why)
+        print()
     for i, (s, e) in enumerate(found):
         if i:
             print()

@@ -61,7 +61,7 @@ class BestOfTests(SessionTest):
         self.assertEqual(len(doc["rows"]), 3)
         cp = self.ok("collect", "feat", "--merge")
         self.assertIn("collected", cp.stdout)
-        self.assertIn("reap feat-1", cp.stdout)
+        self.assertIn("reap feat ", cp.stdout)      # the group: every member, branches of the losers kept
         self.assertTrue(os.path.exists(os.path.join(repo, "f.txt")))
         self.assertFalse(os.path.exists(os.path.join(repo, "g.txt")))
         cp = self.ok("reap", "feat")

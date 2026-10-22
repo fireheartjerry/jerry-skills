@@ -14,6 +14,7 @@ import subprocess
 from devkit import catalog
 from devkit.common import (Parser, UsageError, fmt_time, load_json_file, note, print_json,
                            warn)
+from devkit.measure import fmt_metric
 
 PLACEHOLDER = re.compile(r"<[^<>]*>")
 
@@ -59,14 +60,18 @@ def load_compare(path):
 
 def before_line(c):
     b, a = c["before"], c["after"]
+    f = lambda v: fmt_metric(v, c.get("metric", "wall"))
     return "Before: median %s (IQR %s, runs=%d); After: median %s (IQR %s, runs=%d)." % (
-        fmt_time(b["median"]), fmt_time(b["iqr"]), b["runs"],
-        fmt_time(a["median"]), fmt_time(a["iqr"]), a["runs"])
+        f(b["median"]), f(b["iqr"]), b["runs"], f(a["median"]), f(a["iqr"]), a["runs"])
 
 
 def verdict_line(c):
     e, name = c["effect"], c["verdict"]
-    medians = "medians %s -> %s" % (fmt_time(c["before"]["median"]), fmt_time(c["after"]["median"]))
+    f = lambda v: fmt_metric(v, c.get("metric", "wall"))
+    medians = "medians %s -> %s" % (f(c["before"]["median"]), f(c["after"]["median"]))
+    if name == "INVALID":
+        return "Verdict: invalid: outputs differ between arms, so no speedup is claimed (%s)." % (
+            medians)
     ci = "95%% CI %.2fx..%.2fx" % (e["ci_lo"], e["ci_hi"])
     if name == "FASTER":
         return "Verdict: %.2fx faster (%s, p=%.3g; %s)." % (e["ratio"], ci, c["p"], medians)
@@ -99,7 +104,22 @@ def exponent_text(s):
 
 
 def class_line(before, after):
-    return "Class: exponent %s -> %s." % (exponent_text(before), exponent_text(after))
+    """The Class line; says plainly when the exponent did not drop (a constant-factor gain)
+    and when the two fits cover different sizes."""
+    text = "Class: exponent %s -> %s" % (exponent_text(before), exponent_text(after))
+    notes = []
+    cb, ca = before.get("exponent_ci"), after.get("exponent_ci")
+    eb, ea = before.get("exponent"), after.get("exponent")
+    if cb and ca and not ca[0] < cb[1]:
+        notes.append("the exponent did not drop: a constant-factor gain, not an algorithmic one")
+    elif not (cb and ca) and eb is not None and ea is not None and ea >= eb - 0.2:
+        notes.append("the exponent did not clearly drop: a constant-factor gain, not an "
+                     "algorithmic one")
+    sb = [r["n"] for r in before.get("sizes", [])]
+    sa = [r["n"] for r in after.get("sizes", [])]
+    if sb and sa and (min(sb), max(sb)) != (min(sa), max(sa)):
+        notes.append("the two fits cover different sizes")
+    return text + ("; " + "; ".join(notes) if notes else "") + "."
 
 
 def noise_line(path):
@@ -196,6 +216,11 @@ def build(template, compare=None, scale_before=None, scale_after=None, aa=None,
         filled["noisefloor"] = noise_line(aa)
     if oracle_cmd:
         filled["oracle"], oracle_ok = run_oracle(oracle_cmd)
+    elif compare is not None and isinstance(compare.get("oracle"), dict):
+        o = compare["oracle"]
+        filled["oracle"] = ("Oracle: `%s`: exit %d (pass, run by bench before timing); last "
+                            "line: %s." % (o.get("command"), o.get("exit", 0),
+                                           o.get("last_line")))
     sets = dict(sets or {})
     if "card" in sets:
         value = sets.pop("card")
@@ -228,6 +253,8 @@ def build(template, compare=None, scale_before=None, scale_after=None, aa=None,
         parts.append("noise floor not measured (compare used the default 5% minimum effect)")
     if oracle_ok is False:
         parts.append("the oracle failed, so the timing is not evidence")
+    if compare is not None and compare.get("verdict") == "INVALID":
+        parts.append("bench found the arms' outputs differ, so the timing is not evidence")
     if extra_not_verified:
         parts.append(extra_not_verified)
     lines.append("Not verified: %s." % ("; ".join(parts) if parts else "nothing listed"))

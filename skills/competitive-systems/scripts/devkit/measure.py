@@ -1,5 +1,5 @@
 """Timing engine and the evidence commands bench, aa, scale and changepoint. The before/after
-analysis is devkit.compare; the phase-1 bench.py subcommands are devkit.legacy.
+analysis is devkit.compare; the deprecated bench.py subcommands are devkit.legacy.
 
 Timing: wall via time.perf_counter around the child's life; the child's user+sys CPU and
 max RSS from the rusage that os.wait4 returns for that child (POSIX). Without wait4 the
@@ -7,6 +7,7 @@ RUSAGE_CHILDREN deltas give CPU and RSS is null; without `resource` both are nul
 """
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -29,14 +30,16 @@ from devkit.common import (CommandFailed, GroupTimer, Parser, StartError, UsageE
 from devkit.stats import (BASELINE_RATIO, SCALE_FLOOR, classify_exponent,  # noqa: F401
                           fit_exponent, median, quartiles, scale_exponent)
 
-DEFAULT_RUNS = 7
+DEFAULT_RUNS = 7        # scale, perf and the legacy bench.py; bench uses PROTOCOL_RUNS
 DEFAULT_WARMUP = 1
 STARTUP_FLOOR = 0.020   # seconds; medians below this are mostly process startup
 WAIT_RATIO = 1.5        # wall > WAIT_RATIO x CPU means the process is waiting
 WAIT_FLOOR = 0.100      # seconds; under this the wall/CPU ratio is startup noise
 PROTOCOL_RUNS = 10      # the protocol asks for at least this many runs per arm
+MAX_TOTAL = 300.0       # seconds; bench, aa and scale stop before a projected total over this
+RISING_RATIO = 1.3      # consecutive-pair slopes each this much above the last: exponential
 
-# ---------------------------------------------------------------- phase-1 pure functions
+# ---------------------------------------------------------------- pure functions (also bench.py)
 
 
 def summarize(xs):
@@ -65,14 +68,14 @@ def summarize_arm(walls, cpus):
 
 
 def verdict(before, after):
-    """Phase-1 IQR noise rule: (verdict, speedup, reason); the hand rule in measurement.md."""
+    """The IQR noise rule: (verdict, speedup, reason); the hand rule in measurement.md."""
     widest = 2 * max(before["iqr"], after["iqr"])
     if (after["median"] < before["median"] and after["q3"] < before["q1"]
             and before["median"] - after["median"] > widest):
-        return "faster", round(before["median"] / after["median"], 2), ""
+        return "faster", before["median"] / after["median"], ""
     if (before["median"] < after["median"] and before["q3"] < after["q1"]
             and after["median"] - before["median"] > widest):
-        return "slower", round(before["median"] / after["median"], 2), ""
+        return "slower", before["median"] / after["median"], ""
     if after["median"] == before["median"]:
         reason = "medians equal"
     elif not (after["q3"] < before["q1"] or before["q3"] < after["q1"]):
@@ -96,14 +99,20 @@ def gate1_line(s):
     return "CPU %s of %s wall -> %s" % (fmt_time(s["cpu_median"]), fmt_time(s["median"]), tail)
 
 
-def before_after_line(before, after):
+def fmt_metric(value, metric="wall"):
+    """A value of the compared metric in its unit: bytes for rss, seconds otherwise."""
+    return fmt_bytes(value) if metric == "rss" else fmt_time(value)
+
+
+def before_after_line(before, after, metric="wall"):
+    f = lambda v: fmt_metric(v, metric)
     return "Before: median %s (IQR %s, runs=%d); After: median %s (IQR %s, runs=%d)." % (
-        fmt_time(before["median"]), fmt_time(before["iqr"]), before["runs"],
-        fmt_time(after["median"]), fmt_time(after["iqr"]), after["runs"])
+        f(before["median"]), f(before["iqr"]), before["runs"],
+        f(after["median"]), f(after["iqr"]), after["runs"])
 
 
 def report_lines(before, after, verdict_name, speedup):
-    """Phase-1 paste-ready lines for the IQR rule."""
+    """Paste-ready lines for the IQR rule (bench.py)."""
     if verdict_name == "faster":
         second = "Verdict: %.2fx faster" % speedup
     elif verdict_name == "slower":
@@ -114,7 +123,7 @@ def report_lines(before, after, verdict_name, speedup):
 
 
 def compare_warnings(before, after):
-    """Phase-1 protocol warnings: run counts by tier, startup-dominated medians."""
+    """bench.py protocol warnings: run counts by step, startup-dominated medians."""
     out = []
     runs = min(before["runs"], after["runs"])
     hi, lo = max(before["median"], after["median"]), min(before["median"], after["median"])
@@ -204,6 +213,14 @@ def time_once(cmd, shell=False, capture_stdout=False, timeout=None):
                 kill_group(proc)
             raise
         code = proc.returncode
+        leftover = False
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, 0)       # anyone left in the measured process group?
+                leftover = True
+                kill_group(proc)
+            except OSError:
+                pass
         if code != 0:
             err.seek(0)
             tail = err.read().decode("utf-8", "replace").splitlines()[-20:]
@@ -214,15 +231,57 @@ def time_once(cmd, shell=False, capture_stdout=False, timeout=None):
         if capture_stdout:
             out.seek(0)
             digest = hashlib.sha256(out.read()).hexdigest()
-    return {"wall": wall, "cpu": cpu, "rss": rss, "exit": code, "stdout_sha256": digest}
+    return {"wall": wall, "cpu": cpu, "rss": rss, "exit": code, "stdout_sha256": digest,
+            "leftover": leftover}
 
 
 def time_many(cmd, runs, warmup, shell=False, **kw):
-    """Warm up, then time `runs` runs. Returns (walls, cpus) as phase 1 did."""
+    """Warm up, then time `runs` runs. Returns (walls, cpus)."""
     for _ in range(warmup):
         time_once(cmd, shell, **kw)
     results = [time_once(cmd, shell, **kw) for _ in range(runs)]
     return [r["wall"] for r in results], [r["cpu"] for r in results]
+
+
+class CostCap(object):
+    """--max-total for bench and aa: once every arm has run once, project the whole run from
+    those first times and stop (exit 1) before going on when the projection is over the cap.
+    cap 0 or None disables it."""
+
+    def __init__(self, cap, names, per_arm_runs, what):
+        self.cap = cap or 0
+        self.names = list(names)
+        self.per_arm = per_arm_runs
+        self.what = what
+        self.first = {}
+        self.start = time.perf_counter()
+        self.checked = not self.cap
+
+    def ran(self, name, wall):
+        if self.checked:
+            return
+        self.first.setdefault(name, wall)
+        if len(self.first) < len(self.names):
+            return
+        self.checked = True
+        projected = sum(self.first.values()) * self.per_arm
+        if projected > self.cap:
+            raise CommandFailed(
+                "%s would take about %s in all (%d runs per arm; the first runs took %s), over "
+                "--max-total %s; stopped after %s. Pass --max-total %d to allow it, use fewer "
+                "--runs or a smaller input, or follow measurement.md section 4 for expensive "
+                "runs" % (self.what, fmt_time(projected), self.per_arm,
+                          ", ".join(fmt_time(self.first[n]) for n in self.names),
+                          fmt_time(self.cap), fmt_time(time.perf_counter() - self.start),
+                          int(projected * 1.2) + 1))
+
+
+def runs_note(what, cmd_text, count):
+    """The one line printed before any measured run: how many times what runs, and that each
+    run repeats the command's side effects."""
+    note("%s will run %s %d times; every run repeats its side effects (writes, network calls, "
+         "spend), so measure a pure command or a stub (SKILL.md step 0)" % (
+             what, cmd_text, count))
 
 
 def run_order(names, runs, order, seed):
@@ -240,21 +299,46 @@ def run_order(names, runs, order, seed):
 
 
 def run_arms(arms, runs, warmup, order="interleave", seed=0, shell=False,
-             check_output=False, timeout=None):
-    """arms: list of (name, cmd). Returns (bench dict without meta, warnings)."""
+             check_output=False, timeout=None, max_total=None, what="bench"):
+    """arms: list of (name, cmd). Returns (bench dict without meta, warnings). max_total:
+    seconds; stop (CommandFailed) once the first run of every arm projects past it."""
     data = {}
+    cap = CostCap(max_total, [n for n, _ in arms], runs + warmup, what)
     for name, cmd in arms:
         data[name] = {"command": cmd, "shell": shell, "wall": [], "cpu": [], "rss": [],
                       "exit": [], "stdout_sha256": []}
         for _ in range(warmup):
-            time_once(cmd, shell, check_output, timeout)
+            cap.ran(name, time_once(cmd, shell, check_output, timeout)["wall"])
     sequence = run_order([n for n, _ in arms], runs, order, seed)
     cmds = dict(arms)
+    leftovers = set()
     for name in sequence:
         r = time_once(cmds[name], shell, check_output, timeout)
+        cap.ran(name, r["wall"])
         for key in ("wall", "cpu", "rss", "exit", "stdout_sha256"):
             data[name][key].append(r[key])
-    return {"arms": data, "order": sequence}, output_warnings(data) if check_output else []
+        if r["leftover"]:
+            leftovers.add(name)
+    warnings = output_warnings(data) if check_output else []
+    for name in sorted(leftovers):
+        warnings.append("arm %s left processes running after it exited; dev.py killed them, "
+                        "but background work outside the timed region skews later runs"
+                        % name)
+    out = {"arms": data, "order": sequence}
+    if check_output:
+        out["outputs_differ"] = differing_arms(data)
+    return out, warnings
+
+
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def differing_arms(arms):
+    """[[a, b], ...]: pairs of arms whose stdout hashes share no value."""
+    sets = dict((n, set(h for h in a["stdout_sha256"] if h)) for n, a in arms.items())
+    names = list(sets)
+    return [[a, b] for i, a in enumerate(names) for b in names[i + 1:]
+            if sets[a] and sets[b] and not (sets[a] & sets[b])]
 
 
 def output_warnings(arms):
@@ -266,12 +350,12 @@ def output_warnings(arms):
         if len(hashes) > 1:
             out.append("arm %s: stdout differs between its own runs (%d distinct outputs): "
                        "nondeterministic output" % (name, len(hashes)))
-    names = list(sets)
-    for i, a in enumerate(names):
-        for b in names[i + 1:]:
-            if sets[a] and sets[b] and not (sets[a] & sets[b]):
-                out.append("outputs differ between arms %s and %s: check the oracle before "
-                           "trusting the timing" % (a, b))
+    for a, b in differing_arms(arms):
+        out.append("outputs differ between arms %s and %s: the arms do different work, so "
+                   "the timing is not a speedup; check the oracle" % (a, b))
+    if sets and all(h == {EMPTY_SHA256} for h in sets.values()):
+        out.append("--check-output compared empty outputs: every arm printed nothing, so the "
+                   "check proves nothing; make the driver print a result hash")
     return out
 
 
@@ -303,7 +387,10 @@ def parse_arm(text):
 def arm_command(text, shell):
     if shell:
         return text
-    argv = shlex.split(text)
+    try:
+        argv = shlex.split(text)
+    except ValueError as e:
+        raise UsageError("cannot split %r into arguments: %s (check the quotes)" % (text, e))
     if not argv:
         raise UsageError("empty command in %r" % text)
     return argv
@@ -314,6 +401,55 @@ def split_dashes(raw):
         i = raw.index("--")
         return raw[:i], raw[i + 1:]
     return raw, []
+
+
+def run_oracle_first(cmd, timeout=600):
+    """Run the oracle before any timing: {command, exit, last_line}; CommandFailed when it
+    fails, so no timing of an unverified candidate is ever produced."""
+    try:
+        p = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           universal_newlines=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise CommandFailed("--oracle-cmd timed out after %d s; not timing an unverified "
+                            "candidate" % timeout)
+    lines = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+    last = lines[-1] if lines else "(no output)"
+    if p.returncode != 0:
+        raise CommandFailed("--oracle-cmd failed with exit %d (last line: %s); not timing an "
+                            "unverified candidate" % (p.returncode, last),
+                            details=lines[-20:])
+    note("oracle passed before timing: %s (last line: %s)" % (cmd, last))
+    return {"command": cmd, "exit": p.returncode, "last_line": last}
+
+
+def startup_warnings(arms_data, runs=5):
+    """Warn when an arm's median is mostly interpreter startup: time the matching startup
+    command (python3 -c pass, node -e 0) once per interpreter and compare."""
+    out, cache = [], {}
+    for name, arm in arms_data.items():
+        cmd = arm["command"]
+        if isinstance(cmd, str) or not arm["wall"]:
+            continue
+        base = default_baseline(cmd)
+        if base is None:
+            continue
+        m = median(arm["wall"])
+        if m > 0.5:
+            continue
+        key = tuple(base)
+        if key not in cache:
+            try:
+                cache[key] = median(time_many(base, runs, 1)[0])
+            except (StartError, CommandFailed):
+                cache[key] = None
+        b = cache[key]
+        if b and m < 3 * b:
+            out.append("%s: median %s is under 3x the startup time of `%s` (%s): most of it is "
+                       "process startup, so a ratio understates the change in the computation; "
+                       "subtract it (startup-corrected median about %s) or raise n"
+                       % (name, fmt_time(m), " ".join(base), fmt_time(b),
+                          fmt_time(max(m - b, 0.0))))
+    return out
 
 
 def _parser(name, description):
@@ -331,21 +467,31 @@ def _check_runs(runs, warmup):
 def cmd_bench(args):
     p = _parser("bench", "Time one or more commands (arms) with interleaving, CPU and RSS.")
     p.add_argument("--arm", action="append", default=[], metavar="NAME=CMD", help="an arm; repeatable")
-    p.add_argument("--runs", type=int, default=DEFAULT_RUNS,
-                   help="timed runs per arm (default %d)" % DEFAULT_RUNS)
+    p.add_argument("--runs", type=int, default=PROTOCOL_RUNS,
+                   help="timed runs per arm (default %d, the protocol minimum)" % PROTOCOL_RUNS)
     p.add_argument("--warmup", type=int, default=DEFAULT_WARMUP,
                    help="untimed runs per arm first (default %d)" % DEFAULT_WARMUP)
     p.add_argument("--order", choices=("interleave", "random", "blocked"), default="interleave",
                    help="run order across arms (default interleave)")
     p.add_argument("--seed", type=int, default=0, help="seed for --order random (default 0)")
     p.add_argument("--shell", action="store_true", help="run arms through /bin/sh -c")
-    p.add_argument("--check-output", action="store_true", help="hash stdout and compare")
+    p.add_argument("--check-output", action="store_true",
+                   help="hash stdout per run; arms whose outputs differ get verdict INVALID "
+                        "and exit 1")
     p.add_argument("--timeout", type=float, default=None, help="seconds per run")
+    p.add_argument("--max-total", type=float, default=MAX_TOTAL, metavar="S",
+                   help="stop before the rest when the first run of each arm projects the "
+                        "whole bench past S seconds (default %d; 0 disables)" % MAX_TOTAL)
+    p.add_argument("--oracle-cmd", default=None, metavar="CMD",
+                   help="run this correctness check (through the shell) before any timing; a "
+                        "non-zero exit stops the bench with exit 1, and the result is stored "
+                        "for compare and report")
     p.add_argument("--input", action="append", default=[], metavar="FILE",
                    help="input file whose SHA-256 goes into meta; one per flag, repeatable")
     p.add_argument("--min-effect", type=float, default=None, metavar="X",
                    help="smallest ratio change that counts, e.g. 0.05 for 5%% (default: "
-                        ".devkit/aa.json from aa --save when under 7 days old, else 0.05)")
+                        ".devkit/aa.json from aa --save when under 7 days old and measured on "
+                        "one of these arms, else 0.05; never below that saved floor)")
     p.add_argument("--out", default=None, help="write the devkit-bench/1 JSON here")
     p.add_argument("--repo", default=None,
                    help="repository root for .devkit/ and git metadata (default: git top level)")
@@ -359,23 +505,46 @@ def cmd_bench(args):
     if len(set(names)) != len(names):
         raise UsageError("arm names must be distinct: %s" % ", ".join(names))
     arms = [(n, arm_command(c, a.shell)) for n, c in arms]
-    if a.shell:
-        note("--shell: /bin/sh startup is inside every timing")
-    bench, warnings = run_arms(arms, a.runs, a.warmup, a.order, a.seed, a.shell,
-                               a.check_output, a.timeout)
-    bench["schema"] = "devkit-bench/1"
-    bench["runs"], bench["warmup"], bench["order_mode"] = a.runs, a.warmup, a.order
-    bench["meta"] = metadata(a.input, a.seed, a.repo)
-    bench["warnings"] = warnings
+    # Everything that can fail on a typo fails now, before the expensive timed runs.
+    metadata(a.input, a.seed, a.repo)
     if a.out:
-        with open(a.out, "w", encoding="utf-8") as f:
-            json.dump(bench, f, indent=1)
-    result = None
+        parent = os.path.dirname(os.path.abspath(a.out))
+        if not os.path.isdir(parent) or not os.access(parent, os.W_OK):
+            raise UsageError("--out %s: directory %s does not exist or is not writable"
+                             % (a.out, parent))
+    min_effect = source = None
     if len(arms) >= 2:
         from devkit import compare  # measure is imported by compare; keep the import local
-        min_effect, source = compare.resolve_min_effect(a.min_effect, a.repo)
+        min_effect, source = compare.resolve_min_effect(a.min_effect, a.repo,
+                                                        [c for _, c in arms])
+    if a.max_total < 0:
+        raise UsageError("--max-total must be >= 0 (0 disables the cap)")
+    oracle = run_oracle_first(a.oracle_cmd) if a.oracle_cmd else None
+    if a.shell:
+        note("--shell: /bin/sh startup is inside every timing")
+    runs_note("bench", "each of %d arm(s)" % len(arms), a.runs + a.warmup)
+    bench, warnings = run_arms(arms, a.runs, a.warmup, a.order, a.seed, a.shell,
+                               a.check_output, a.timeout, a.max_total, "bench")
+    bench["schema"] = "devkit-bench/1"
+    if oracle is not None:
+        bench["oracle"] = oracle
+    bench["runs"], bench["warmup"], bench["order_mode"] = a.runs, a.warmup, a.order
+    bench["meta"] = metadata(a.input, a.seed, a.repo)
+    warnings += startup_warnings(bench["arms"])
+    bench["warnings"] = warnings
+    if a.out:
+        try:
+            with open(a.out, "w", encoding="utf-8") as f:
+                json.dump(bench, f, indent=1)
+        except OSError as e:
+            warn("could not write %s (%s); the timings are printed below" % (
+                a.out, e.strerror or e))
+            a.out = None
+    result = None
+    if len(arms) >= 2:
         b, af = bench["arms"][names[0]], bench["arms"][names[1]]
         result = compare.analyze(b["wall"], af["wall"], min_effect, seed=a.seed)
+        compare.mark_invalid(result, bench.get("outputs_differ"))
         warnings = warnings + compare.protocol_warnings(
             result, {"before": b["cpu"], "after": af["cpu"]}, [bench["meta"]])
     for w in warnings:
@@ -384,8 +553,10 @@ def cmd_bench(args):
         if result is not None:
             bench["compare"] = compare.compare_json(result, source, warnings, [bench["meta"]],
                                                     names=names[:2])
+            if oracle is not None:
+                bench["compare"]["oracle"] = oracle
         print_json(bench)
-        return 0
+        return 1 if result is not None and result["verdict"] == "INVALID" else 0
     if result is None:
         arm = bench["arms"][names[0]]
         s = summarize_arm(arm["wall"], arm["cpu"])
@@ -403,7 +574,7 @@ def cmd_bench(args):
         compare.print_compare(result, source, names[:2])
     if a.out:
         print("wrote %s" % a.out)
-    return 0
+    return 1 if result is not None and result["verdict"] == "INVALID" else 0
 
 
 # ---------------------------------------------------------------- aa
@@ -419,7 +590,12 @@ def cmd_aa(args):
     p.add_argument("--resamples", type=int, default=5000,
                    help="bootstrap resamples for the ratio CI (default 5000)")
     p.add_argument("--shell", action="store_true", help="run the command through /bin/sh -c")
+    p.add_argument("--max-total", type=float, default=MAX_TOTAL, metavar="S",
+                   help="stop when the first runs project the A/A past S seconds (default %d; "
+                        "0 disables)" % MAX_TOTAL)
     p.add_argument("--save", action="store_true", help="write .devkit/aa.json for compare")
+    p.add_argument("--force", action="store_true",
+                   help="with --save, overwrite a saved floor measured with more runs")
     p.add_argument("--repo", default=None,
                    help="repository root for .devkit/ and git metadata (default: git top level)")
     p.add_argument("--json", action="store_true", help="print one JSON object")
@@ -428,10 +604,30 @@ def cmd_aa(args):
     if not argv:
         raise UsageError("give the command after --, for example: dev.py aa -- python3 bench.py")
     _check_runs(a.runs, a.warmup)
-    cmd = " ".join(argv) if a.shell else argv
+    if a.max_total < 0:
+        raise UsageError("--max-total must be >= 0 (0 disables the cap)")
+    cmd = " ".join(shlex.quote(x) for x in argv) if a.shell else argv
     if a.shell:
         note("--shell: /bin/sh startup is inside every timing")
-    bench, _ = run_arms([("a1", cmd), ("a2", cmd)], a.runs, a.warmup, "interleave", a.seed, a.shell)
+    if a.runs < 10:
+        warn("--runs %d is under 10; the noise floor from so few runs is itself noisy"
+             % a.runs)
+    root = path = None
+    if a.save:
+        root, root_note = repo_root(a.repo)
+        if root_note:
+            note(root_note)
+        path = os.path.join(devkit_dir(root, create=True), "aa.json")
+        old_runs = _saved_runs(path)
+        if old_runs is not None and old_runs > a.runs and not a.force:
+            raise UsageError("%s holds a floor measured with %d runs; --runs %d would replace "
+                             "it with a noisier one (pass --force to do it anyway)"
+                             % (path, old_runs, a.runs))
+    note("aa runs the command %d times (2 arms x (%d runs + %d warmup))" % (
+        2 * (a.runs + a.warmup), a.runs, a.warmup))
+    runs_note("aa", "`%s`" % (cmd if a.shell else " ".join(cmd)), 2 * (a.runs + a.warmup))
+    bench, _ = run_arms([("a1", cmd), ("a2", cmd)], a.runs, a.warmup, "interleave", a.seed,
+                        a.shell, max_total=a.max_total, what="aa")
     w1, w2 = bench["arms"]["a1"]["wall"], bench["arms"]["a2"]["wall"]
     ci = stats.bootstrap_ratio_ci(w1, w2, resamples=a.resamples, seed=a.seed)
     half = (ci["hi"] - ci["lo"]) / 2.0
@@ -443,13 +639,11 @@ def cmd_aa(args):
               "seed": a.seed, "resamples": a.resamples, "medians": [median(w1), median(w2)],
               "cv_percent": [stats.cv(w1), stats.cv(w2)], "sentence": sentence, "saved": None}
     if a.save:
-        root, root_note = repo_root(a.repo)
-        if root_note:
-            note(root_note)
-        path = os.path.join(devkit_dir(root, create=True), "aa.json")
+        env = environment()
+        saved = {k: record[k] for k in ("command", "min_effect", "ci", "runs", "timestamp")}
+        saved.update(platform=env["platform"], cpu_count=env["cpu_count"])
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({k: record[k] for k in ("command", "min_effect", "ci", "runs", "timestamp")},
-                      f, indent=1)
+            json.dump(saved, f, indent=1)
         record["saved"] = path.replace(os.sep, "/")
     if a.json:
         print_json(record)
@@ -461,6 +655,14 @@ def cmd_aa(args):
     if record["saved"]:
         print("saved %s; dev.py compare uses it for 7 days" % record["saved"])
     return 0
+
+
+def _saved_runs(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return int(json.load(f).get("runs"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
 # ---------------------------------------------------------------- scale
@@ -478,19 +680,78 @@ def parse_sizes(text):
     return sizes
 
 
-def scale_core(argv, sizes, runs, warmup, baseline, no_baseline, seed=0):
-    """Shared by dev.py scale and bench.py scale. Returns the result dict."""
+def pair_slopes(sizes, medians, baseline=0.0):
+    """log-log slope between each pair of consecutive sizes after the baseline; None for a
+    pair with a median inside the baseline."""
+    out = []
+    pts = sorted(zip(sizes, medians))
+    for (n1, m1), (n2, m2) in zip(pts, pts[1:]):
+        a, b = m1 - baseline, m2 - baseline
+        out.append(math.log(b / a) / math.log(float(n2) / n1) if a > 0 and b > 0 else None)
+    return out
+
+
+def slopes_rising(slopes):
+    """True when every consecutive-pair slope is at least RISING_RATIO x the one before, over
+    at least three pairs, and the last is above 2.5: growth no polynomial fit describes."""
+    if len(slopes) < 3 or any(x is None or x <= 0 for x in slopes):
+        return False
+    return all(b >= RISING_RATIO * a for a, b in zip(slopes, slopes[1:])) and slopes[-1] > 2.5
+
+
+def slope_warnings(slopes, exponent):
+    if slopes_rising(slopes):
+        return ["pairwise slopes keep rising (%s): the growth looks exponential, so one fitted "
+                "exponent means nothing; stop fitting and look for repeated subproblems "
+                "(dev.py catalog --id recursion-dp-memo) or an uncapped search "
+                "(SKILL.md step 1)" % ", ".join("%.2f" % x for x in slopes)]
+    known = [x for x in slopes if x is not None]
+    if exponent is not None and 1.3 <= exponent < 1.7 and len(known) >= 2 and \
+            all(b > a for a, b in zip(known, known[1:])):
+        return ["exponent %.2f with slopes rising toward the largest size (%s): a mix of terms "
+                "such as a*n + b*n^2; measure larger sizes, or profile at the production n and "
+                "take the hot frame's share there (measurement.md section 2)"
+                % (exponent, ", ".join("%.2f" % x for x in known))]
+    return []
+
+
+def _projected_exponent(sizes_done, medians, baseline):
+    """Exponent for projecting the next size: 2 with one size; else the last pair's slope
+    (at least 1), extrapolated by its rise when slopes are rising."""
+    if len(sizes_done) < 2:
+        return 2.0
+    slopes = [x for x in pair_slopes(sizes_done, medians, baseline) if x is not None]
+    if not slopes:
+        return 2.0
+    e = max(slopes[-1], 1.0)
+    if len(slopes) >= 2 and slopes[-1] > slopes[-2]:
+        e += slopes[-1] - slopes[-2]
+    return e
+
+
+def scale_core(argv, sizes, runs, warmup, baseline, no_baseline, seed=0, timeout=None,
+               progress=False, max_total=None):
+    """Shared by dev.py scale and bench.py scale. Returns the result dict. With progress, a
+    line per size goes to stderr, and an estimate of the rest after each size (quadratic
+    after the first, the slope fitted so far after that). With max_total (seconds), the
+    next size is not started when its projected cost would pass the cap: CommandFailed names
+    the largest affordable size."""
     if baseline and no_baseline:
         raise UsageError("--baseline and --no-baseline contradict each other; pass one")
     if not any("{n}" in x for x in argv):
-        raise UsageError("the command must contain {n} somewhere for scale to substitute the size")
+        raise UsageError("the command has no {n} for scale to substitute the size; quote it "
+                         "as '{n}' (zsh drops an unquoted {n} that comes before a redirect such "
+                         "as > out.json)")
     warnings = []
     if len(sizes) < 3:
         warnings.append("only %d sizes; use at least three (four recommended) so the fit has "
                         "a residual" % len(sizes))
     baseline_cmd = None
     if baseline:
-        baseline_cmd = shlex.split(baseline)
+        try:
+            baseline_cmd = shlex.split(baseline)
+        except ValueError as e:
+            raise UsageError("cannot split --baseline %r: %s (check the quotes)" % (baseline, e))
         if not baseline_cmd:
             raise UsageError("--baseline needs a non-empty command")
     elif not no_baseline:
@@ -498,28 +759,70 @@ def scale_core(argv, sizes, runs, warmup, baseline, no_baseline, seed=0):
         if baseline_cmd is None:
             warnings.append("no startup baseline known for %r; pass --baseline 'CMD' or make "
                             "the smallest median at least 0.5 s" % argv[0])
+    if progress:
+        runs_note("scale", "`%s`" % " ".join(argv), (runs + warmup) * len(sizes))
     base = None
     if baseline_cmd is not None:
-        bw, bc = time_many(baseline_cmd, runs, warmup)
+        bw, bc = time_many(baseline_cmd, runs, warmup, timeout=timeout)
         base = summarize_arm(bw, bc)
         base["command"] = baseline_cmd
+    base_median = base["median"] if base else 0.0
     rows, per_size = [], []
-    for n in sizes:
+    t0 = time.perf_counter()
+    per = runs + warmup
+    for i, n in enumerate(sizes):
+        if i and max_total:
+            done = [r["n"] for r in rows]
+            meds = [r["median"] for r in rows]
+            e = _projected_exponent(done, meds, base_median)
+            last_n, last_m = done[-1], meds[-1]
+            cost = last_m * (float(n) / last_n) ** e * per
+            spent = time.perf_counter() - t0
+            if spent + cost > max_total:
+                room = max(max_total - spent, 0.0) / (max(last_m, 1e-9) * per)
+                fit = int(last_n * room ** (1.0 / e)) if room > 0 else 0
+                so_far = ", ".join("n=%d %s" % (r["n"], fmt_time(r["median"])) for r in rows)
+                raise CommandFailed(
+                    "n=%d would take about %s (%d runs at exponent %.2f fitted so far), past "
+                    "--max-total %s with %s spent; measured so far: %s. The largest size that "
+                    "fits is about n=%d; pass --runs 3, smaller sizes or a larger --max-total "
+                    "(run it in the background with --json to a file)"
+                    % (n, fmt_time(cost), per, e, fmt_time(max_total), fmt_time(spent), so_far,
+                       fit))
         cmd = [x.replace("{n}", str(n)) for x in argv]
-        w, c = time_many(cmd, runs, warmup)
+        w, c = time_many(cmd, runs, warmup, timeout=timeout)
         s = summarize_arm(w, c)
         s["n"] = n
         s["times"] = w
         rows.append(s)
         per_size.append(w)
-    base_median = base["median"] if base else 0.0
+        if progress:
+            sys.stderr.write("scale: n=%d median %s (%d of %d sizes, %s elapsed)\n" % (
+                n, fmt_time(s["median"]), i + 1, len(sizes), fmt_time(time.perf_counter() - t0)))
+            rest = sizes[i + 1:]
+            if rest:
+                e = _projected_exponent([r["n"] for r in rows], [r["median"] for r in rows],
+                                        base_median)
+                est = sum(s["median"] * (m / float(n)) ** e for m in rest) * per
+                basis = ("if time grows quadratically" if i == 0 else
+                         "at the exponent %.2f fitted so far" % e)
+                sys.stderr.write("scale: the remaining sizes take about %s %s (%d runs each); "
+                                 "for slow sizes use --runs 3 or smaller sizes\n"
+                                 % (fmt_time(est), basis, per))
+            sys.stderr.flush()
     exponent, more = scale_exponent(sizes, [r["median"] for r in rows], base_median)
     warnings.extend(more)
+    raw = None
+    if exponent is not None:
+        raw = stats.loglog_slope(sizes, [r["median"] - base_median for r in rows])
     ci = stats.exponent_ci(sizes, per_size, base_median, seed=seed) if exponent is not None else None
+    slopes = pair_slopes(sizes, [r["median"] for r in rows], base_median)
+    warnings.extend(slope_warnings(slopes, raw))
     largest = max(rows, key=lambda r: r["n"])
-    return {"sizes": rows, "baseline": base, "exponent": exponent,
+    return {"sizes": rows, "baseline": base, "exponent": exponent, "exponent_raw": raw,
             "exponent_ci": list(ci) if ci else None,
-            "class": classify_exponent(exponent) if exponent is not None else None,
+            "class": classify_exponent(raw) if raw is not None else None,
+            "pair_slopes": slopes, "slopes_rising": slopes_rising(slopes),
             "warnings": warnings, "command": argv, "gate1": gate1_line(largest), "seed": seed}
 
 
@@ -538,6 +841,12 @@ def print_scale(res):
             res["exponent"], res["class"], res["exponent_ci"][0], res["exponent_ci"][1]))
     else:
         print("Exponent: %.2f (%s)" % (res["exponent"], res["class"]))
+    slopes = res.get("pair_slopes") or []
+    if slopes:
+        print("Pairwise slopes: %s%s" % (", ".join("n/a" if x is None else "%.2f" % x
+                                                     for x in slopes),
+                                          " (rising: exponential, see the warning)"
+                                          if res.get("slopes_rising") else ""))
     largest = max(res["sizes"], key=lambda r: r["n"])
     print("Gate 1 at n=%d: %s" % (largest["n"], res["gate1"]))
 
@@ -553,13 +862,23 @@ def cmd_scale(args):
     p.add_argument("--warmup", type=int, default=DEFAULT_WARMUP,
                    help="untimed runs per size first (default %d)" % DEFAULT_WARMUP)
     p.add_argument("--seed", type=int, default=0, help="bootstrap seed for the CI (default 0)")
+    p.add_argument("--timeout", type=float, default=None, help="seconds per run before it is "
+                   "killed (the scale fails with exit 1)")
+    p.add_argument("--max-total", type=float, default=MAX_TOTAL, metavar="S",
+                   help="do not start a size whose projected cost would pass S seconds in all "
+                        "(default %d; 0 disables)" % MAX_TOTAL)
+    p.add_argument("--quiet", action="store_true", help="no progress lines on stderr")
     p.add_argument("--json", action="store_true", help="print one JSON object")
     opts, argv = split_dashes(args)
     a = p.parse_args(opts)
     if not argv:
-        raise UsageError("give the command after --; every {n} in it is replaced by the size")
+        raise UsageError("give the command after --; every {n} in it is replaced by the size "
+                         "(quote it as '{n}' in zsh)")
     _check_runs(a.runs, a.warmup)
-    res = scale_core(argv, parse_sizes(a.sizes), a.runs, a.warmup, a.baseline, a.no_baseline, a.seed)
+    if a.max_total < 0:
+        raise UsageError("--max-total must be >= 0 (0 disables the cap)")
+    res = scale_core(argv, parse_sizes(a.sizes), a.runs, a.warmup, a.baseline, a.no_baseline,
+                     a.seed, timeout=a.timeout, progress=not a.quiet, max_total=a.max_total)
     for w in res["warnings"]:
         warn(w)
     if a.json:
@@ -575,7 +894,17 @@ def cmd_scale(args):
 
 
 def load_series(path):
-    """[(label, value)] from one-number-per-line, label,value CSV, or JSON."""
+    """[(label, value)] from one-number-per-line, label,value CSV, or JSON. A non-finite value
+    (nan, inf) is a usage error naming its position: one NaN would hide every step."""
+    pairs = _load_series(path)
+    for i, (label, v) in enumerate(pairs):
+        if v != v or v in (float("inf"), float("-inf")):
+            raise UsageError("%s: value %d (label %s) is %r; a non-finite value hides every "
+                             "change point, so remove or fix it" % (path, i, label, v))
+    return pairs
+
+
+def _load_series(path):
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()

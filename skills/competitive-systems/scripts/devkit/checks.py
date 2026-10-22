@@ -19,10 +19,10 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 
-from devkit.affected import _rel, affected, gather_changed
-from devkit.common import (GroupTimer, Parser, UsageError, devkit_dir, fmt_time,
-                           kill_group, load_config, note, print_json, repo_root, start_group,
-                           to_posix, wait_unreaped)
+from devkit.affected import _rel, affected, gather_changed, warn_if_empty
+from devkit.common import (GroupTimer, Parser, UsageError, devkit_dir, first_match, fmt_time,
+                           is_test_data, kill_group, load_config, note, print_json, repo_root,
+                           start_group, to_posix, wait_unreaped)
 from devkit.detect import (LANG_ORDER, PYTHON, detect, display_of, js_exec, language_of,
                            resolve, safe_path, skip_hint, unittest_pieces)
 
@@ -286,6 +286,16 @@ def map_gate(root):
     return gate("map", None, "pass", command="dev.py map --check", seconds=secs), None
 
 
+UNSUPPORTED = ("no language dev.py supports was detected (Python, TypeScript/JavaScript, Go, "
+               "Rust), so no gate can run; use the repository's own build and test commands")
+
+
+def executed(gates):
+    """Gates that ran a command (a pass or fail), not skipped or covered by another gate."""
+    return [g for g in gates if g["status"] in ("pass", "fail")
+            and not str(g.get("command") or "").startswith("(")]
+
+
 def run_check(root, changed, cfg=None, info=None, strict=False, no_tests=False, timeout=None):
     cfg = cfg if cfg is not None else load_config(root)
     info = info if info is not None else detect(root, cfg)
@@ -317,9 +327,12 @@ def run_check(root, changed, cfg=None, info=None, strict=False, no_tests=False, 
             if res["mode"] == "none":
                 notes.append("tests: none affected (%s)" % res["reason"])
             else:
+                tg = test_gates(root, info, cfg, res, timeout)
                 if res["mode"] == "full":
-                    notes.append("tests: full run (%s)" % res["reason"])
-                gates.extend(test_gates(root, info, cfg, res, timeout))
+                    notes.append(("tests: full run (%s)" if tg else
+                                  "tests: a full run is required (%s), but no detected "
+                                  "language can run it") % res["reason"])
+                gates.extend(tg)
     if not failed():
         g, n = map_gate(root)
         if g:
@@ -328,10 +341,20 @@ def run_check(root, changed, cfg=None, info=None, strict=False, no_tests=False, 
             notes.append(n)
     bad = [g for g in gates if g["status"] == "fail"]
     skipped = [g for g in gates if g["status"] == "skipped"]
+    relevant = [p for _, p, _ in changed
+                if not first_match(cfg["ignore"], p) or is_test_data(p)]
+    if relevant and not info["languages"]:
+        notes.append(UNSUPPORTED)
+    result["executed"] = len(executed(gates))
     if bad:
         result.update(status="fail", failed_gate=gate_label(bad[0]))
+    elif relevant and not result["executed"]:
+        result.update(status="fail", failed_gate="nothing was checked: %d relevant changed "
+                      "file(s) and no gate ran" % len(relevant))
     elif strict and skipped:
         result.update(status="fail", failed_gate=gate_label(skipped[0]) + " (skipped, --strict)")
+    elif strict and not changed:
+        result.update(status="fail", failed_gate="no changed files (--strict)")
     result["skipped"] = len(skipped)
     return result
 
@@ -385,6 +408,7 @@ def cmd_check(args):
     a = p.parse_args(args)
     root = _setup(a)
     changed = gather_changed(root, a.files, a.base)
+    warn_if_empty(changed, a.files, a.base)
     res = run_check(root, changed, strict=a.strict, no_tests=a.no_tests, timeout=a.timeout)
     if a.json:
         print_json(res)
@@ -393,8 +417,15 @@ def cmd_check(args):
         for n in res["notes"]:
             print("note: " + n)
         if res["status"] == "pass":
-            print("check: PASS (%d file(s), %d gate(s) skipped)" % (len(res["files"]),
-                                                                    res["skipped"]))
+            tests_ran = any(g["name"] == "tests" for g in executed(res["gates"]))
+            extra = ""
+            if res["skipped"]:
+                extra = "; --strict fails on a skipped gate"
+            aff = res["affected"]
+            if not tests_ran and aff and aff["mode"] != "none":
+                extra += "; no tests ran"
+            print("check: PASS (%d file(s), %d gate(s) ran, %d skipped%s)" % (
+                len(res["files"]), res["executed"], res["skipped"], extra))
         else:
             print("check: FAIL at %s" % res["failed_gate"])
     return 0 if res["status"] == "pass" else 1
@@ -414,8 +445,11 @@ def _single(name, args):
         changed = [("M", f, None) for f in info["files"]]
     else:
         changed = gather_changed(root, a.files, a.base)
+        warn_if_empty(changed, a.files, a.base)
     per_lang = stage_files(root, info, cfg, changed)
     notes = []
+    if not info["languages"] and changed:
+        notes.append(UNSUPPORTED)
     if name == "typecheck":
         for lang in list(per_lang):
             st = resolve(info, lang, name, cfg)
@@ -426,6 +460,8 @@ def _single(name, args):
     bad = [g for g in gates if g["status"] == "fail"]
     skipped = [g for g in gates if g["status"] == "skipped"]
     status = "fail" if bad or (a.strict and skipped) else "pass"
+    if not info["languages"] and changed:
+        status = "fail"
     if a.json:
         print_json({"schema": "devkit-%s/1" % name, "status": status, "gates": gates,
                     "notes": notes, "files": [p for _, p, _ in changed] if not a.all else None})
@@ -723,6 +759,18 @@ def record_plan(st, info, lang, tmp, extra_args):
         return argv, False, "unittest", report, None, None
     if runner in ("vitest", "jest"):
         pm = facts.get("package_manager") or "npm"
+        script = (facts.get("scripts") or {}).get("test")
+        if st["pieces"][0]["argv"][1:2] == ["run"] and isinstance(script, str):
+            try:
+                words = shlex.split(script)
+            except ValueError:
+                words = None
+            if words not in ([runner], [runner, "run"]):
+                msg = ("per-test recording needs a bare `%s` test script; `%s` sets flags, "
+                       "config or environment that a direct %s call would drop, so the script "
+                       "runs as written and only its wall time is recorded" % (
+                           runner, script, runner))
+                return full_argv(st, extra_args), False, None, None, None, msg
         if runner == "vitest":
             argv = js_exec(pm, "vitest") + ["run", "--reporter=json", "--outputFile=" + report]
         else:
@@ -778,7 +826,10 @@ def run_tests(root, info, cfg, lang, record, extra_args, stream=True, timeout=No
         grouped = not extra_args and st.get("runner") == "unittest" and bool(unittest_groups(st))
         if record or grouped:       # several unittest runs: the group driver runs them all
             cmd, shell, kind, report, filt, msg = record_plan(st, info, lang, tmp, extra_args)
-            if msg:
+            if msg and stream:              # before the run, so the header is not misread
+                sys.stdout.write("note: %s\n" % msg)
+                sys.stdout.flush()
+            elif msg:
                 res["notes"].append(msg)
         else:
             kind = report = filt = None

@@ -7,8 +7,10 @@ suite validates every record against. The state layout is in
 
 ## result.json
 
-Version 3. Every v2 field keeps its name and meaning; `agent-session schema
-result` prints the JSON Schema. A v2 file written by an earlier release is still
+Version 3 (`version` is the record format, numbered independently of the skill
+release; v2 was the previous format). Every v2 field keeps its name and
+meaning; `agent-session schema result` prints the JSON Schema. A v2 file
+written by an earlier release is still
 read by `list`, `status`, `result`, `wait` and `reap`; the fields it lacks read
 as null (or an empty list) and the file is not rewritten.
 
@@ -22,7 +24,7 @@ as null (or an empty list) and the file is not rewritten.
   "failure_class": null,
   "reason": "present when status != ok",
   "exit_code": 0,
-  "turns": 1, "failed_turns": [{"turn": 2, "status": "timeout"}], "interrupted_turns": [], "attempts": 1, "retries": [], "resumes": [],
+  "turns": 2, "failed_turns": [{"turn": 2, "status": "timeout"}], "interrupted_turns": [], "attempts": 1, "retries": [], "resumes": [],
   "started_iso": "...", "finished_iso": "...", "duration_s": 103.5,
   "answer": "the engine's final message", "answer_chars": 1834, "answer_file": ".../turns/1.answer.txt",
   "structured_output": null, "schema_valid": null, "schema_file": null,
@@ -32,7 +34,7 @@ as null (or an empty list) and the file is not rewritten.
   "budget": {"usd_limit": null, "tokens_limit": null, "turns_limit": null, "deadline_iso": null, "ledger": null, "ledger_remaining_usd": null},
   "verify": null,
   "git": {"branch": "agent-session/audit-auth", "base_commit": "...", "head_commit": "...", "commits": 1,
-          "files_changed": 2, "insertions": 3, "deletions": 0, "dirty": false, "changed_files": ["README.md"]},
+          "files_changed": 2, "insertions": 3, "deletions": 0, "dirty": false, "changed_files": ["README.md", "src/auth.py"]},
   "pipeline": null,
   "warnings": [],
   "worktree": {"path": "...", "branch": "agent-session/audit-auth", "root": "...", "base_commit": "...", "prefix": "",
@@ -44,10 +46,12 @@ as null (or an empty list) and the file is not rewritten.
 
 Status rules: `killed` when a kill marker was honoured or the runner was
 signalled (tmux dying sends SIGHUP; the runner then kills the engine and
-records this); `timeout` when a one-shot child's turn exceeded `--timeout`;
+records this); `timeout` when a one-shot child's turn exceeded `--timeout`, or
+the child reached its `--deadline`;
 `lost` when the backend (tmux session, or the runner process) is gone with no
 result (written by `wait`, `result`, `status`, `reap` or `recover`); `error`
-with `ended dependency` when an upstream of `--after` failed; otherwise `error` if any turn is non-ok (a steerable child with one
+with `ended dependency` when an upstream of `--after` failed; otherwise
+`error` if any turn is non-ok (a steerable child with one
 timed-out turn is `error` with that turn listed), else `ok`.
 
 `failure_class` is null when `status` is `ok`, else exactly one of
@@ -67,15 +71,19 @@ result has a null `failure_class`, and `ended dependency` implies
 `deadline_iso`), the tree `ledger` id and `ledger_remaining_usd` when the
 child ran under a ledger.
 
-`usage` is summed over turns. `input_tokens` excludes cached tokens for every
-engine, so `total = input + cached + output`: claude `result.usage` (with
-`modelUsage` preferred when present, since it includes subagents), codex
+`usage` is summed over turns. `input_tokens` excludes cached tokens, so
+`total = input + cached + output` for claude and codex: claude `result.usage`
+(with `modelUsage` preferred when present, since it includes subagents), codex
 `turn.completed.usage` (its `input_tokens` includes the cached share, which is
-subtracted), gemini `result.stats` (documented shape). An engine that reported
+subtracted). `reasoning_output_tokens` is codex's count of the reasoning part
+of `output_tokens`: reported, already inside `output_tokens`, not added again.
+Gemini's `result.stats` (documented shape) passes the engine's own
+`total_tokens` through when it gives one. An engine that reported
 nothing leaves zeros and adds `"usage not reported by engine"` to `warnings`.
 `cost_usd`: claude's `total_cost_usd` with `cost_source: "engine"`; codex and
 gemini `null` unless `AGENT_SESSIONS_<ENGINE>_PRICE` is set, then an estimate
-with `cost_source: "estimate"`.
+with `cost_source: "estimate"`. A null cost with non-zero tokens means "spent,
+amount unknown": report the tokens, never $0 (the views print `cost: unknown`).
 
 `git` is present for worktree children only, computed after the last turn:
 counts from `git diff --numstat <base_commit>` (committed plus uncommitted
@@ -85,7 +93,11 @@ at 500 (a warning notes the cap). `warnings` entries are actionable strings:
 readonly denials (`"2 tool calls denied under --readonly: Read /tmp/x ..."`
 from claude `system/permission_denied` events or the result's
 `permission_denials`; codex and gemini have no equivalent signal), usage not
-reported, changed_files capped, schema keywords not enforced. `judge.json`,
+reported, changed_files capped, schema keywords not enforced, engine events
+that could not be parsed, processes left in the engine's group that were
+terminated, and for a worktree child a dirty worktree (the uncommitted paths,
+plus the repository's commit hooks or signing when it has them) or a parent
+tree whose dirty paths changed during the run. `judge.json`,
 when a judge has run, is merged under `judge` by `result --json` and
 `status --json` only; it is not stored in result.json.
 
@@ -111,10 +123,10 @@ when a judge has run, is merged under `judge` by `result --json` and
 | `usage` | object | `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens`, summed over turns |
 | `cost_usd`, `cost_source` | number, enum | `engine` (claude), `estimate` (from a configured price), or null |
 | `budget` | object | `usd_limit`, `tokens_limit`, `turns_limit`, `deadline_iso`, `ledger`, `ledger_remaining_usd` |
-| `verify` | object or null | `command`, `status` (`pass`, `fail`, `error`, `skipped`), `exit_code`, `duration_s`, `output_tail`, `output_file`, `attempts` |
+| `verify` | object or null | `command`, `status` (`pass`, `fail`, `error`, `skipped`), `exit_code`, `duration_s`, `output_tail`, `output_file`, `attempts`, and `error` (why it could not complete) when `status` is `error` |
 | `git` | object or null | worktree children: `branch`, `base_commit`, `head_commit`, `commits`, `files_changed`, `insertions`, `deletions`, `dirty`, `changed_files` |
 | `pipeline` | object or null | `--after` children: `{"after": [...], "upstream": {"a": "ok"}}` |
-| `warnings` | list of strings | actionable notes: read-only denials, lingering engine terminated, usage not reported, `changed_files` capped, schema keywords not enforced, `--copy` failures, hook failures |
+| `warnings` | list of strings | actionable notes: read-only denials, lingering engine terminated, leftover processes terminated, unparsed engine events, usage not reported, `changed_files` capped, schema keywords not enforced, `--copy` failures, hook failures |
 | `worktree` | object or null | `path`, `branch`, `root`, `base_commit`, `base_ref`, `prefix` |
 | `stderr_tail` | string | last 4000 characters of stderr, only when not `ok` |
 | `judge` | object | only in `result --json` and `status --json` output, merged from `judge.json` |
@@ -146,7 +158,8 @@ for every permission denial the engine reported.
 ## events.jsonl
 
 One object per line, appended by the runner for every child:
-`{"ts": 1760000000.123, "iso": "...", "turn": 1, "attempt": 1, "type": "<kind>", "text": "...", "data": {...}}`.
+`{"ts": 1760000000.123, "iso": "...", "turn": 1, "attempt": 1, "type":
+"<kind>", "text": "...", "data": {...}}`.
 `turn` is null for lifecycle lines outside a turn; `data` is the structured
 payload (tool name and input, usage, exit codes) or null. `log` renders
 `text`; `events` prints the objects; `schema event` prints the schema. The
@@ -181,9 +194,15 @@ verdict:
   "findings": [{"severity": "high", "file": "src/auth.ts", "line": 42, "issue": "...", "fix": "..."}],
   "judged_at_iso": "...", "judge_child": "x-judge", "judge_finished_iso": "...",
   "judged_run": {"finished_iso": "...", "session_id": "..."},
+  "diff_note": "1 path already uncommitted at spawn left out (README.md)",
   "untrusted": "..."
 }
 ```
+
+`diff_note` says what `judge/diff.patch` did not show (paths the user had
+uncommitted when a shared-tree child started, untracked files over the limit,
+a capped diff), or is null. `cost_usd` is null for a codex or gemini judge
+without a price; its tokens are in `<name>-judge`'s result.
 
 `judged_run` names the run of the judged child the verdict applies to; a
 resumed or replaced child gets a new `finished_iso`, so an old verdict never
@@ -196,8 +215,12 @@ passes for new work. The verdict part follows JUDGE_SCHEMA
 
 ```json
 {"name": "feat", "kind": "best-of", "members": ["feat-1", "feat-2", "feat-3"], "engines": ["claude", "codex", "claude"],
- "created_iso": "...", "owner": "...", "dir": "/repo", "winner": "feat-1", "selection": [...], "selected_iso": "..."}
+ "created_iso": "...", "owner": "...", "dir": "/repo", "ledger": null, "winner": "feat-1", "selection": [...],
+ "selected_iso": "..."}
 ```
+
+`ledger` is the group's one tree budget when it was spawned with
+`--tree-budget-usd` or `--tree-max-tokens`, else null.
 
 `selection` holds the rows `select` ranked (member, engine, status, verify,
 judge, insertions, deletions, failed turns, retries, cost, branch).
@@ -218,7 +241,8 @@ judge, insertions, deletions, failed turns, retries, cost, branch).
  "created_iso": "..."}
 ```
 
-`pauses/<engine>.json`, written after a rate or usage limit:
+`pauses/<engine>.json`, written after a rate or usage limit (`until_iso` is
+`until_epoch` in local time):
 
 ```json
 {"until_epoch": 1760000000, "until_iso": "...", "reason": "usage limit", "by": "x", "written_iso": "..."}
@@ -239,8 +263,12 @@ once, at spawn and in `warnings`, so a schema that relies on `format` or
 
 For a codex child, write the schema in the strict form OpenAI structured
 output requires: every object with `"additionalProperties": false` and every
-property listed in `required`, optional values typed as nullable. JUDGE_SCHEMA
-is written that way. Claude and the local validator accept either form.
+property listed in `required`, optional values typed as nullable
+(`{"type": ["string", "null"]}`). `spawn codex ... --schema` checks this and
+refuses (exit 2) a schema that is not strict, naming each path
+(`$.files[]: "required" must list why`), instead of letting the first turn
+fail. JUDGE_SCHEMA is written that way. Claude and the local validator accept
+either form.
 
 Extraction order for the object: the engine's own `structured_output` (claude),
 then the whole answer parsed as JSON, then the first fenced json block in the

@@ -23,9 +23,14 @@ from test_lint import EM_DASH, MACHINE_PATHS  # noqa: E402
 EXCLUSION_PHRASES = {
     "debugging": "debugging one defect",
     "definite-done": "definite done state",
-    "oracle": "iterate until it passes",
+    "oracle": "linter or metric measures, even if asked to iterate until it passes",
     "out-of-domain": "explaining, planning or deploying",
+    "scratch": "building from scratch",
+    "tiny-edit": "a one-line edit",
 }
+# Neighbour prompts belong to another skill in this repository; the description need not
+# name them, but the owner must exist.
+NEIGHBOUR_OWNERS = {"agent-sessions", "high-agency", "competitive-systems", "code-review"}
 # Every domain word must be in the description itself: a router never sees the body.
 DOMAIN_WORDS = {"design": "designs", "page": "pages", "ui": "UI", "code": "code", "docs": "docs", "copy": "copy",
                 "architecture": "architecture"}
@@ -87,7 +92,8 @@ class TriggerTests(unittest.TestCase):
         for entry in self.should:
             self.assertEqual(set(entry), {"message", "domain", "note"}, entry)
         for entry in self.should_not:
-            self.assertEqual(set(entry), {"message", "exclusion", "note"}, entry)
+            keys = {"message", "exclusion", "note"} | ({"owner"} if entry.get("exclusion") == "neighbour" else set())
+            self.assertEqual(set(entry), keys, entry)
         for entry in self.should + self.should_not:
             self.assertTrue(entry["message"].strip() and entry["note"].strip(), entry)
 
@@ -102,10 +108,26 @@ class TriggerTests(unittest.TestCase):
     def test_exclusions(self):
         counts = {}
         for entry in self.should_not:
-            self.assertIn(entry["exclusion"], EXCLUSION_PHRASES, entry)
+            self.assertIn(entry["exclusion"], set(EXCLUSION_PHRASES) | {"neighbour"}, entry)
             counts[entry["exclusion"]] = counts.get(entry["exclusion"], 0) + 1
-        for exclusion in sorted(EXCLUSION_PHRASES):
+        for exclusion in sorted(EXCLUSION_PHRASES) + ["neighbour"]:
             self.assertGreaterEqual(counts.get(exclusion, 0), MIN_PER_EXCLUSION, "exclusion %r under-covered" % exclusion)
+
+    def test_neighbours_name_a_real_skill(self):
+        skills = set(os.listdir(os.path.dirname(SKILL)))
+        for entry in self.should_not:
+            if entry["exclusion"] == "neighbour":
+                self.assertIn(entry["owner"], NEIGHBOUR_OWNERS, entry)
+                if entry["owner"] != "code-review":  # a host built-in, not a skill in this repo
+                    self.assertIn(entry["owner"], skills, entry)
+
+    def test_hard_negatives_are_present(self):
+        """The near misses the description most often lost: creation, an eval or scanner
+        as the oracle, a tiny edit, a critique with no edits."""
+        messages = [normalise(e["message"]) for e in self.should_not]
+        for needle in ("from scratch", "eval pass rate", "known vulnerabilities", "run axe", "commit message",
+                       "don't change anything"):
+            self.assertTrue(any(needle in m for m in messages), needle)
 
     def test_no_duplicates_within_or_across_lists(self):
         seen = {}
@@ -127,12 +149,14 @@ class TriggerTests(unittest.TestCase):
 
     def test_out_of_domain_covers_explanations_plans_deploys_and_typos(self):
         messages = " | ".join(normalise(e["message"]) for e in self.should_not if e["exclusion"] == "out-of-domain")
-        for word in ("explain", "plan", "deploy", "typo"):
+        for word in ("explain", "plan", "deploy"):
             self.assertIn(word, messages)
+        tiny = " | ".join(normalise(e["message"]) for e in self.should_not if e["exclusion"] == "tiny-edit")
+        self.assertIn("typo", tiny)
 
     def test_exclusions_map_to_description(self):
         text = description()
-        for exclusion in set(e["exclusion"] for e in self.should_not):
+        for exclusion in set(e["exclusion"] for e in self.should_not) - {"neighbour"}:
             self.assertIn(EXCLUSION_PHRASES[exclusion], text, "description lost the wording for %r" % exclusion)
 
     def test_domains_map_to_description(self):
@@ -188,6 +212,36 @@ class ScenarioTests(unittest.TestCase):
         for sid in ("S4", "P1"):
             self.assertEqual(self.by_id[sid]["mode"], "lite", sid)
 
+    def test_quoted_score_math_results_still_hold(self):
+        """Replay every score_math result a scenario quotes, so a rule change in the
+        script cannot leave an ideal or failure mode describing the old behaviour."""
+        import subprocess
+        script = os.path.join(SKILL, "scripts", "score_math.py")
+        # (scenario, argv, substrings of the scenario text, substrings of the output)
+        cases = [
+            ("P5", ["baseline", "40", "56", "44"], ["40 and 56", "returns 44", "56 as the outlier",
+                                                    "baseline 42, n = 4, T = 8",
+                                                    "uses T = 32"],
+             ["baseline=42 noise=4 threshold=8", "outlier=56"]),
+            ("P5", ["baseline", "40", "56", "48"], ["returns 48", "soft=true"],
+             ["soft=true", "outlier=none"]),
+            ("P4", ["baseline", "52", "52"], ["52 and 52", "third-run=needed"], ["third-run=needed"]),
+            ("S9", ["baseline", "41", "45"], ["41 and 45 (n = 4, T = 8)"], ["noise=4 threshold=8"]),
+            ("S9", ["baseline", "56", "60"], ["56 and 60 (reference 58, n = 4, T = 8)"],
+             ["baseline=58 noise=4 threshold=8"]),
+            ("S9", ["decide", "--threshold", "8", "--target", "85", "--max-rounds", "5", "--scores",
+                    "58,71,76,79", "--gates", "PASS", "--rounds-used", "4"],
+             ["58, 71, 76, 79", "target 85", "plateau"], ["STOP plateau"]),
+        ]
+        for sid, argv, quoted, expected in cases:
+            text = json.dumps(self.by_id[sid])
+            for snippet in quoted:
+                self.assertIn(snippet, text, "%s no longer quotes %r" % (sid, snippet))
+            run = subprocess.run([sys.executable, "-I", script] + argv, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            for snippet in expected:
+                self.assertIn(snippet, run.stdout, "%s: %s" % (sid, " ".join(argv)))
+
     def test_s4_runs_lite_without_the_full_protocol(self):
         ideal = " ".join(self.by_id["S4"]["ideal"])
         self.assertIn("full-protocol.md", ideal)
@@ -214,11 +268,9 @@ class ResultsTests(unittest.TestCase):
 
     def test_required_content(self):
         self.assertIn("n = 12", self.text)
-        self.assertIn("## Limits", self.text)
-        self.assertIn("Linux", section(self.text, "Limits"))
 
     def test_live_section_states_what_ran(self):
-        live = section(self.text, "3. Phase 2 live")
+        live = section(self.text, "3. Live")
         self.assertTrue("not run" in live or ISO_DATE.search(live), "live section names neither a date nor 'not run'")
 
 

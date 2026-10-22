@@ -145,6 +145,17 @@ REGISTRY = {
     "incremental": "RepeatedWorkTests.test_incremental_vs_full_recompute",
     "RangeIndex": "RepeatedWorkTests.test_range_index_vs_linear_scan",
     "Coalescer": "RepeatedWorkTests.test_coalescer_one_fetch_per_key",
+    "merge_cost": "StructureTests.test_heap_sketches_vs_list_versions",
+    "k_way_merge": "StructureTests.test_heap_sketches_vs_list_versions",
+    "running_medians": "StructureTests.test_heap_sketches_vs_list_versions",
+    "count_in_range": "StructureTests.test_ordered_index_vs_rescan",
+    "Fenwick": "StructureTests.test_ordered_index_vs_rescan",
+    "pairs_within": "StructureTests.test_spatial_grid_vs_all_pairs",
+    "bfs_dist": "StructureTests.test_shortest_paths_vs_bellman_ford",
+    "dijkstra": "StructureTests.test_shortest_paths_vs_bellman_ford",
+    "count_ways": "StructureTests.test_dp_sketches_vs_naive_recursion",
+    "count_ways_memo": "StructureTests.test_dp_sketches_vs_naive_recursion",
+    "edit_distance": "StructureTests.test_dp_sketches_vs_naive_recursion",
 }
 
 
@@ -395,11 +406,16 @@ class CiTests(unittest.TestCase):
         ns = load(CI_CARD, "Impact-based test selection",
                   reverse_graph=g["reverse_graph"], impact_set=g["impact_set"])
         sensitive = {"conftest.py", "requirements.lock"}
+        is_sensitive = lambda p: p.rsplit("/", 1)[-1] in sensitive
+        is_ignored = lambda p: p.endswith(".md") or p.startswith("docs/")
 
         def select(changed, graph, tests):
             ns["git_diff_names"] = lambda base, head: list(changed)
-            return ns["select_tests"]("base", "head", graph, tests, lambda p: p in sensitive,
-                                      lambda p: p.endswith(".md"))
+            return ns["select_tests"]("base", "head", graph, tests, is_sensitive, is_ignored)
+
+        # a path on both lists is sensitive: the check runs before the ignore filter
+        self.assertEqual(select(["docs/conftest.py"], {"test_a.py": ["a.py"]}, ["test_a.py"]),
+                         ["test_a.py"])
 
         rng = random.Random(31)
         for _ in range(300):
@@ -410,11 +426,12 @@ class CiTests(unittest.TestCase):
             for f in files:
                 if rng.random() < 0.6:
                     graph[f] = rng.sample(files, rng.randint(0, 2))
-            universe = files + tests + ["conftest.py", "docs/a.md", "deleted_or_new.py"]
+            universe = files + tests + ["conftest.py", "docs/a.md", "deleted_or_new.py",
+                                        "docs/conftest.py"]
             changed = rng.sample(universe, rng.randint(0, 4))
-            relevant = [p for p in changed if not p.endswith(".md")]
+            relevant = [p for p in changed if not is_ignored(p)]
             nodes = set(graph) | set(d for ds in graph.values() for d in ds)
-            if any(p in sensitive or p not in nodes for p in relevant):
+            if any(is_sensitive(p) for p in changed) or any(p not in nodes for p in relevant):
                 want = sorted(tests)
             else:
                 reach = closure(nodes, graph)
@@ -616,7 +633,7 @@ class SchedulingTests(unittest.TestCase):
 
     def test_critical_path_vs_all_paths(self):
         ns = load(SCHED_CARD, "Critical path")
-        # The phase-1 defect: a predecessor finishing at 0 was dropped, losing the path start.
+        # An earlier version's defect: a predecessor finishing at 0 was dropped, losing the path start.
         self.assertEqual(ns["critical_path"]({"a": 0, "b": 0, "c": 5}, {"b": ["a"], "c": ["b"]},
                                              ["a", "b", "c"]), (5.0, ["a", "b", "c"]))
         rng = random.Random(41)
@@ -701,7 +718,11 @@ class MultiPatternTests(unittest.TestCase):
         rl = ns["required_literal"]
         cases = {"[]abc]xyz": "xyz", "[^]]abcd": "abcd", "(?x) foo \\s+ bar": "", "(?i)hello": "",
                  "foo(bar|baz)qux": "foo", "a|bcd": "", "hello\\d+world": "hello",
-                 "[a-z]+error code": "error code", "abc?def": "def", "x{2,3}yyyy": "yyyy"}
+                 "[a-z]+error code": "error code", "abc?def": "def", "x{2,3}yyyy": "yyyy",
+                 "\\x22token\\x22": "token", "\\x2fapi/v1": "api/v1", "\\x41bc": "",
+                 "\\u00e9tat": "tat", "\\012abc": "abc",
+                 "\\101abcd": "abcd", "\\U0001F600smile": "smile",
+                 "\\N{BULLET}item": "item", "(a)\\1bcd": "bcd"}
         for pat, want in cases.items():
             self.assertEqual(rl(pat), want, pat)
         self.assertEqual(rl("hello world", re.VERBOSE), "")
@@ -711,7 +732,7 @@ class MultiPatternTests(unittest.TestCase):
 
         def gen(depth=0):
             kind = rng.choice(["lit", "lit", "lit", "class", "class0", "group", "alt", "quant",
-                               "esc", "dot"]) if depth <= 2 else "lit"
+                               "esc", "num", "dot"]) if depth <= 2 else "lit"
             if kind == "lit":
                 s = "".join(rng.choice("abcdefgh") for _ in range(rng.randint(1, 5)))
                 return s, lambda: s
@@ -725,6 +746,12 @@ class MultiPatternTests(unittest.TestCase):
                 return "[%s]" % members, lambda: rng.choice(members)
             if kind == "esc":
                 return "\\d", lambda: rng.choice("0123456789")
+            if kind == "num":              # numeric escapes: the digits are not literal text
+                esc, ch = rng.choice([("\\x22", '"'), ("\\x2f", "/"), ("\\x41", "A"),
+                                      ("\\u00e9", "\u00e9"), ("\\012", "\n"),
+                                      ("\\101", "A"), ("\\U0001F600", "\U0001F600"),
+                                      ("\\N{LATIN SMALL LETTER E WITH ACUTE}", "\u00e9")])
+                return esc, lambda: ch
             if kind == "dot":
                 return ".", lambda: rng.choice("qrs")
             if kind == "group":
@@ -797,7 +824,7 @@ def assert_pack_oracle(tc, pack, ns, seed=64):
     card's merge_ranges, subtract_ranges and shorten (ns) as the reference for the expected
     pool. Returns the (must, cands, B) instances it drew, for agreement checks."""
     tokens = lambda c: c.end - c.start + 1
-    # The phase-1 defect: a candidate overlapping a must-keep range was sent twice.
+    # An earlier version's defect: a candidate overlapping a must-keep range was sent twice.
     out, used, note = pack([Chunk("a.py", 1, 10, 0)],
                            [Chunk("a.py", 5, 15, 9), Chunk("b.py", 1, 3, 1)], 100, tokens)
     tc.assertEqual(out, [Chunk("a.py", 1, 10, 0), Chunk("a.py", 11, 15, 9),
@@ -1407,6 +1434,140 @@ class ContextAgreementTests(unittest.TestCase):
             targets = set(rng.sample(sorted(callees), rng.randint(1, min(3, V))))
             args = (targets, callers, callees, rng.randint(0, 2), rng.randint(1, 15), rng.randint(1, 6))
             self.assertEqual(self.c.expand(*args), bounded["expand"](*args))
+
+
+# ---------------------------------------------------------------- heaps, order, space, paths, DP
+
+
+class StructureTests(unittest.TestCase):
+    LOOKUP = "cards-lookup-dedup.md"
+
+    def test_heap_sketches_vs_list_versions(self):
+        import statistics
+        ns = load(self.LOOKUP, "Heap for repeated minimum, merge and running median")
+        rng = random.Random(11)
+
+        def merge_cost_list(sizes):
+            items, cost = list(sizes), 0
+            while len(items) > 1:
+                a = min(items)
+                items.remove(a)
+                b = min(items)
+                items.remove(b)
+                cost += a + b
+                items.append(a + b)
+            return cost
+
+        for _ in range(300):
+            xs = [rng.randint(0, rng.choice([3, 50])) for _ in range(rng.randint(0, 50))]
+            self.assertEqual(ns["merge_cost"](xs), merge_cost_list(xs))
+            self.assertEqual(ns["running_medians"](xs),
+                             [statistics.median(xs[:i + 1]) for i in range(len(xs))])
+            runs = [sorted(rng.randint(-5, 5) for _ in range(rng.randint(0, 8)))
+                    for _ in range(rng.randint(0, 5))]
+            self.assertEqual(ns["k_way_merge"](runs), sorted(x for r in runs for x in r))
+        self.assertEqual(ns["running_medians"]([]), [])
+        self.assertEqual(ns["merge_cost"]([7]), 0)
+
+    def test_ordered_index_vs_rescan(self):
+        ns = load(self.LOOKUP, "Ordered index for rank and range queries")
+        rng = random.Random(12)
+        for _ in range(100):
+            xs = sorted(rng.randint(-10, 10) for _ in range(rng.randint(0, 40)))
+            for _ in range(20):
+                lo, hi = sorted((rng.randint(-12, 12), rng.randint(-12, 12)))
+                self.assertEqual(ns["count_in_range"](xs, lo, hi),
+                                 sum(1 for x in xs if lo <= x <= hi))
+        for _ in range(50):
+            m = rng.randint(1, 50)
+            tree, plain = ns["Fenwick"](m), [0] * m
+            for _ in range(200):
+                if rng.random() < 0.5:
+                    i, d = rng.randrange(m), rng.randint(-5, 5)
+                    tree.add(i, d)
+                    plain[i] += d
+                else:
+                    lo = rng.randint(0, m)
+                    hi = rng.randint(lo, m)
+                    self.assertEqual(tree.range_sum(lo, hi), sum(plain[lo:hi]))
+                    self.assertEqual(tree.prefix(hi), sum(plain[:hi]))
+
+    def test_spatial_grid_vs_all_pairs(self):
+        ns = load(self.LOOKUP, "Spatial grid for radius queries")
+        rng = random.Random(13)
+
+        def brute(points, r):
+            return [(i, j) for i in range(len(points)) for j in range(i + 1, len(points))
+                    if (points[i][0] - points[j][0]) ** 2 + (points[i][1] - points[j][1]) ** 2
+                    <= r * r]
+
+        for _ in range(300):
+            r = rng.choice([1, 2, 5, 0.5])
+            pts = [(rng.randint(-10, 10) * rng.choice([1, 0.5]), rng.randint(-10, 10))
+                   for _ in range(rng.randint(0, 60))]
+            if pts and rng.random() < 0.3:
+                pts.append(pts[0])                               # a duplicate point
+            if pts and rng.random() < 0.3:
+                pts.append((pts[0][0] + r, pts[0][1]))           # exactly r apart
+            self.assertEqual(ns["pairs_within"](pts, r), brute(pts, r))
+
+    def test_shortest_paths_vs_bellman_ford(self):
+        ns = load("cards-graphs-impact.md", "Shortest paths (BFS and Dijkstra)")
+        rng = random.Random(14)
+
+        def bellman_ford(nodes, edges, sources):
+            inf = float("inf")
+            dist = dict((u, inf) for u in nodes)
+            for s in sources:
+                dist[s] = 0
+            for _ in range(len(nodes)):
+                for u, v, w in edges:
+                    if dist[u] + w < dist[v]:
+                        dist[v] = dist[u] + w
+            return dict((u, d) for u, d in dist.items() if d < inf)
+
+        for _ in range(300):
+            n = rng.randint(1, 30)
+            nodes = list(range(n))
+            edges = [(rng.randrange(n), rng.randrange(n), rng.randint(0, 9))
+                     for _ in range(rng.randint(0, 3 * n))]
+            sources = rng.sample(nodes, rng.randint(1, min(3, n)))
+            adj, succ = {}, {}
+            for u, v, w in edges:
+                adj.setdefault(u, []).append((v, w))
+                succ.setdefault(u, []).append(v)
+            self.assertEqual(ns["dijkstra"](adj, sources), bellman_ford(nodes, edges, sources))
+            unit = [(u, v, 1) for u, v, _ in edges]
+            self.assertEqual(ns["bfs_dist"](succ, sources), bellman_ford(nodes, unit, sources))
+
+    def test_dp_sketches_vs_naive_recursion(self):
+        ns = load(REPEAT_CARD, "Memoised recursion and dynamic programming")
+        rng = random.Random(15)
+
+        def ways_naive(k, steps):
+            if k == 0:
+                return 1
+            return sum(ways_naive(k - s, steps) for s in set(steps) if 0 < s <= k)
+
+        def edit_naive(a, b):
+            if not a or not b:
+                return len(a) + len(b)
+            return min(edit_naive(a[1:], b) + 1, edit_naive(a, b[1:]) + 1,
+                       edit_naive(a[1:], b[1:]) + (a[0] != b[0]))
+
+        for _ in range(200):
+            steps = [rng.randint(0, 4) for _ in range(rng.randint(0, 3))]
+            n = rng.randint(0, 20)
+            self.assertEqual(ns["count_ways"](n, steps), ways_naive(n, steps))
+            self.assertEqual(ns["count_ways_memo"](n, steps), ways_naive(n, steps))
+            a = "".join(rng.choice("ab") for _ in range(rng.randint(0, 7)))
+            b = "".join(rng.choice("abc") for _ in range(rng.randint(0, 7)))
+            self.assertEqual(ns["edit_distance"](a, b), edit_naive(a, b))
+        self.assertEqual(ns["count_ways"](300, [1, 2]), ns["count_ways"](299, [1, 2]) +
+                         ns["count_ways"](298, [1, 2]))
+        self.assertEqual(ns["count_ways"](5000, [1]), 1)       # bottom-up has no depth limit
+        with self.assertRaises(RecursionError):                # the trap the card names
+            ns["count_ways_memo"](5000, [1])
 
 
 if __name__ == "__main__":

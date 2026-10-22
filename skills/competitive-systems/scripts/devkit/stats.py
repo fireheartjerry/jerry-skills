@@ -10,7 +10,7 @@ import random
 from devkit.common import fmt_time
 
 SCALE_FLOOR = 0.5       # seconds; the smallest scale median should be at least this
-BASELINE_RATIO = 10.0   # the smallest scale median should be >= this x the startup baseline
+BASELINE_RATIO = 5.0    # with the baseline subtracted, >= 5x it (about 0.1 s) fits reliably
 EXACT_LIMIT = 200000    # Mann-Whitney: enumerate all splits when C(na+nb, na) is at most this
 
 
@@ -150,9 +150,12 @@ def bootstrap_ratio_ci(before, after, resamples=5000, seed=0, level=0.95):
         ma = median(rng.choices(after, k=na))
         if ma > 0:
             ratios.append(mb / ma)
+    if not ratios:
+        raise ValueError("every resample had a zero after-median, so the ratio is undefined")
     ratios.sort()
     tail = (1.0 - level) / 2.0
-    point = median(before) / median(after)
+    ma = median(after)
+    point = median(before) / ma if ma > 0 else float("inf")
     return {"ratio": point, "lo": percentile(ratios, tail), "hi": percentile(ratios, 1 - tail),
             "resamples": resamples, "seed": seed, "level": level}
 
@@ -381,8 +384,9 @@ def scale_exponent(sizes, medians, baseline):
     smallest = min(medians)
     if baseline > 0 and smallest < BASELINE_RATIO * baseline:
         warnings.append("smallest median %s is under %dx the startup baseline %s; raise the "
-                        "sizes until it is at least 0.5 s and refit"
-                        % (fmt_time(smallest), int(BASELINE_RATIO), fmt_time(baseline)))
+                        "sizes until it is at least %s and refit"
+                        % (fmt_time(smallest), int(BASELINE_RATIO), fmt_time(baseline),
+                           fmt_time(BASELINE_RATIO * baseline)))
     elif smallest < SCALE_FLOOR:
         warnings.append("smallest median %s is under %s; raise the sizes until it is at "
                         "least 0.5 s and refit" % (fmt_time(smallest), fmt_time(SCALE_FLOOR)))
@@ -446,6 +450,10 @@ def changepoint(series, min_size=5, alpha=0.01):
     segment), t, df, p, before_median, after_median and percent_change.
     """
     series = [float(x) for x in series]
+    bad = [i for i, x in enumerate(series) if x != x or x in (float("inf"), float("-inf"))]
+    if bad:
+        raise ValueError("non-finite value at index %d; one NaN or inf would make every split "
+                         "test NaN and hide every step" % bad[0])
     points = []
 
     def search(lo, hi):
@@ -455,8 +463,12 @@ def changepoint(series, min_size=5, alpha=0.01):
         best = None
         for k in candidates:
             t, df = welch_t(series[lo:k], series[k:hi])
+            if t != t:                  # NaN: skip the split rather than poison the search
+                continue
             if best is None or abs(t) > abs(best[1]):
                 best = (k, t, df)
+        if best is None:
+            return
         k, t, df = best
         p = t_two_sided(t, df)
         if p < alpha / len(candidates):

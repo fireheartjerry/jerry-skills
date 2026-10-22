@@ -251,6 +251,38 @@ class JsDetectionTests(FixtureCase):
         absent = step("lint", nothing)
         self.assertEqual((absent["status"], absent["reason"]), ("missing", "pnpm is not installed"))
 
+    def test_package_scripts_never_run_without_node_modules(self):
+        info = detect(self.root)
+        w = which_of("pnpm")
+        for step_name in ("lint", "typecheck", "test"):
+            st = resolve(info, "typescript", step_name, which=w, importable=no_module)
+            self.assertEqual(st["status"], "missing", step_name)
+            self.assertIn("node_modules is absent", st["reason"])
+            self.assertIn("pnpm install", st["reason"])
+        self.repo.write("node_modules/.bin/vitest", "")
+        info = detect(self.root)
+        st = resolve(info, "typescript", "test", which=w, importable=no_module)
+        self.assertEqual((st["status"], st["command"]), ("ready", "pnpm run test"))
+
+    def test_recording_never_drops_test_script_flags(self):
+        from devkit.checks import record_plan
+        self.repo.write("node_modules/.bin/jest", "")
+        w = which_of("pnpm")
+        for script, direct in (("jest", True),
+                               ("NODE_ENV=test jest --runInBand --config jest.ci.js", False)):
+            info = detect(self.root)
+            facts = info["langs"]["typescript"]
+            facts["scripts"] = dict(facts["scripts"], test=script)
+            facts["declared"] = ["jest"]
+            st = resolve(info, "typescript", "test", which=w, importable=no_module)
+            self.assertEqual(st["runner"], "jest")
+            argv, _, kind, report, _, msg = record_plan(st, info, "typescript", self.repo.tmp, [])
+            if direct:
+                self.assertEqual((kind, argv[:3]), ("jest", ["pnpm", "exec", "jest"]))
+            else:
+                self.assertEqual((kind, report, argv), (None, None, ["pnpm", "run", "test"]))
+                self.assertIn("runs as written", msg)
+
     def test_js_resolution_without_scripts_and_lockfiles(self):
         info = detect(self.root)
         facts = info["langs"]["typescript"]
@@ -393,6 +425,23 @@ class GraphParsingTests(unittest.TestCase):
         self.assertEqual(graph.js_imports("t.ts", "import a from '@/c';\nimport u from '~lib';",
                                           files, aliases), ["lib/util.ts", "src/c/index.ts"])
 
+    def test_malformed_toml_and_import_heavy_text_stay_fast(self):
+        import time
+        for text in ('[workspace]\nmembers = [ "a", } , "b" ]\n',
+                     '[dependencies]\nfoo = { path = "../foo", features = [ } ] }\nbar = "1"\n'):
+            t0 = time.time()
+            graph.parse_toml(text)
+            self.assertLess(time.time() - t0, 1.0)
+        self.assertEqual(graph.parse_toml(
+            '[dependencies]\nfoo = { path = "../foo", features = [ } ] }\nbar = "1"\n')
+            ["dependencies"]["bar"], "1")
+        t0 = time.time()
+        graph.js_specifiers("import a " * 8000)
+        small = time.time() - t0
+        t0 = time.time()
+        graph.js_specifiers("import a " * 32000)
+        self.assertLess(time.time() - t0, max(1.0, 8 * small))   # linear, not quadratic
+
     def test_tsconfig_aliases_from_jsonc(self):
         repo = TempRepo("js")
         try:
@@ -452,6 +501,31 @@ class GraphParsingTests(unittest.TestCase):
         self.assertTrue(glob_match("requirements*.txt", "requirements-dev.txt"))
         self.assertFalse(glob_match("/setup.py", "sub/setup.py"))
         self.assertTrue(glob_match("[Ll]icense*", "License.txt"))
+
+    def test_glob_braces_literal_bracket_and_bad_patterns(self):
+        from devkit.common import UsageError, glob_regex
+        self.assertTrue(glob_match("config/*.{yml,yaml}", "config/app.yml"))
+        self.assertTrue(glob_match("config/*.{yml,yaml}", "config/app.yaml"))
+        self.assertFalse(glob_match("config/*.{yml,yaml}", "config/app.json"))
+        self.assertTrue(glob_match("**/*.{ts,tsx}", "src/a.ts"))
+        self.assertTrue(glob_match("{a,b{c,d}}.txt", "bd.txt"))
+        self.assertTrue(glob_match("[]a]x", "]x"))
+        self.assertTrue(glob_match("[!]a]x", "bx"))
+        self.assertFalse(glob_match("[!]a]x", "ax"))
+        self.assertTrue(glob_match("[!]", "[!]"))
+        with self.assertRaises(UsageError):
+            glob_regex("[z-a]")
+        repo = TempRepo()
+        try:
+            repo.config({"sensitive": ["[z-a]"]})
+            with self.assertRaises(UsageError) as cm:
+                load_config(repo.root)
+            self.assertIn("sensitive", cm.exception.message)
+            p = run_dev(["affected", "--repo", repo.root, "a.py"], cwd=repo.root)
+            self.assertEqual(p.returncode, 2, p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
+        finally:
+            repo.close()
 
 
 def graph_files(root):
@@ -662,6 +736,158 @@ class OtherLanguageAffectedTests(unittest.TestCase):
 
 
 @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+class MonorepoAffectedTests(unittest.TestCase):
+    """Layouts where an import edge the graph cannot see would select too few tests: the
+    selection must follow the real edge, or fail closed to full, never fall back to a name
+    match that looks like a confident answer."""
+
+    def make(self, files):
+        repo = TempRepo()
+        self.addCleanup(repo.close)
+        for rel, text in files.items():
+            repo.write(rel, text)
+        return repo
+
+    def targets(self, res, lang):
+        self.assertEqual(res["mode"], "selected", res["reason"])
+        if lang == "typescript":         # .ts files without a root tsconfig detect as javascript
+            return res["targets"].get("typescript") or res["targets"]["javascript"]
+        return res["targets"][lang]
+
+    def test_pnpm_workspace_package_imports_are_edges(self):
+        repo = self.make({
+            "package.json": '{"name": "root", "private": true}',
+            "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n",
+            "packages/core/package.json": '{"name": "@acme/core", "main": "dist/index.js"}',
+            "packages/core/src/index.ts": "export * from './money';\n",
+            "packages/core/src/money.ts": "export const cents = (x: number) => x * 100;\n",
+            "packages/core/test/money.test.ts": "import { cents } from '../src/money';\n",
+            "packages/api/package.json": '{"name": "@acme/api"}',
+            "packages/api/src/handler.ts": "import { cents } from '@acme/core';\n",
+            "packages/api/test/api.test.ts": "import '../src/handler';\n",
+            "packages/web/package.json": '{"name": "@acme/web"}',
+            "packages/web/test/web.test.ts": "import { cents } from '@acme/core/src/money';\n",
+        })
+        got = self.targets(repo.select("packages/core/src/money.ts"), "typescript")
+        self.assertEqual(got, ["packages/api/test/api.test.ts", "packages/core/test/money.test.ts",
+                               "packages/web/test/web.test.ts"])
+
+    def test_unresolvable_workspace_import_fails_closed(self):
+        repo = self.make({
+            "package.json": '{"name": "root", "private": true}',
+            "packages/core/package.json": '{"name": "@acme/core", "main": "dist/index.js"}',
+            "packages/core/lib/money.ts": "export const cents = 1;\n",
+            "packages/core/test/money.test.ts": "import { cents } from '../lib/money';\n",
+            "packages/api/src/handler.ts": "import { cents } from '@acme/core';\n",
+            "packages/api/test/api.test.ts": "import '../src/handler';\n",
+        })
+        res = repo.select("packages/core/lib/money.ts")
+        self.assertEqual(res["mode"], "full")
+        self.assertIn("unresolved import @acme/core", res["reason"])
+
+    def test_per_app_tsconfig_aliases(self):
+        alias = '{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}'
+        repo = self.make({
+            "package.json": '{"name": "root", "private": true}',
+            "apps/web/tsconfig.json": alias,
+            "apps/admin/tsconfig.json": alias,
+            "apps/web/src/lib/price.ts": "export const price = 1;\n",
+            "apps/web/src/components/cart.ts": "import { price } from '@/lib/price';\n",
+            "apps/web/src/components/cart.test.ts": "import './cart';\n",
+            "apps/admin/src/price.ts": "export const price = 2;\n",
+            "apps/admin/src/price.test.ts": "import { price } from '@/price';\n",
+        })
+        got = self.targets(repo.select("apps/web/src/lib/price.ts"), "typescript")
+        self.assertEqual(got, ["apps/web/src/components/cart.test.ts"])
+
+    def test_tsconfig_extends_and_base_url(self):
+        for config in ({"tsconfig.base.json": '{"compilerOptions": {"baseUrl": ".", '
+                                              '"paths": {"lib/*": ["src/lib/*"]}}}',
+                        "tsconfig.json": '{"extends": "./tsconfig.base.json"}'},
+                       {"tsconfig.json": '{"compilerOptions": {"baseUrl": "src"}}'}):
+            files = {"package.json": '{"name": "app"}',
+                     "src/lib/a.ts": "export const a = 1;\n",
+                     "src/lib/a.test.ts": "import { a } from './a';\n",
+                     "src/app/service.ts": "import { a } from 'lib/a';\n",
+                     "src/app/service.test.ts": "import './service';\n"}
+            files.update(config)
+            repo = self.make(files)
+            got = self.targets(repo.select("src/lib/a.ts"), "typescript")
+            self.assertEqual(got, ["src/app/service.test.ts", "src/lib/a.test.ts"], config)
+
+    def test_uv_workspace_cross_package_imports(self):
+        repo = self.make({
+            "pyproject.toml": "[tool.uv.workspace]\nmembers = ['packages/*']\n",
+            "packages/core/pyproject.toml": "[project]\nname = 'acme-core'\n",
+            "packages/core/src/acme_core/__init__.py": "",
+            "packages/core/src/acme_core/money.py": "def cents(x):\n    return x * 100\n",
+            "packages/core/tests/test_money.py": "from acme_core.money import cents\n",
+            "packages/api/pyproject.toml": "[project]\nname = 'acme-api'\n",
+            "packages/api/src/acme_api/__init__.py": "",
+            "packages/api/src/acme_api/handler.py": "from acme_core.money import cents\n",
+            "packages/api/tests/test_handler.py": "from acme_api import handler\n",
+        })
+        res = repo.select("packages/core/src/acme_core/money.py")
+        self.assertEqual(self.targets(res, "python"), ["packages/api/tests/test_handler.py",
+                                                       "packages/core/tests/test_money.py"])
+        self.assertNotIn("name match", " ".join(
+            " ".join(c) for c in res["chains"]["python"].values()))
+
+    def test_namespace_package_without_init(self):
+        repo = self.make({
+            "pyproject.toml": "[project]\nname = 'app'\n",
+            "app/models.py": "class Model:\n    pass\n",
+            "app/views.py": "from app.models import Model\n",
+            "tests/test_models.py": "from app.models import Model\n",
+            "tests/test_views.py": "import app.views\n",
+        })
+        self.assertEqual(self.targets(repo.select("app/models.py"), "python"),
+                         ["tests/test_models.py", "tests/test_views.py"])
+
+    def test_several_projects_with_the_same_package_name(self):
+        files = {}
+        for svc in ("svc_a", "svc_b"):
+            files.update({
+                svc + "/pyproject.toml": "[project]\nname = '%s'\n" % svc,
+                svc + "/app/__init__.py": "",
+                svc + "/app/models.py": "X = 1\n",
+                svc + "/app/views.py": "from app.models import X\n",
+                svc + "/tests/test_models.py": "from app import models\n",
+                svc + "/tests/test_views.py": "from app import views\n",
+            })
+        repo = self.make(files)
+        self.assertEqual(self.targets(repo.select("svc_b/app/models.py"), "python"),
+                         ["svc_b/tests/test_models.py", "svc_b/tests/test_views.py"])
+
+    def test_ignored_extensions_under_test_directories_fail_closed(self):
+        repo = self.make({"pyproject.toml": "[project]\nname = 'x'\n",
+                          "pkg/__init__.py": "", "pkg/core.py": "X = 1\n",
+                          "tests/test_core.py": "import pkg.core\n",
+                          "tests/fixtures/input.md": "# golden\n",
+                          "tests/__snapshots__/a.svg": "<svg/>\n",
+                          "docs/guide.md": "# guide\n"})
+        for path in ("tests/fixtures/input.md", "tests/__snapshots__/a.svg"):
+            res = repo.select(path)
+            self.assertEqual(res["mode"], "full", (path, res))
+            self.assertIn("test data changed", res["reason"])
+        self.assertEqual(repo.select("docs/guide.md")["mode"], "none")
+        repo.config({"test_map": {"tests/fixtures/**": ["tests/test_core.py"]}})
+        self.assertEqual(self.targets(repo.select("tests/fixtures/input.md"), "python"),
+                         ["tests/test_core.py"])
+
+    def test_unresolved_first_party_import_disables_the_name_match(self):
+        repo = self.make({
+            "pyproject.toml": "[project]\nname = 'x'\n",
+            "lib/core/money.py": "X = 1\n",
+            "lib/core/test_money.py": "X = 2\n",
+            "svc/handler.py": "from core.money import X\n",
+            "svc/test_handler.py": "import handler\n",
+        })
+        res = repo.select("lib/core/money.py")
+        self.assertEqual(res["mode"], "full", res)
+        self.assertIn("core.money", res["reason"])
+
+
 class ChangedFilesTests(FixtureCase):
     repo_name = "py"
 
@@ -695,6 +921,22 @@ class ChangedFilesTests(FixtureCase):
         res = affected(self.root, got, load_config(self.root))
         self.assertEqual((res["mode"], res["reason"]), ("full", "deleted or renamed: pkg/api.py"))
 
+    def test_file_discovery_skips_gitignored_dirs_and_virtualenvs(self):
+        self.repo.write(".gitignore", "generated/\n")
+        for i in (1, 2):
+            self.repo.write("generated/site-packages/thirdparty/tests/test_t%d.py" % i,
+                            "raise SystemExit(1)\n")
+        self.repo.write("myenv/pyvenv.cfg", "home = /usr/bin\n")
+        self.repo.write("myenv/lib/tests/test_vendored.py", "raise SystemExit(1)\n")
+        self.git("init", "-q")
+        files = graph_files(self.root)
+        self.assertFalse([f for f in files if f.startswith(("generated/", "myenv/"))], files)
+        self.assertIn(".gitignore", files)
+        from devkit.common import DEFAULT_CONFIG, walk_files
+        walked = walk_files(self.root, DEFAULT_CONFIG["exclude_dirs"], use_git=False)
+        self.assertFalse([f for f in walked if f.startswith("myenv/")])
+        self.assertTrue([f for f in walked if f.startswith("generated/")])
+
     def test_base_ref_diff_includes_committed_renames(self):
         self.git("init", "-q")
         self.git("add", "-A")
@@ -710,6 +952,85 @@ class ChangedFilesTests(FixtureCase):
                     env={"PATH": os.path.dirname(shutil.which("git"))})
         self.assertEqual(p.returncode, 2)
         self.assertIn("is it a valid ref?", p.stderr)
+        self.assertIn("fetch-depth: 0", p.stderr)
+
+    def test_history_replays_the_selection_ratio(self):
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "fixture")
+        with open(os.path.join(self.root, "pkg", "core.py"), "a") as f:
+            f.write("\n# edited\n")
+        self.git("commit", "-q", "-am", "edit core")
+        self.repo.write("README.md", "docs\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "docs")
+        self.repo.write("conftest.py", "# sensitive\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "conftest")
+        p = run_dev(["affected", "--repo", self.root, "--history", "10", "--json"],
+                    cwd=self.root, env={"PATH": os.path.dirname(shutil.which("git"))})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        h = json.loads(p.stdout)
+        self.assertEqual(h["commits"], 3)                    # the root commit has no parent
+        modes = [r["mode"] for r in h["rows"]]
+        self.assertEqual(modes, ["full", "none", "selected"])
+        self.assertAlmostEqual(h["full_share"], 1 / 3.0)
+        sel = h["rows"][2]
+        self.assertAlmostEqual(sel["ratio"], sel["selected"] / float(h["total_targets"]))
+        q = run_dev(["affected", "--repo", self.root, "--history", "10"], cwd=self.root,
+                    env={"PATH": os.path.dirname(shutil.which("git"))})
+        self.assertIn("selection ratio over 3 commit(s): median", q.stdout)
+
+    def test_empty_default_diff_warns_about_ci_and_strict_fails(self):
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "fixture")
+        env = {"PATH": os.path.dirname(shutil.which("git"))}
+        p = run_dev(["affected", "--repo", self.root], cwd=self.root, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("warning: no changed files", p.stderr)
+        self.assertIn("pass --base", p.stderr)
+        p = run_dev(["check", "--repo", self.root, "--strict"], cwd=self.root, env=env)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("no changed files (--strict)", p.stdout)
+
+    def test_shallow_clone_without_merge_base_names_the_fix(self):
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "fixture")
+        self.git("checkout", "-q", "-b", "feat")
+        for i in range(2):
+            self.repo.write("pkg/f%d.py" % i, "X = %d\n" % i)
+            self.git("add", "-A")
+            self.git("commit", "-q", "-m", "feat %d" % i)
+        self.git("checkout", "-q", "main")
+        self.repo.write("pkg/m.py", "M = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "main moves on")
+        clone = os.path.join(self.repo.tmp, "clone")
+        self.git("clone", "-q", "--depth", "1", "--branch", "feat",
+                 "file://" + self.root, clone)
+        self.git("-C", clone, "fetch", "-q", "--depth", "1", "origin",
+                 "main:refs/remotes/origin/main")
+        p = run_dev(["affected", "--repo", clone, "--base", "origin/main"], cwd=clone,
+                    env={"PATH": os.path.dirname(shutil.which("git"))})
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("shallow clone", p.stderr)
+        self.assertIn("fetch-depth: 0", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+
+    def test_safe_directory_refusal_is_named(self):
+        self.git("init", "-q")
+        env = {"PATH": os.path.dirname(shutil.which("git")),
+               "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
+        probe = subprocess.run(["git", "status"], cwd=self.root, env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               universal_newlines=True)
+        if "dubious ownership" not in probe.stderr:
+            self.skipTest("this git does not honour GIT_TEST_ASSUME_DIFFERENT_OWNER")
+        p = run_dev(["affected", "--repo", self.root], cwd=self.root, env=env)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("safe.directory", p.stderr)
 
     def test_base_falls_back_to_origin_and_fresh_config_is_not_sensitive(self):
         self.git("init", "-q")

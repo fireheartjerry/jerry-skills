@@ -9,8 +9,8 @@
 **Target:** 85/100   **Budget:** 5 rounds
 **Baseline score:** 43   **Noise floor:** n=4   **Move threshold:** T=8
 **Baseline SHA:** a1b2c3d
-**Scorer pin:** codex, model gpt-5, flags as recorded in .iterative-improvement/landing-page/scores/round-0a.cmd
-**Loop dir:** .iterative-improvement/landing-page/
+**Scorer pin:** codex, model gpt-5, flags as recorded in LOOP/scores/round-0a.cmd
+**Loop dir:** .git/iterative-improvement/landing-page/
 <!-- /loop-only -->
 
 ## Context
@@ -40,7 +40,7 @@ Class is set at round 0: PRESERVE passes at baseline and must stay passing; ACHI
 
 ### C2. Install path visible without scrolling at 1440px (12 pts)
 **What it means:** A visitor on a laptop sees the install command and a copy affordance without scrolling.
-**How to check it:** Screenshot at 1440x900. Note whether an install command (`npm i -g tidylog`, `brew install tidylog` or similar) is fully inside the first 900px, and whether a copy button or selectable code block accompanies it.
+**How to check it:** `node tools/shot.mjs http://localhost:4321 1440 900 c2-1440.png`. Note whether an install command (`npm i -g tidylog`, `brew install tidylog` or similar) is fully inside the capture, and whether a copy button or selectable code block accompanies it.
 **Anchors:**
 - `0`: no install command in the first screen
 - `6`: the command is inside the first screen but partly cut off, or has no copy affordance
@@ -48,7 +48,7 @@ Class is set at round 0: PRESERVE passes at baseline and must stay passing; ACHI
 
 ### C3. Typographic hierarchy (blur test) (12 pts)
 **What it means:** A reader scanning for 3 seconds can identify the single most important message without reading body copy.
-**How to check it:** Screenshot at 1440px, blur to 8px (`convert shot.png -blur 0x8 blurred.png` or the equivalent). The primary message should still be the first thing the eye lands on, by size or weight contrast alone.
+**How to check it:** `node tools/shot.mjs http://localhost:4321 1440 900 c3-shot.png && convert c3-shot.png -blur 0x8 c3-blur.png`. In `c3-blur.png` the primary message should still be the first thing the eye lands on, by size or weight contrast alone.
 **Anchors:**
 - `0`: blurred, nothing dominates; three elements compete at the same weight
 - `6`: one element dominates but a secondary element competes at the same level
@@ -76,7 +76,7 @@ Class is set at round 0: PRESERVE passes at baseline and must stay passing; ACHI
 **Anchors:**
 - `0`: two or more paragraphs over 45 words, or an adjective list in the hero
 - `5`: one paragraph over 45 words and no adjective lists
-- `10`: no paragraph over 45 words and no adjective lists anywhere
+- `10`: no paragraph over 45 words and no adjective list in the hero
 
 ### C7. Performance (10 pts)
 **What it means:** The static build loads fast on a mid-range phone.
@@ -96,7 +96,7 @@ Class is set at round 0: PRESERVE passes at baseline and must stay passing; ACHI
 
 ### C9. Working example above the fold (8 pts)
 **What it means:** A visitor can see tidylog doing its job before scrolling.
-**How to check it:** Screenshot at 1440x900. Note whether a code block showing a tidylog command and its output is at least partly visible inside the first 900px.
+**How to check it:** `node tools/shot.mjs http://localhost:4321 1440 900 c9-1440.png`. Note whether a code block showing a tidylog command and its output is at least partly visible inside the capture.
 **Anchors:**
 - `0`: no example in the first screen
 - `4`: the example starts inside the first screen but the output is below it
@@ -130,4 +130,4 @@ Dark mode, the blog, the docs pages, and the GitHub README. The reviewer should 
 
 ## Amendments
 
-- v2 (after round 1): added C9 "Working example above the fold" (8 pts) from blind-review finding F8; C6 14 -> 10, C8 16 -> 12. Round 1 snapshot rescored twice under v2 with C4 and C7 evidence supplied: 49/80 (v1) -> 56 and 60 (v2), reference 58, n=4, T=8.
+- v2 (after round 1): added C9 "Working example above the fold" (8 pts) from blind-review finding F8; C6 14 -> 10, C8 16 -> 12; C6 anchors now count only the hero's adjective lists (round-1 scorer note). Round 1 snapshot rescored twice under v2 with C4 and C7 evidence supplied: 49/80 (v1) -> 56 and 60 (v2), reference 58, n=4, T=8.

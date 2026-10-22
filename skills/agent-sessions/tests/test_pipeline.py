@@ -102,8 +102,10 @@ class PipelineTests(SessionTest):
         self.assertIn("no child 'nobody'", cp.stderr)
         cp = self.run_as("spawn", "claude", "b", self.work, "hi", "--after", "b")
         self.assertEqual(cp.returncode, 2)
-        cp = self.run_as("spawn", "claude", "b", self.work, "{{answer:zzz}}")
-        self.assertEqual(cp.returncode, 2)
+        # A name that matches no child and no --after is quoted text, kept literal with a warning.
+        cp = self.run_as("spawn", "claude", "lit", self.work, "{{answer:zzz}}")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn("names no existing child", cp.stderr)
         cp = self.run_as("spawn", "claude", "b", self.work, "{{bogus:a}}")
         self.assertEqual(cp.returncode, 2)
         self.assertIn("unknown template", cp.stderr)

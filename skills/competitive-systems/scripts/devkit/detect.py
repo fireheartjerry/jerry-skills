@@ -106,8 +106,8 @@ def detect(root, cfg=None, files=None):
         langs[facts["language"]] = facts
         if not facts["deps_installed"]:
             notes.append("%s declares dependencies but node_modules is absent: steps that "
-                         "need them are marked missing, and package scripts that call them "
-                         "will fail; run `%s install`" % (posixpath.join(facts["root"],
+                         "need them, package scripts included, are marked missing (dev.py "
+                         "never installs); run `%s install`" % (posixpath.join(facts["root"],
                                                           "package.json"), facts["package_manager"]))
         others = sorted(set(posixpath.dirname(m) for m in markers["js"]) - {facts["root"]})
         if others:
@@ -482,11 +482,18 @@ def _js(facts, lang, step, which, importable):
         return (JS_PACKAGE_OF.get(tool, tool) in declared or tool in local
                 or bool(which(tool)))
 
-    def pm_step(pieces, hint=None, **kw):
+    def pm_step(pieces, hint=None, script=False, **kw):
+        """A package-manager command. A package script needs node_modules: run without it,
+        pnpm 10+ installs first (rewriting the lockfile) and the others fail, so the step is
+        missing instead; dev.py never installs anything."""
         st = _step(lang, step, pieces, display_of(pieces, hint), **kw)
         if not which(pm):
             st["status"] = "missing"
             st["reason"] = "%s is not installed" % pm
+        elif script and not facts.get("deps_installed", True) and not facts.get("pnp"):
+            st["status"] = "missing"
+            st["reason"] = ("node_modules is absent, so `%s` would install or fail; run "
+                            "`%s install` first" % (display_of(pieces, hint), pm))
         return st
 
     def exec_step(tool, args, files=False, hint=None, **kw):
@@ -513,14 +520,14 @@ def _js(facts, lang, step, which, importable):
         runner = "jest"
     if step == "lint":
         if "lint" in scripts:
-            return pm_step([_piece([pm, "run", "lint"])], tool="script:lint")
+            return pm_step([_piece([pm, "run", "lint"])], tool="script:lint", script=True)
         if has_tool("eslint"):
             return exec_step("eslint", [], files=True, hint="<files>")
         return _step(lang, step, status="skipped", reason="no lint script and no eslint")
     if step == "typecheck":
         for name in ("typecheck", "type-check"):
             if name in scripts:
-                return pm_step([_piece([pm, "run", name])], tool="script:" + name)
+                return pm_step([_piece([pm, "run", name])], tool="script:" + name, script=True)
         if facts.get("tsconfig"):
             rel = posixpath.relpath(facts["tsconfig"], facts.get("root") or ".")
             return exec_step("tsc", ["--noEmit", "-p", rel])
@@ -528,7 +535,7 @@ def _js(facts, lang, step, which, importable):
     if step == "test":
         if "test" in scripts:
             return pm_step([_piece([pm, "run", "test"])], tool="script:test", runner=runner,
-                           report=runner)
+                           report=runner, script=True)
         if runner == "vitest":
             return exec_step("vitest", ["run"], runner="vitest", report="vitest")
         if runner == "jest":

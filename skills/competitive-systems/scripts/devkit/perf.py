@@ -89,14 +89,25 @@ def label_of(r):
 
 def changepoint_series(root, name):
     """[(label, median)] for dev.py changepoint --perf."""
-    return [(label_of(r), float(r["median"])) for r in load_series(root, name)]
+    out = []
+    for i, r in enumerate(load_series(root, name)):
+        v = float(r["median"])
+        if v != v or v in (float("inf"), float("-inf")):
+            raise UsageError("perf series %s: run %d (%s) has median %r; a non-finite value "
+                             "hides every change point" % (name, i, label_of(r), v))
+        out.append((label_of(r), v))
+    return out
 
 
 def run_one(root, b, runs_override=None):
     runs = runs_override or b.get("runs") or DEFAULT_RUNS
     warmup = b.get("warmup", DEFAULT_WARMUP)
     shell = bool(b.get("shell"))
-    cmd = b["command"] if shell else shlex.split(b["command"])
+    try:
+        cmd = b["command"] if shell else shlex.split(b["command"])
+    except ValueError as e:
+        raise UsageError("benchmark %s: cannot split %r: %s (check the quotes in tools/dev.json)"
+                         % (b.get("name"), b["command"], e))
     cwd = os.getcwd()
     os.chdir(root)            # benchmark commands are written relative to the repository root
     try:

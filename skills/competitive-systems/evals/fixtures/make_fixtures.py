@@ -6,7 +6,7 @@ usage: make_fixtures.py [--out DIR] [--only NAME[,NAME...]] [--list]
 Every random draw is seeded, so two runs write byte-identical files; in `monorepo` the
 commits are identical too (fixed dates, empty author email) and only .git/index differs,
 because it records file timestamps. The default output directory is
-eval-runs/competitive-systems/phase2-runs/fixtures when run inside the skills repository and
+eval-runs/competitive-systems/runs/fixtures when run inside the skills repository and
 ./eval-runs/fixtures elsewhere. Each fixture is a directory; evals/scenarios.json names the
 one a scenario copies into its throwaway work directory. Standard library only, Python 3.8+.
 """
@@ -24,10 +24,10 @@ SKILL = os.path.dirname(os.path.dirname(HERE))
 
 
 def default_out():
-    """eval-runs/competitive-systems/phase2-runs/fixtures inside the skills repo, else ./eval-runs."""
+    """eval-runs/competitive-systems/runs/fixtures inside the skills repo, else ./eval-runs."""
     repo = os.path.dirname(os.path.dirname(SKILL))
     if os.path.isdir(os.path.join(repo, "eval-runs")) or os.path.isfile(os.path.join(repo, "scripts", "validate.py")):
-        return os.path.join(repo, "eval-runs", "competitive-systems", "phase2-runs", "fixtures")
+        return os.path.join(repo, "eval-runs", "competitive-systems", "runs", "fixtures")
     return os.path.join(os.getcwd(), "eval-runs", "fixtures")
 
 
@@ -875,6 +875,115 @@ else:
 ''',
 }
 
+
+# ------------------------------------------------------------------ S-M: Go quadratic dedup
+def go_dedup(root):
+    write(root, "go.mod", "module example.com/events\n\ngo 1.21\n", dedent=False)
+    write(root, "dedup/dedup.go", """
+        // Package dedup removes repeated event keys, keeping the first occurrence.
+        package dedup
+
+        // Unique returns keys in first-seen order without repeats.
+        func Unique(keys []string) []string {
+        \tout := []string{}
+        \tfor _, k := range keys {
+        \t\tfound := false
+        \t\tfor _, o := range out {
+        \t\t\tif o == k {
+        \t\t\t\tfound = true
+        \t\t\t\tbreak
+        \t\t\t}
+        \t\t}
+        \t\tif !found {
+        \t\t\tout = append(out, k)
+        \t\t}
+        \t}
+        \treturn out
+        }
+        """)
+    write(root, "cmd/dedup/main.go", """
+        // Command dedup reads one key per line on stdin and prints the unique keys in order.
+        package main
+
+        import (
+        \t"bufio"
+        \t"fmt"
+        \t"os"
+
+        \t"example.com/events/dedup"
+        )
+
+        func main() {
+        \tsc := bufio.NewScanner(os.Stdin)
+        \tsc.Buffer(make([]byte, 1<<20), 1<<20)
+        \tvar keys []string
+        \tfor sc.Scan() {
+        \t\tkeys = append(keys, sc.Text())
+        \t}
+        \tfor _, k := range dedup.Unique(keys) {
+        \t\tfmt.Println(k)
+        \t}
+        }
+        """)
+    write(root, "gen_keys.py", """
+        \"\"\"Print n event keys, about 30% distinct, seeded: python3 gen_keys.py N SEED\"\"\"
+        import random
+        import sys
+
+        n, seed = int(sys.argv[1]), int(sys.argv[2]) if len(sys.argv) > 2 else 7
+        rng = random.Random(seed)
+        distinct = max(1, int(0.3 * n))
+        for _ in range(n):
+            print("evt-%d" % rng.randrange(distinct))
+        """)
+    write(root, "NOTES.txt", """
+        Production feeds about 400,000 keys per batch; the job takes about 9 minutes, almost
+        all of it in dedup.Unique. Build: go build -o bin/dedup ./cmd/dedup
+        """)
+
+
+# ------------------------------------------------------------------ S-N: cannot reproduce here
+def prod_only(root):
+    write(root, "reconcile.py", """
+        \"\"\"Nightly reconciliation: match bank transactions to ledger entries.\"\"\"
+        import os
+
+        import psycopg2
+
+
+        def load(conn, table):
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, amount_cents, day, ref FROM %s" % table)
+                return cur.fetchall()
+
+
+        def reconcile(bank, ledger):
+            matched, unmatched = [], []
+            for b in bank:
+                hit = None
+                for e in ledger:
+                    if e[1] == b[1] and e[2] == b[2] and e[3] == b[3]:
+                        hit = e
+                        break
+                if hit is None:
+                    unmatched.append(b[0])
+                else:
+                    matched.append((b[0], hit[0]))
+            return matched, unmatched
+
+
+        if __name__ == "__main__":
+            conn = psycopg2.connect(os.environ["DATABASE_URL"])
+            matched, unmatched = reconcile(load(conn, "bank_tx"), load(conn, "ledger"))
+            print(len(matched), len(unmatched))
+        """)
+    write(root, "RUNBOOK.txt", """
+        reconcile.py runs nightly against the production database (DATABASE_URL is set only on
+        the batch host). About 2 million rows in bank_tx and 2 million in ledger. Last run:
+        6 h 10 min. No copy of the data exists outside production.
+        """)
+
+
 FIXTURES = [
     ("ts-repo", ts_repo, "S-A: TypeScript repo with a path alias and a re-export"),
     ("monorepo", monorepo, "S-B: Python monorepo, PR branch touches pkg/core.py and conftest.py"),
@@ -888,6 +997,8 @@ FIXTURES = [
     ("io-import", io_import, "S-J: import loop over a 15 ms stub client"),
     ("hot-function", hot_function, "S-K: Go module, profile shows normalizeKeys at 12%"),
     ("suites", suites, "S-L: 4 mandatory and 40 optional suites"),
+    ("go-dedup", go_dedup, "S-M: Go module with a quadratic keep-first dedup and a key generator"),
+    ("prod-only", prod_only, "S-N: nested-loop reconciliation whose data exists only in production"),
     ("example-a", example_a, "worked example A: quadratic dedup, pinned generator"),
     ("example-b", example_b, "worked example B: durations.json and CI history"),
 ]

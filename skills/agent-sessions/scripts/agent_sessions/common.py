@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -12,7 +13,8 @@ import uuid
 from agent_sessions import VERSION
 
 __all__ = [
-    "VERSION", "SCRIPT", "PACKAGE_DIR", "PREFIX", "MAX_DEPTH", "NAME_RE", "TIERS", "ROLES",
+    "VERSION", "SCRIPT", "CMD", "cmd_text", "PACKAGE_DIR", "PREFIX", "RESERVED_NAMES", "valid_name",
+    "StateRootError", "ENGINE_ENV", "MAX_DEPTH", "NAME_RE", "TIERS", "ROLES",
     "READONLY_TOOLS", "PASS_PREFIXES", "PASS_EXACT", "TMUX_ENV_PREFIXES", "OWNER_COMMS",
     "UNTRUSTED", "TMUX_INSTALL", "DEFAULT_BUDGET", "STDERR_TAIL", "RESERVATION_S", "PS_ENV",
     "STATE_ROOT", "MAX_CHILDREN", "LINGER", "IDLE", "STALL_DEFAULT", "CHANGED_FILES_CAP",
@@ -29,9 +31,30 @@ PACKAGE_DIR = os.path.dirname(os.path.realpath(__file__))
 # The entry script next to the package: the only path users call and the
 # runner launch target (`sys.executable SCRIPT _run <state-dir>`).
 SCRIPT = os.path.join(os.path.dirname(PACKAGE_DIR), "agent-session")
+# The script is not on PATH: every hint the tool prints names it by absolute
+# path, so a caller can copy the line as is.
+CMD = shlex.quote(SCRIPT)
+_CMD_RE = re.compile(r"(?<![\w/.-])agent-session(?= )")
 PREFIX = "as"
 MAX_DEPTH = 2
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+# Subdirectories of the state root. A child, group or plan by one of these
+# names would share (and reap) that directory.
+RESERVED_NAMES = ("ledgers", "groups", "pauses")
+
+
+def valid_name(name):
+    """A usable child, group or plan name: NAME_RE and not a state-root directory."""
+    return bool(NAME_RE.match(name or "")) and name not in RESERVED_NAMES
+
+
+def cmd_text(text):
+    """`agent-session X` in a hint, rewritten to the absolute script path."""
+    return _CMD_RE.sub(lambda _m: CMD, text) if text else text
+
+
+class StateRootError(OSError):
+    """The state root cannot be created, locked or written (exit 2, see doctor)."""
 ENGINES = ("claude", "codex", "gemini")
 TIERS = ("cheap", "standard", "deep")
 ROLES = ("implementation", "review", "research")
@@ -43,6 +66,11 @@ READONLY_TOOLS = "Read,Grep,Glob"
 # locale, proxies and certificate bundles. AGENT_SESSIONS_PASS_ENV adds more.
 PASS_PREFIXES = ("AGENT_SESSIONS_", "CODEX_", "CLAUDE_", "ANTHROPIC_", "OPENAI_", "GEMINI_", "FAKE_ENGINE_",
                  "AWS_", "GOOGLE_", "CLOUDSDK_", "AZURE_")
+# Variables each engine needs, by prefix. A read-only child gets only its own
+# engine's (plus PASS_EXACT and the provider switches below); a write child,
+# which can read the same keys from disk, gets every passthrough variable.
+ENGINE_ENV = {"claude": ("CLAUDE_", "ANTHROPIC_"), "codex": ("CODEX_", "OPENAI_", "AZURE_"),
+              "gemini": ("GEMINI_", "GOOGLE_", "CLOUDSDK_")}
 PASS_EXACT = ("SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "CLOUD_ML_REGION",
               "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
               "http_proxy", "https_proxy", "no_proxy", "all_proxy",
@@ -75,7 +103,8 @@ PS_ENV = dict(os.environ, LC_ALL="C", LANG="C")
 OPTIONS = {
     "spawn": (("prompt-file", "tier", "model", "role", "base", "copy", "timeout", "stall", "deadline", "retries",
                "budget-usd", "max-tokens", "max-turns", "tree-budget-usd", "tree-max-tokens", "schema", "verify",
-               "verify-timeout", "verify-fixups", "after", "n", "engines", "on-finish", "backend"),
+               "verify-timeout", "verify-fixups", "after", "n", "engines", "on-finish", "backend", "mcp", "ledger",
+               "add-dir", "diff"),
               ("readonly", "write", "worktree", "steerable", "queue", "replace", "json")),
     "list": (("group",), ("json", "mine", "running")),
     "status": ((), ("json",)),
@@ -90,10 +119,10 @@ OPTIONS = {
     "kill": (("grace",), ()),
     "resume": (("message",), ("json",)),
     "recover": ((), ("all", "dry-run", "json")),
-    "judge": (("engine", "tier", "brief", "timeout"), ("json",)),
-    "select": ((), ("judge", "json")),
+    "judge": (("engine", "tier", "brief", "timeout", "budget-usd", "max-tokens"), ("json",)),
+    "select": (("budget-usd", "max-tokens"), ("judge", "json")),
     "diff": (("base",), ("stat",)),
-    "collect": (("cherry-pick",), ("merge", "squash", "branch", "json")),
+    "collect": (("cherry-pick",), ("merge", "squash", "branch", "allow-failed", "json")),
     "conflicts": ((), ("json",)),
     "reap": (("discard",), ("all", "force", "dry-run", "json")),
     "snapshots": (("older-than",), ("prune", "json")),
@@ -114,7 +143,7 @@ def options_of(cmd):
 def die(msg, hint=None, code=2):
     sys.stderr.write("agent-session: %s\n" % msg)
     if hint:
-        sys.stderr.write("  try: %s\n" % hint)
+        sys.stderr.write("  try: %s\n" % cmd_text(hint))
     sys.stderr.flush()
     sys.exit(code)
 
@@ -129,6 +158,8 @@ def out(line=""):
 
 
 def kv(key, value):
+    if key in ("next", "try"):
+        value = cmd_text(str(value))
     out("%-9s : %s" % (key, value))
 
 
@@ -286,9 +317,12 @@ def sha256_text(text):
 
 
 def run(argv, cwd=None, input_text=None, timeout=None, env=None):
+    """Run argv; output decoded as UTF-8 with undecodable bytes replaced, so a
+    latin-1 file in a diff or an odd byte on stderr never raises."""
     try:
         return subprocess.run(argv, cwd=cwd, input=input_text, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, universal_newlines=True, timeout=timeout, env=env)
+                              stderr=subprocess.PIPE, encoding="utf-8", errors="replace", timeout=timeout,
+                              env=env)
     except OSError as exc:
         return subprocess.CompletedProcess(argv, 127, "", str(exc))
     except subprocess.TimeoutExpired:
@@ -329,7 +363,7 @@ def parse_args(args, valued=(), flags=(), lenient_prompt=False):
         elif lenient_prompt and not re.match(r"^--[A-Za-z0-9-]+(=.*)?$", tok):
             pos.append(tok)
         else:
-            die("unknown option %s" % tok, "agent-session --help")
+            die("unknown option %s" % tok, "agent-session <command> --help")
         i += 1
     return pos, opts
 
@@ -380,8 +414,10 @@ def parse_count(raw, what, minimum=0, maximum=None):
     if not re.match(r"^\d+$", str(raw)):
         die("%s must be a whole number, got %r" % (what, raw))
     value = int(raw)
+    if maximum is None and value < minimum:
+        die("%s must be at least %d" % (what, minimum))
     if value < minimum or (maximum is not None and value > maximum):
-        die("%s must be between %d and %s" % (what, minimum, maximum if maximum is not None else "any"))
+        die("%s must be between %d and %d" % (what, minimum, maximum))
     return value
 
 
@@ -390,7 +426,7 @@ def parse_names(raw, what):
     if not names:
         die("%s needs at least one name" % what)
     for n in names:
-        if not NAME_RE.match(n):
+        if not valid_name(n):
             die("%s: '%s' is not a valid name" % (what, n))
     return names
 

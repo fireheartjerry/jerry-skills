@@ -252,12 +252,20 @@ def fixture_steps(env, lang, root):
         return "%s -> %s" % (ex["change"], " ".join(got))
 
     def check_no_tests():
-        d = env.dev(root, "check", "--no-tests", ex["change"], "--json")
+        # With no toolchain every gate is skipped, and a check that ran nothing fails.
+        want = "pass" if ex["lint"] == "pass" else "fail"
+        p = env.dev(root, "check", "--no-tests", ex["change"], "--json",
+                    rc=0 if want == "pass" else 1)
+        d = p if isinstance(p, dict) else json.loads(p.stdout)
         lint = [g for g in d.get("gates", []) if g.get("name") == "lint"]
-        check(d.get("status") == "pass" and lint and lint[0]["status"] == ex["lint"],
-              "check: status %s, lint %s (expected pass, lint %s)" % (
-                  d.get("status"), lint[0]["status"] if lint else None, ex["lint"]))
-        return "lint %s (%s)" % (lint[0]["status"], lint[0].get("command") or "-")
+        check(d.get("status") == want and lint and lint[0]["status"] == ex["lint"],
+              "check: status %s, lint %s (expected %s, lint %s)" % (
+                  d.get("status"), lint[0]["status"] if lint else None, want, ex["lint"]))
+        if want == "fail":
+            check(str(d.get("failed_gate", "")).startswith("nothing was checked"),
+                  "check failed at %r, expected 'nothing was checked'" % d.get("failed_gate"))
+        return "lint %s (%s)%s" % (lint[0]["status"], lint[0].get("command") or "-",
+                                   "; nothing ran, so FAIL" if want == "fail" else "")
 
     def repo_map():
         env.dev(root, "map")

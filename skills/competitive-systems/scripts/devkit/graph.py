@@ -256,21 +256,116 @@ def _norm(path):
 # ---------------------------------------------------------------- python
 
 
+PY_PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
+
+# Top-level standard-library names, so `import json` never counts as an unresolved
+# first-party import even when the repository has a json/ directory somewhere.
+_STDLIB_FALLBACK = frozenset("""
+abc argparse array ast asyncio base64 binascii bisect builtins bz2 calendar cmath collections
+concurrent configparser contextlib contextvars copy csv ctypes dataclasses datetime decimal
+difflib dis email enum errno faulthandler fnmatch fractions functools gc getpass gettext glob
+gzip hashlib heapq hmac html http importlib inspect io ipaddress itertools json keyword
+linecache locale logging lzma math mimetypes multiprocessing numbers operator os pathlib
+pickle pkgutil platform pprint profile pstats queue random re resource sched secrets select
+selectors shelve shlex shutil signal site socket sqlite3 ssl stat statistics string struct
+subprocess sys sysconfig tarfile tempfile test textwrap threading time timeit tkinter token
+tokenize tomllib trace traceback types typing unicodedata unittest urllib uuid venv warnings
+weakref xml zipfile zlib zoneinfo
+""".split())
+
+
+def stdlib_names():
+    import sys
+    names = getattr(sys, "stdlib_module_names", None)
+    return frozenset(names) | _STDLIB_FALLBACK if names else _STDLIB_FALLBACK
+
+
 class ModuleIndex(dict):
-    """dotted module name -> file, with .by_file for the inverse lookup."""
+    """dotted module name -> file (first base wins), with .by_file for the inverse lookup,
+    .bases [(base dir, {name: file}, {file: name})] for per-file resolution, and
+    .first_party: identifiers naming a directory or module anywhere in the repository."""
 
     def __init__(self, *a):
         dict.__init__(self, *a)
         self.by_file = {}
+        self.bases = []
+        self.first_party = frozenset()
+        self._order = {}
+
+    def order_for(self, path):
+        """Bases to search for an import made in path: the bases holding path, deepest
+        first, then the others in their original order."""
+        d = posixpath.dirname(path)
+        hit = self._order.get(d)
+        if hit is None:
+            holding = [b for b in self.bases if not b[0] or path.startswith(b[0] + "/")]
+            holding.sort(key=lambda b: -len(b[0]))
+            hit = holding + [b for b in self.bases if b not in holding]
+            self._order[d] = hit
+        return hit
+
+    def lookup(self, name, path=None):
+        if path is None or not self.bases:
+            return self.get(name)
+        for _, names, _ in self.order_for(path):
+            f = names.get(name)
+            if f is not None:
+                return f
+        return None
+
+
+def python_bases(files, project_root=""):
+    """Directories that can hold first-party top-level code: the repository root, the
+    detected project root, and every directory with a pyproject.toml, setup.py or setup.cfg
+    (uv and poetry workspaces, several projects in one repository)."""
+    bases = [""] + ([project_root] if project_root else [])
+    for f in sorted(files, key=lambda p: (p.count("/"), p)):
+        if posixpath.basename(f) in PY_PROJECT_MARKERS:
+            d = posixpath.dirname(f)
+            if d not in bases:
+                bases.append(d)
+    return bases
+
+
+def _index_base(b, files, fileset):
+    """{dotted name: file} for one base: regular packages (with __init__.py), then
+    namespace packages (PEP 420 directories without one), then top-level modules."""
+    names = {}
+    prefix = b + "/" if b else ""
+    packages, namespaces = set(), set()
+    for f in files:
+        if not f.endswith(".py") or not f.startswith(prefix):
+            continue
+        parts = f[len(prefix):].split("/")
+        if len(parts) == 1:
+            names.setdefault(parts[0][:-3], f)
+        elif prefix + parts[0] + "/__init__.py" in fileset:
+            packages.add(parts[0])
+        elif parts[0].isidentifier():
+            namespaces.add(parts[0])
+    for group in (packages, namespaces):
+        for f in files:
+            if not f.endswith(".py") or not f.startswith(prefix):
+                continue
+            parts = f[len(prefix):][:-3].split("/")
+            if len(parts) < 2 or parts[0] not in group:
+                continue
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            if all(p.isidentifier() for p in parts):
+                names.setdefault(".".join(parts), f)
+    return names
 
 
 def python_roots(files, bases=("",)):
     """Dotted module name -> repository file, for first-party code.
 
-    For each base directory (the repository root, a Python project root, and their `src/`
+    For each base directory (the repository root, Python project roots, and their `src/`
     layouts), a top-level directory with `__init__.py` is a package root (every .py file
-    below it is indexed, namespace sub-directories included) and a top-level .py file is a
-    module. The first base that defines a name wins.
+    below it is indexed, namespace sub-directories included), a top-level directory without
+    one is a namespace package (PEP 420), and a top-level .py file is a module. The mapping
+    itself keeps the first base that defines a name; `lookup(name, path)` prefers the bases
+    holding path, deepest first, so two projects with the same package name stay apart.
     """
     fileset = set(files)
     roots = ModuleIndex()
@@ -281,35 +376,37 @@ def python_roots(files, bases=("",)):
             if b not in seen_bases:
                 seen_bases.append(b)
     for b in seen_bases:
-        prefix = b + "/" if b else ""
-        packages = set()
-        for f in files:
-            if not f.endswith(".py") or not f.startswith(prefix):
-                continue
-            rest = f[len(prefix):]
-            parts = rest.split("/")
-            if len(parts) == 1:
-                roots.setdefault(parts[0][:-3], f)
-            elif prefix + parts[0] + "/__init__.py" in fileset:
-                packages.add(parts[0])
-        for f in files:
-            if not f.endswith(".py") or not f.startswith(prefix):
-                continue
-            parts = f[len(prefix):][:-3].split("/")
-            if len(parts) < 2 or parts[0] not in packages:
-                continue
-            if parts[-1] == "__init__":
-                parts = parts[:-1]
-            if all(p.isidentifier() for p in parts):
-                roots.setdefault(".".join(parts), f)
+        names = _index_base(b, files, fileset)
+        if not names:
+            continue
+        inverse = {}
+        for name in sorted(names, key=lambda k: (k.count("."), k)):
+            inverse.setdefault(names[name], name)
+            roots.setdefault(name, names[name])
+        roots.bases.append((b, names, inverse))
     for name in sorted(roots, key=lambda k: (k.count("."), k)):
         roots.by_file.setdefault(roots[name], name)
+    first = set()
+    for f in files:
+        parts = f.split("/")
+        for part in parts[:-1]:
+            if part.isidentifier():
+                first.add(part)
+        if f.endswith(".py") and parts[-1][:-3].isidentifier():
+            first.add(parts[-1][:-3])
+    roots.first_party = frozenset(first - stdlib_names() - {"__init__", "__main__"})
     roots.fileset = fileset
     return roots
 
 
 def _module_of(path, roots):
-    """The dotted name roots gives to path, or None."""
+    """The dotted name roots gives to path (from the nearest base holding it), or None."""
+    if isinstance(roots, ModuleIndex) and roots.bases:
+        for _, _, inverse in roots.order_for(path):
+            name = inverse.get(path)
+            if name is not None:
+                return name
+        return None
     by_file = getattr(roots, "by_file", None)
     if by_file is not None:
         return by_file.get(path)
@@ -350,16 +447,20 @@ def _python_names(text):
     return out
 
 
-def python_imports(path, roots, text, fileset=None):
+def python_imports(path, roots, text, fileset=None, unresolved=None):
     """Repository files that `path` imports, resolved through roots (see python_roots).
 
     `import a.b` depends on a/__init__.py, a/b/__init__.py or a/b.py; `from a import b`
     on a/b.py when it exists, else on a/__init__.py; relative imports resolve from the
     package of path. A name that roots does not know is tried next to the importing file
     (a sibling helper module, as test runners put the test directory on sys.path; needs
-    fileset). Third-party and standard-library names resolve to nothing.
+    fileset). Third-party and standard-library names resolve to nothing. An absolute import
+    whose first segment names a first-party directory or module but resolves to no file is
+    appended to `unresolved` (when given) as the dotted name, so callers can fail closed.
     """
     deps = set()
+    get = (lambda name: roots.lookup(name, path)) if isinstance(roots, ModuleIndex) \
+        else roots.get
     own = _module_of(path, roots)
     is_pkg = path.endswith("/__init__.py")
     fileset = fileset if fileset is not None else getattr(roots, "fileset", None)
@@ -380,11 +481,11 @@ def python_imports(path, roots, text, fileset=None):
         parts = dotted.split(".")
         found = False
         for i in range(1, len(parts) + 1):
-            f = roots.get(".".join(parts[:i]))
+            f = get(".".join(parts[:i]))
             if f is not None:
                 deps.add(f)
                 found = found or i == len(parts)
-        if not found and roots.get(parts[0]) is None:
+        if not found and get(parts[0]) is None:
             f = sibling(dotted)
             if f is not None:
                 deps.add(f)
@@ -403,6 +504,9 @@ def python_imports(path, roots, text, fileset=None):
             if not module:
                 continue
         if not add_module(module):
+            first = getattr(roots, "first_party", ())
+            if unresolved is not None and not level and module.split(".")[0] in first:
+                unresolved.append(module)
             continue
         for name in names:
             if name != "*":
@@ -413,8 +517,10 @@ def python_imports(path, roots, text, fileset=None):
 
 # ---------------------------------------------------------------- javascript / typescript
 
+# The clause between `import` and `from` is bounded (2000 characters, no nested quotes), so a
+# large comment full of the word `import` cannot make the scan quadratic.
 _JS_SPEC = re.compile(
-    r"""(?:\bimport\s+(?:type\s+)?[\w$*{}\s,]*?\s*from\s*|\bexport\s+(?:type\s+)?[\w$*{}\s,]*?\s*from\s*"""
+    r"""(?:\b(?:import|export)\s+(?:type\s+)?(?:[\w$*{},]|\s){0,2000}?\bfrom\s*"""
     r"""|\bimport\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)(['"])([^'"\n]+)\1""")
 
 
@@ -441,21 +547,58 @@ def strip_jsonc(text):
     return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
 
 
-def tsconfig_aliases(root, rel="tsconfig.json"):
-    """[(key, wildcard, [targets])] from compilerOptions.paths, targets relative to the
-    repository. Supports the `"@/*": ["src/*"]` form (one trailing `*`) and exact names;
-    `baseUrl` defaults to the tsconfig's directory. Unreadable or invalid files give [].
-    Longest keys first, so the most specific alias wins."""
+def _load_jsonc(root, rel):
     try:
         with open(os.path.join(root, rel), encoding="utf-8") as f:
             data = json.loads(strip_jsonc(f.read()))
     except (OSError, ValueError):
-        return []
-    if not isinstance(data, dict):
-        return []
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def tsconfig_options(root, rel="tsconfig.json", _depth=0):
+    """(paths, paths_base, base_url) after following `extends` (a relative path or a list
+    of them; package names such as @tsconfig/node18 are skipped). paths_base is the
+    directory `paths` targets resolve against: baseUrl when set, else the directory of the
+    config that declared `paths`. base_url is None when no config in the chain sets it.
+    Unreadable files give ({}, None, None)."""
+    data = _load_jsonc(root, rel) if _depth < 10 else None
+    if data is None:
+        return {}, None, None
+    here = posixpath.dirname(rel)
+    paths, paths_dir, base_url = {}, None, None
+    ext = data.get("extends")
+    for parent in (ext if isinstance(ext, list) else [ext] if isinstance(ext, str) else []):
+        if not isinstance(parent, str) or not parent.startswith("."):
+            continue
+        prel = _norm(posixpath.join(here, parent))
+        if not prel.endswith(".json") and not os.path.isfile(os.path.join(root, prel)):
+            prel += ".json"
+        ppaths, pbase, purl = tsconfig_options(root, prel, _depth + 1)
+        if ppaths:
+            paths, paths_dir = ppaths, pbase
+        if purl is not None:
+            base_url = purl
     opts = data.get("compilerOptions") or {}
-    paths = opts.get("paths") or {}
-    base = posixpath.join(posixpath.dirname(rel), opts.get("baseUrl") or ".")
+    if isinstance(opts.get("baseUrl"), str):
+        base_url = posixpath.join(here, opts["baseUrl"])
+    if isinstance(opts.get("paths"), dict):
+        paths, paths_dir = opts["paths"], here
+    if paths and base_url is not None:
+        paths_dir = base_url
+    return paths, (paths_dir if paths_dir is not None else here), base_url
+
+
+def tsconfig_aliases(root, rel="tsconfig.json"):
+    """[(key, wildcard, [targets])] from compilerOptions.paths (following `extends`),
+    targets relative to the repository. Supports the `"@/*": ["src/*"]` form (one trailing
+    `*`) and exact names; targets resolve against baseUrl, else the declaring config's
+    directory. Unreadable or invalid files give []. Longest keys first, so the most
+    specific alias wins."""
+    paths, base, _ = tsconfig_options(root, rel)
+    base = base if base else "."
+    if base == posixpath.dirname(rel) or not base:
+        base = posixpath.join(posixpath.dirname(rel), ".")
     out = []
     for key in sorted(paths, key=lambda k: (-len(k), k)):
         targets = [t for t in (paths[key] if isinstance(paths[key], list) else [])
@@ -492,12 +635,20 @@ def js_specifiers(text):
     return [m.group(2) for m in _JS_SPEC.finditer(text)]
 
 
-def js_imports(path, text, fileset, aliases=()):
+def js_imports(path, text, fileset, aliases=(), resolver=None, unresolved=None):
     """Repository files that `path` imports. Relative specifiers resolve with the JS/TS
     extensions and /index files; alias prefixes (tsconfig paths) map to repository
-    directories; bare package specifiers are ignored."""
+    directories. With a JsResolver, the nearest tsconfig/jsconfig of path supplies the
+    aliases and baseUrl, and workspace package names (`@scope/pkg`, `pkg/sub`) resolve to
+    their source in the repository. Other bare package specifiers are external and ignored.
+    A specifier that matches an alias or a workspace package but resolves to no file is
+    appended to `unresolved` (when given) as (specifier, [directories it points into])."""
     deps = set()
     here = posixpath.dirname(path)
+    if resolver is not None:
+        aliases, base_url = resolver.config_for(path)
+    else:
+        base_url = None
     for spec in js_specifiers(text):
         spec = spec.split("?", 1)[0]
         if spec.startswith("./") or spec.startswith("../") or spec in (".", ".."):
@@ -505,18 +656,147 @@ def js_imports(path, text, fileset, aliases=()):
             if hit:
                 deps.add(hit)
             continue
+        matched, hit, dirs = False, None, []
         for key, wildcard, targets in aliases:
             if not (spec.startswith(key) if wildcard else spec == key):
                 continue
+            matched = True
             rest = spec[len(key):] if wildcard else ""
+            dirs = [posixpath.dirname(t) if not wildcard else t.rstrip("/") for t in targets]
             for t in targets:
                 hit = _resolve_js(t + rest, fileset)
                 if hit:
-                    deps.add(hit)
                     break
             break
+        if hit is None and resolver is not None:
+            pkg = resolver.package_for(spec)
+            if pkg is not None:
+                matched = True
+                dirs = [pkg[1]]
+                hit = resolver.resolve_package(spec, pkg)
+            elif base_url is not None:
+                hit = _resolve_js(posixpath.join(base_url, spec), fileset)
+        if hit:
+            deps.add(hit)
+        elif matched and unresolved is not None:
+            unresolved.append((spec, [_norm(d) for d in dirs]))
     deps.discard(path)
     return sorted(deps)
+
+
+class JsResolver(object):
+    """Per-repository JS/TS resolution: the nearest tsconfig.json or jsconfig.json for each
+    file (with `extends`), and every package.json `name` in the repository mapped to its
+    directory, so workspace imports (`@acme/core`) become edges to source files."""
+
+    BUILD_DIRS = ("dist/", "build/", "lib/", "out/", "esm/", "cjs/")
+
+    def __init__(self, root, files):
+        self.root = root
+        self.files = list(files)
+        self.fileset = set(files)
+        self.config_dirs = {}
+        for f in self.files:
+            b = posixpath.basename(f)
+            if b in ("tsconfig.json", "jsconfig.json"):
+                d = posixpath.dirname(f)
+                if b == "tsconfig.json" or d not in self.config_dirs:
+                    self.config_dirs[d] = f
+        self.packages = {}
+        for f in sorted(self.files, key=lambda p: (p.count("/"), p)):
+            if posixpath.basename(f) != "package.json":
+                continue
+            data = _load_jsonc(root, f)
+            name = data.get("name") if data else None
+            if isinstance(name, str) and name and name not in self.packages:
+                self.packages[name] = (posixpath.dirname(f), data)
+        self._names = sorted(self.packages, key=lambda n: (-len(n), n))
+        self._cache = {}
+
+    def config_for(self, path):
+        """(aliases, baseUrl directory or None) from the nearest config above path."""
+        d = posixpath.dirname(path)
+        probe = d
+        while True:
+            if probe in self.config_dirs:
+                break
+            if not probe:
+                probe = None
+                break
+            probe = posixpath.dirname(probe)
+        hit = self._cache.get(probe)
+        if hit is None:
+            if probe is None:
+                hit = ([], None)
+            else:
+                rel = self.config_dirs[probe]
+                hit = (tsconfig_aliases(self.root, rel), tsconfig_options(self.root, rel)[2])
+            self._cache[probe] = hit
+        return hit
+
+    def package_for(self, spec):
+        for name in self._names:
+            if spec == name or spec.startswith(name + "/"):
+                return name, self.packages[name][0], self.packages[name][1]
+        return None
+
+    def _candidates(self, value):
+        out = []
+        if isinstance(value, str):
+            out.append(value)
+        elif isinstance(value, dict):
+            for k in sorted(value):
+                out.extend(self._candidates(value[k]))
+        elif isinstance(value, list):
+            for v in value:
+                out.extend(self._candidates(v))
+        return out
+
+    def _try(self, pdir, rel):
+        rel = rel[2:] if rel.startswith("./") else rel
+        cands = [rel]
+        for b in self.BUILD_DIRS:
+            if rel.startswith(b):
+                stem = posixpath.splitext(rel[len(b):])[0]
+                if stem.endswith(".d"):
+                    stem = stem[:-2]
+                cands.append("src/" + stem)
+        for c in cands:
+            hit = _resolve_js(posixpath.join(pdir, c) if pdir else c, self.fileset)
+            if hit:
+                return hit
+        return None
+
+    def resolve_package(self, spec, pkg):
+        name, pdir, data = pkg
+        sub = spec[len(name):].lstrip("/")
+        exports = data.get("exports")
+        if sub:
+            if isinstance(exports, dict) and ("./" + sub) in exports:
+                for c in self._candidates(exports["./" + sub]):
+                    hit = self._try(pdir, c)
+                    if hit:
+                        return hit
+            for c in (sub, "src/" + sub):
+                hit = self._try(pdir, c)
+                if hit:
+                    return hit
+            return None
+        fields = []
+        if isinstance(exports, dict) and "." in exports:
+            fields.extend(self._candidates(exports["."]))
+        elif isinstance(exports, (str, list)) or (isinstance(exports, dict) and not any(
+                k.startswith(".") for k in exports)):
+            fields.extend(self._candidates(exports))
+        for key in ("source", "module", "main", "types", "typings"):
+            if isinstance(data.get(key), str):
+                fields.append(data[key])
+        fields += ["src/index", "index"]
+        for c in fields:
+            hit = self._try(pdir, c)
+            if hit:
+                return hit
+        return None
 
 
 # ---------------------------------------------------------------- go
@@ -598,7 +878,11 @@ def _toml_value(text, i):
                 continue
             if j < n and text[j] == "]":
                 return items, j + 1
+            start = j
             v, j = _toml_value(text, j)
+            if j <= start:              # a stray `}` or other junk: skip the line, never loop
+                end = text.find("\n", start)
+                return items, n if end == -1 else end
             items.append(v)
         return items, j
     if c == "{":
@@ -608,11 +892,17 @@ def _toml_value(text, i):
                 j += 1
             if j < n and text[j] == "}":
                 return table, j + 1
+            if j < n and text[j] in "\r\n":     # an inline table never spans lines
+                return table, j
             m = re.compile(r'\s*("[^"]*"|[\w.-]+)\s*=').match(text, j)
             if not m:
                 return table, n
             key = m.group(1).strip('"')
+            start = j
             v, j = _toml_value(text, m.end())
+            if j <= start:
+                end = text.find("\n", start)
+                return table, n if end == -1 else end
             table[key] = v
         return table, j
     m = re.compile(r"[^\s,\]}#]+").match(text, i)

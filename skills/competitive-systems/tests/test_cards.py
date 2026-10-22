@@ -58,6 +58,13 @@ class ExampleAArithmeticTests(unittest.TestCase):
         self.assertLess(28.78, cap)                                  # within the Amdahl cap
         self.assertAlmostEqual(1.37 / 0.0476, 28.78, delta=0.1)
 
+    def test_cap_at_production_size_is_bounded_by_the_after_run(self):
+        before, after = 19 * 60.0, 0.9709                        # reported 19 min; 970.9 ms
+        self.assertEqual(before, 1140.0)
+        self.assertAlmostEqual(1 - 0.971 / before, 0.99915, places=5)   # share at least
+        self.assertAlmostEqual(before / 0.971, 1174, delta=0.5)          # cap at least
+        self.assertAlmostEqual(before / after, 1174, delta=0.5)          # the quoted ratio
+
 
 class StopAnswerArithmeticTests(unittest.TestCase):
     """Example D and the Gate 2 flip-size rule in measurement.md."""
@@ -66,10 +73,23 @@ class StopAnswerArithmeticTests(unittest.TestCase):
         self.assertEqual(40 * 2000, 80000)
         self.assertEqual(40 * 2000 * 10, 800000)
 
+    def test_gate3_example_e(self):
+        share, s = 65 / 540.0, 100
+        self.assertAlmostEqual(share, 0.12, places=2)
+        self.assertAlmostEqual(1 / ((1 - 0.12) + 0.12 / s), 1.13, places=2)
+        self.assertAlmostEqual(1 / (1 - 0.12), 1.14, places=2)
+        self.assertLess(1 / (1 - 0.12), 1 + 2 * 0.08)                 # the stop rule fires
+        self.assertAlmostEqual(540 / 60.0 - 65 / 60.0, 7.9, places=1)
+        self.assertEqual(540 - 65, 310 + 120 + 45)
+
     def test_flip_size_at_one_second(self):
-        budget_ops = 1e7
-        self.assertEqual(budget_ops / 2000, 5000)      # patterns over 2,000 lines
-        self.assertEqual(budget_ops / 40, 250000)      # lines for 40 patterns
+        rate = 80000 / 0.004                           # 80k checks measured in 4 ms
+        self.assertAlmostEqual(rate, 2e7)
+        self.assertAlmostEqual(800000 / rate, 0.040)   # "about 40 ms" at 10x
+        self.assertAlmostEqual(800000 / 2e8, 0.004)    # bound ops --runtime c-builtin: 4 ms
+        budget_ops = rate * 1.0                        # checks in one second
+        self.assertEqual(budget_ops / 2000, 10000)     # patterns over 2,000 lines
+        self.assertEqual(budget_ops / 40, 500000)      # lines for 40 patterns
 
 
 class ProseCrossReferenceTests(unittest.TestCase):
@@ -77,9 +97,9 @@ class ProseCrossReferenceTests(unittest.TestCase):
         with open(os.path.join(REFS, name), encoding="utf-8") as f:
             return f.read()
 
-    def test_examples_c_and_d_exist_and_are_plain_words(self):
-        text = self.read("worked-example.md")
-        for ex in ("## Example C", "## Example D"):
+    def test_stop_examples_exist_and_are_plain_words(self):
+        text = self.read("worked-stops.md")
+        for ex in ("## Example C", "## Example D", "## Example E"):
             self.assertIn(ex, text)
         tail = text[text.index("## Example C"):]
         self.assertNotIn("```", tail, "stop examples must not end in a report template")

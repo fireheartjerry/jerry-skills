@@ -30,7 +30,7 @@ with open(os.path.join(HERE, "scenarios.json"), encoding="utf-8") as _fh:
     HELD_OUT = tuple(s["id"][:3] for s in json.load(_fh)["scenarios"] if s.get("held_out"))
 # Scenarios where a commit was instructed or granted, so HEAD moving is expected.
 COMMIT_EXPECTED = ("S12", "S16", "S18")
-ORDER = ["none", "old", "new", "installed"]
+ORDER = ["none", "old", "new", "core", "pointer", "installed"]
 RULE3_MIN_TRIALS = 3
 
 
@@ -62,23 +62,38 @@ def agreement(results):
     return max(yes, len(vals) - yes) / float(len(vals))
 
 
+def subdirs(path):
+    """Child directories of *path*, sorted; files and dot-entries (.DS_Store)
+    are skipped."""
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return []
+    return sorted(n for n in names if not n.startswith(".") and os.path.isdir(os.path.join(path, n)))
+
+
 def load(runs_dir, harness):
+    """Every graded cell under <runs_dir>/<harness>/<arm>/<scenario>/<trial>/.
+    A result.json that does not parse is named on stderr and skipped."""
     rows = []
     base = os.path.join(runs_dir, harness)
-    if not os.path.isdir(base):
-        return rows
-    for arm in sorted(os.listdir(base)):
-        for sid in sorted(os.listdir(os.path.join(base, arm))):
+    for arm in subdirs(base):
+        for sid in subdirs(os.path.join(base, arm)):
             sdir = os.path.join(base, arm, sid)
-            if not os.path.isdir(sdir):
-                continue
-            for trial in sorted(os.listdir(sdir)):
+            for trial in subdirs(sdir):
                 p = os.path.join(sdir, trial, "result.json")
-                if os.path.exists(p):
+                if not os.path.exists(p):
+                    continue
+                try:
                     with open(p, encoding="utf-8") as fh:
                         r = json.load(fh)
-                    r["_path"] = os.path.dirname(p)
-                    rows.append(r)
+                except ValueError as e:
+                    print("skipping unreadable %s (%s); re-grade it" % (p, e), file=sys.stderr)
+                    continue
+                if not isinstance(r, dict):
+                    continue
+                r["_path"] = os.path.dirname(p)
+                rows.append(r)
     return rows
 
 
@@ -92,10 +107,11 @@ def load_route_check():
 def skill_sha(r):
     """SKILL.md SHA-256 recorded by run.py in the cell's meta.json (None if absent)."""
     meta = os.path.join(r.get("_path", ""), "meta.json")
-    if os.path.exists(meta):
+    try:
         with open(meta, encoding="utf-8") as fh:
             return json.load(fh).get("skill_sha256")
-    return None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def passes(rs):

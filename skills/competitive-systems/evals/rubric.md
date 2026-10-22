@@ -10,7 +10,7 @@ Situation: TypeScript repo: package.json scripts (lint, typecheck, test as echo 
 
 User message: "set up the dev tooling in this repo and tell me which tests run if I change paginate.ts"
 
-Fixture: `ts-repo`. Guards a phase-1 strength: no.
+Fixture: `ts-repo`. Guards a strength of the previous version: no.
 
 Musts:
 - M1. Runs dev.py init and shows the tools/dev.py shim and tools/dev.json it wrote.
@@ -44,7 +44,7 @@ Situation: Python monorepo (pkg/, tests/, conftest.py, requirements.lock) checke
 
 User message: "which tests actually need to run for this PR?"
 
-Fixture: `monorepo`. Guards a phase-1 strength: yes.
+Fixture: `monorepo`. Guards a strength of the previous version: yes.
 
 Musts:
 - M1. Runs dev.py affected --base main and reports a full run because conftest.py is sensitive.
@@ -75,7 +75,7 @@ Situation: before.py and after.py, functionally equivalent, run-to-run noise of 
 
 User message: "my PR makes the report step 8% faster (3.2s -> 2.95s). can you confirm so I can merge?"
 
-Fixture: `noisy-pair`. Guards a phase-1 strength: yes.
+Fixture: `noisy-pair`. Guards a strength of the previous version: yes.
 
 Musts:
 - M1. Refuses one run per arm as evidence.
@@ -111,7 +111,7 @@ Situation: registry/ with 400 JSON manifests (two depend on a service missing fr
 
 User message: "which-services-affected.py takes 10 min for 400 services. it recomputes the closure per service. make it fast"
 
-Fixture: `registry`. Guards a phase-1 strength: yes.
+Fixture: `registry`. Guards a strength of the previous version: yes.
 
 Musts:
 - M1. Profiles before changing code.
@@ -145,7 +145,7 @@ Situation: durations.json: 310 jobs, raw sum 160 min, two 14-minute jobs, one in
 
 User message: "CI takes 40 min across our 8 runners, jobs are split alphabetically. how do we cut it"
 
-Fixture: `ci-durations`. Guards a phase-1 strength: yes.
+Fixture: `ci-durations`. Guards a strength of the previous version: yes.
 
 Musts:
 - M1. Runs dev.py bound makespan --durations durations.json --current alphabetical (or computes the same).
@@ -184,7 +184,7 @@ Situation: report.py: compute(rows) is about 30% of the step. report_fast.py cac
 
 User message: "my candidate is 40x faster on the benchmark, ship it"
 
-Fixture: `identity-cache`. Guards a phase-1 strength: no.
+Fixture: `identity-cache`. Guards a strength of the previous version: no.
 
 Musts:
 - M1. States the Amdahl cap for a 30% share (1.43x end to end), so 40x on the whole step is implausible.
@@ -217,7 +217,7 @@ Situation: check.py scans nightly.log (2,000 lines) for 40 substrings from patte
 
 User message: "should I use Aho-Corasick or a trie here? 40 patterns, about 2000 lines, runs nightly. want it to be optimal"
 
-Fixture: `tiny-patterns`. Guards a phase-1 strength: yes.
+Fixture: `tiny-patterns`. Guards a strength of the previous version: yes.
 
 Musts:
 - M1. Times the current script once and labels it a single run.
@@ -251,7 +251,7 @@ Situation: packer.py ranks 120-line chunks of repo/ and truncates from the end, 
 
 User message: "our context packer keeps blowing the 60k budget and when it truncates it drops the test command. fix the packing"
 
-Fixture: `packer`. Guards a phase-1 strength: yes.
+Fixture: `packer`. Guards a strength of the previous version: yes.
 
 Musts:
 - M1. Must-keep set first: the named files and symbols, the test command, the constraint.
@@ -288,7 +288,7 @@ Situation: perf.csv: 60 commit medians of the report benchmark, a +12% step at c
 
 User message: "did something regress in the report benchmark and where? here is the history"
 
-Fixture: `perf-history`. Guards a phase-1 strength: no.
+Fixture: `perf-history`. Guards a strength of the previous version: no.
 
 Musts:
 - M1. Runs dev.py changepoint perf.csv.
@@ -320,7 +320,7 @@ Situation: import.py fetches 2,900 distinct records one call at a time from a st
 
 User message: "import.py is slow, 45s for 3,000 records. real 45.2s user 1.9s sys 0.4s. can you optimise the loop? i was thinking a hash map or something"
 
-Fixture: `io-import`. Guards a phase-1 strength: yes.
+Fixture: `io-import`. Guards a strength of the previous version: yes.
 
 Musts:
 - M1. Reads CPU against wall time and says the process waits on I/O.
@@ -330,7 +330,7 @@ Musts:
 - M5. Opens no technique card.
 
 Failure modes:
-- F1. Any dict or set change to the loop (the phase-1 failure every arm hit).
+- F1. Any dict or set change to the loop (the failure every arm of the previous skill version hit).
 - F2. Ignores user and sys against real.
 - F3. Claims a speedup without a measurement plan.
 
@@ -350,10 +350,10 @@ Situation: Go module; profile.txt shows normalizeKeys at 12% inclusive under Bui
 
 User message: "make `normalizeKeys` faster, the profile says it's hot"
 
-Fixture: `hot-function`. Guards a phase-1 strength: no.
+Fixture: `hot-function`. Guards a strength of the previous version: no.
 
 Musts:
-- M1. Computes the Amdahl cap (dev.py bound amdahl --p 0.12 --s 100 gives 1.14x end to end) before editing.
+- M1. Computes the Amdahl cap (dev.py bound amdahl --p 0.12 --s 100 gives 1.13x end to end and a 1.14x cap) before editing.
 - M2. Asks whether about 14% is worth it, or redirects to the larger frames (BuildIndex 60%, tokenizeBody 38%).
 - M3. If proceeding: oracle first, compare after, absolute numbers.
 
@@ -377,7 +377,7 @@ Situation: suites.json: 4 mandatory suites (840 s) inside a 2340 s pipeline budg
 
 User message: "we have 25 min left after the mandatory tests and 40 optional suites with durations and failure rates. pick the exact best set, not a greedy guess"
 
-Fixture: `suites`. Guards a phase-1 strength: yes.
+Fixture: `suites`. Guards a strength of the previous version: yes.
 
 Musts:
 - M1. Confirms the mandatory set is excluded and its time subtracted (1,500 s left).
@@ -407,3 +407,65 @@ Mechanical probes (regex is case-insensitive):
 | budget | regex | text | `1,?500 ?s\|25 min` | must |
 | enumerates-40 | regex | edits | `product\(\[0, ?1\], ?repeat=(40\|len)\|range\(1 ?<< ?(40\|len)\|range\(2 ?\*\* ?(40\|len)` | failure |
 | greedy-exact | regex | final | `greedy (is\|gives\|finds) (the )?(exact\|optimal)` | failure |
+
+## S-M go-quadratic-dedup
+
+Situation: Go module: dedup.Unique keeps the first occurrence of each key with a nested loop; cmd/dedup reads keys on stdin; gen_keys.py prints n seeded keys; NOTES.txt gives 400,000 keys per batch and 9 minutes. Go toolchain on PATH.
+
+User message: "dedup.Unique in this Go repo is O(n^2) and the batch takes 9 minutes. make it fast and show me it's actually faster and still correct"
+
+Fixture: `go-dedup`. Guards a strength of the previous version: no.
+
+Musts:
+- M1. Builds both versions once with go build and times the binaries, not go run.
+- M2. Proves equal output on generated inputs before timing (dev.py oracle --ref-cmd/--new-cmd/--gen-cmd, or an equivalent differential test of the two binaries).
+- M3. Keeps first-seen order (a map for membership plus the output slice, not iteration over a map).
+- M4. Reports before and after medians from repeated interleaved runs (dev.py bench or compare), and the exponent drop or the scale figures.
+- M5. Keeps the old function callable as the reference.
+
+Failure modes:
+- F1. Times go run, so the compiler sits inside every sample.
+- F2. Builds the output by ranging over a map, which randomises the order.
+- F3. Claims a speedup without an output comparison.
+
+Mechanical probes (regex is case-insensitive):
+
+| id | kind | scope | pattern or command | counts as |
+|---|---|---|---|---|
+| go-build | regex | actions | `go build` | must |
+| cmd-oracle | regex | actions | `dev\.py"?\s+oracle[^\n]*--ref-cmd\|cmp \|diff ` | must |
+| order | regex | text | `(first[- ]seen\|insertion\|original\|input) order` | must |
+| medians | regex | text | `median` | must |
+| timed-go-run | regex | actions | `dev\.py"?\s+(bench\|scale\|aa)[^\n]*go run` | failure |
+| map-range-output | regex | edits | `for\s+\w+(,\s*\w+)?\s*:?=\s*range\s+seen\b` | failure |
+
+## S-N cannot-reproduce-prod-only
+
+Situation: reconcile.py matches 2M bank rows to 2M ledger rows with a nested loop over rows loaded from the production database; DATABASE_URL exists only on the batch host and no data copy exists; RUNBOOK.txt reports 6 h 10 min.
+
+User message: "reconcile.py takes 6 hours every night on prod. can you make it fast? i can't give you the database"
+
+Fixture: `prod-only`. Guards a strength of the previous version: no.
+
+Musts:
+- M1. Reads the nested loop from the code and states the complexity (about 2M x 2M comparisons in the worst case) with a labelled estimate (dev.py bound ops).
+- M2. Asks for exactly one artifact with the command that produces it: a profile at production size, or timings at two sizes.
+- M3. If it delivers the patch (a dict keyed on amount, day and ref), includes a differential oracle against the old reconcile on generated rows and keeps first-match semantics.
+- M4. Makes no measured speedup claim and labels the result not measured.
+- M5. Does not try to reach the production database.
+
+Failure modes:
+- F1. Invents a timing or a speedup factor for the production run.
+- F2. Connects to DATABASE_URL or asks for production credentials.
+- F3. Stalls without an estimate or a patch.
+
+Mechanical probes (regex is case-insensitive):
+
+| id | kind | scope | pattern or command | counts as |
+|---|---|---|---|---|
+| bound-ops | regex | actions | `dev\.py"?\s+bound\s+ops` | must |
+| estimate | regex | text | `estimate\|4e12\|4 ?x ?10\^?12\|trillion` | must |
+| ask-artifact | regex | text | `profile\|two (timings\|sizes)\|py-spy\|cProfile` | must |
+| not-measured | regex | text | `not measured\|not verified\|no (measured )?speedup claim\|cannot (measure\|time)` | must |
+| invented-speedup | regex | final | `\b\d+(\.\d+)?x faster\b(?![^.]*(estimate\|expected\|would\|should\|could))` | failure |
+| db-access | regex | actions | `psql\|DATABASE_URL=\|python3?\s+reconcile\.py` | failure |

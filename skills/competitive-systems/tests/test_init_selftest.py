@@ -120,10 +120,12 @@ class InitTests(unittest.TestCase):
         fake = os.path.join(self.tmp, "fake", "dev.py")
         os.makedirs(os.path.dirname(fake))
         with open(fake, "w") as f:
-            f.write("import os, sys\nprint('fake', os.environ['DEVKIT_REPO'], sys.argv[1:])\n")
+            f.write("import json, os, sys\nprint(json.dumps({'fake': True, 'repo': "
+                    "os.environ['DEVKIT_REPO'], 'argv': sys.argv[1:]}))\n")
         p = self.shim("detect", DEVKIT_DEV_PY=fake)                    # the variable wins
-        self.assertEqual(p.stdout.split()[0], "fake")
-        self.assertEqual(os.path.realpath(p.stdout.split()[1]), os.path.realpath(self.root))
+        got = json.loads(p.stdout)                 # JSON, so a temp path with spaces survives
+        self.assertTrue(got["fake"])
+        self.assertEqual(os.path.realpath(got["repo"]), os.path.realpath(self.root))
         shutil.rmtree(os.path.join(self.tmp, "installed"))
         p = self.shim("detect")
         self.assertEqual(p.returncode, 3)
@@ -297,6 +299,28 @@ class SelftestTests(unittest.TestCase):
             self.assertEqual(os.listdir(scratch), [], "temporary directory kept without --keep")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+class Python38SyntaxTests(unittest.TestCase):
+    """The skill promises Python 3.8+: every .py file must parse with the 3.8 grammar, so a
+    newer construct such as `match` fails here on any interpreter. Library calls added after
+    3.8 (str.removeprefix) are not syntax; only a 3.8 interpreter catches those."""
+
+    def test_every_python_file_parses_as_3_8(self):
+        import ast
+        root = os.path.dirname(HERE)
+        checked = 0
+        for dirpath, _, names in os.walk(root):
+            if "__pycache__" in dirpath:
+                continue
+            for n in names:
+                if n.endswith(".py"):
+                    path = os.path.join(dirpath, n)
+                    with open(path, encoding="utf-8") as f:
+                        ast.parse(f.read(), filename=path, feature_version=(3, 8))
+                    checked += 1
+        self.assertGreater(checked, 30)
 
 
 if __name__ == "__main__":

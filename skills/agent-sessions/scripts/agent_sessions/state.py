@@ -33,8 +33,8 @@ import re
 import time
 
 from agent_sessions.common import (
-    FAILURE_CLASSES, NAME_RE, RESERVATION_S, STATE_ROOT, UNTRUSTED, die, env_int, iso_of, now_iso, read_json,
-    sdir_of, write_json,
+    FAILURE_CLASSES, NAME_RE, RESERVATION_S, STATE_ROOT, UNTRUSTED, StateRootError, die, env_int, iso_of, now_iso,
+    read_json, sdir_of, valid_name, write_json,
 )
 from agent_sessions.procs import engine_alive, runner_alive
 from agent_sessions import backend
@@ -43,7 +43,7 @@ from agent_sessions.backend import Liveness, backend_of
 __all__ = [
     "empty_usage", "add_usage", "empty_budget", "RESULT_DEFAULTS", "normalize_result",
     "load_meta", "require_meta", "load_progress", "turn_numbers", "load_turn", "load_turns",
-    "build_result", "write_lost", "session_state", "activity_seconds", "state_lock",
+    "build_result", "write_lost", "session_state", "activity_seconds", "state_lock", "LockBusy", "READ_LOCK_S",
     "working_children", "stale_reservations", "all_metas", "child_alive", "retire_runner", "check_terminal",
     "effective_depth", "descendants", "unfinished", "events_path", "read_events",
     "pauses_dir", "read_pause", "active_pauses", "write_pause", "groups_dir", "load_group", "group_members",
@@ -101,7 +101,7 @@ def events_path(name):
 
 
 def load_meta(name):
-    if not NAME_RE.match(name or ""):
+    if not valid_name(name):
         return None
     return read_json(os.path.join(sdir_of(name), "meta.json"))
 
@@ -280,20 +280,54 @@ def activity_seconds(name, meta):
     return max(0, int(time.time() - epoch))
 
 
+class LockBusy(Exception):
+    """The state lock stayed held by another process for the whole wait."""
+
+
+# How long a read-only command waits for the state lock before it skips the
+# scheduler pass (or the lost check) instead: a spawn holds the lock through
+# `git worktree add` and --copy, which can take as long as the copy does.
+READ_LOCK_S = 1.0
+
+
 class state_lock(object):
     """Exclusive flock on <state>/.lock. Re-entrant within one process, so
     spawn --replace can call reap_one while holding it. Held by spawn from the
     cap check until the tmux session is up, and by anything that is about to
     declare a child lost or delete its state, so neither can misjudge a child
-    that is still being started."""
+    that is still being started.
+
+    `timeout` (seconds) bounds the wait: LockBusy when another process keeps
+    the lock that long. Without it the wait is unbounded (writers). A state
+    root that cannot be created or opened raises StateRootError."""
     depth = 0
     fd = None
 
+    def __init__(self, timeout=None):
+        self.timeout = timeout
+
     def __enter__(self):
         if state_lock.depth == 0:
-            os.makedirs(STATE_ROOT, 0o700, exist_ok=True)
-            fd = os.open(os.path.join(STATE_ROOT, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                os.makedirs(STATE_ROOT, 0o700, exist_ok=True)
+                fd = os.open(os.path.join(STATE_ROOT, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError as exc:
+                raise StateRootError(exc.errno, "cannot create or lock the state root (%s)" % exc.strerror,
+                                     STATE_ROOT)
+            if self.timeout is None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            else:
+                deadline = time.time() + self.timeout
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except (BlockingIOError, PermissionError):
+                        if time.time() >= deadline:
+                            os.close(fd)
+                            raise LockBusy("the state lock is held by another process (a spawn creating a "
+                                           "worktree or copying files)")
+                        time.sleep(0.05)
             state_lock.fd = fd
         state_lock.depth += 1
         return self
@@ -325,7 +359,7 @@ def working_children(engine=None):
     except OSError:
         return names
     for name in entries:
-        if not NAME_RE.match(name):
+        if not valid_name(name):
             continue
         sdir = sdir_of(name)
         meta_p = os.path.join(sdir, "meta.json")
@@ -362,7 +396,7 @@ def stale_reservations():
     except OSError:
         return names
     for name in entries:
-        if not NAME_RE.match(name):
+        if not valid_name(name):
             continue
         sdir = sdir_of(name)
         reserved_p = os.path.join(sdir, "reserved")
@@ -383,7 +417,7 @@ def all_metas():
     except OSError:
         return metas
     for name in names:
-        if not NAME_RE.match(name):
+        if not valid_name(name):
             continue
         meta = load_meta(name)
         if meta:
@@ -422,14 +456,19 @@ def check_terminal(name, meta):
         return None
     # No result, no tmux, no runner. Decide under the lock: a spawn in flight
     # holds it until tmux is up, and the runner may have just written the result.
-    with state_lock():
-        res = read_json(os.path.join(sdir, "result.json"))
-        if res:
-            return normalize_result(res)
-        meta = load_meta(name) or meta
-        if is_queued(name, meta) or child_alive(name, meta):
-            return None
-        return write_lost(name, meta)
+    # A lock held elsewhere for long (a spawn copying files) means "ask again
+    # later", never a wait past the caller's own timeout.
+    try:
+        with state_lock(timeout=READ_LOCK_S * 3):
+            res = read_json(os.path.join(sdir, "result.json"))
+            if res:
+                return normalize_result(res)
+            meta = load_meta(name) or meta
+            if is_queued(name, meta) or child_alive(name, meta):
+                return None
+            return write_lost(name, meta)
+    except LockBusy:
+        return None
 
 
 def effective_depth():
@@ -507,7 +546,7 @@ def groups_dir():
 
 
 def load_group(group):
-    if not NAME_RE.match(group or ""):
+    if not valid_name(group):
         return None
     return read_json(os.path.join(groups_dir(), "%s.json" % group))
 
@@ -524,11 +563,11 @@ def group_members(group):
     return [m for m in (g.get("members") or []) if isinstance(m, str)]
 
 
-def kick():
+def kick(timeout=None):
     """Advance cooperative scheduling (see launch.kick). Called by every runner
     at exit and by spawn, wait, status, list, unpause, resume and recover."""
     from agent_sessions.launch import kick as _kick
-    return _kick()
+    return _kick(timeout=timeout)
 
 
 # --------------------------------------------------------------------------- ledgers

@@ -20,7 +20,7 @@ from agent_sessions.common import (
     ENGINES, READONLY_TOOLS, STATE_ROOT, blocks_text, compact, read_json, read_text, run, sdir_of, write_json,
     write_text,
 )
-from agent_sessions.procs import find_binary
+from agent_sessions.procs import find_binary, found_via_login_shell, interpreter_dirs
 
 __all__ = [
     "ENGINES", "CLAUDE_TIERS", "GEMINI_TIERS", "RATE_LIMIT_RE", "OVERLOADED_RE", "AUTH_RE",
@@ -29,7 +29,7 @@ __all__ = [
     "Engine", "ClaudeEngine", "CodexEngine", "GeminiEngine", "engine_for", "parser_for",
     "codex_rollout_thread_id", "SCHEMA_FIXUP_PROMPT", "schema_fixup_message", "VERIFY_FIXUP_PROMPT",
     "verify_fixup_message", "RESUME_PROMPT", "resume_message", "JUDGE_PROMPT", "reset_delay", "USAGE_LIMIT_RE",
-    "OTHER_ENGINE",
+    "OTHER_ENGINE", "MAX_RESET_S", "MCP_BARE_KEY",
 ]
 
 CLAUDE_TIERS = {"cheap": "haiku", "standard": "sonnet", "deep": "opus"}
@@ -68,9 +68,11 @@ RESUME_PROMPT = ("You were interrupted (%(reason)s) at %(at)s. Continue the task
                  "before editing it again, and finish with your final report.")
 
 JUDGE_PROMPT = """You are an independent reviewer. Another agent was given the task in judge/brief.md. Its final
-answer is in judge/answer.md and its changes are in judge/diff.patch (absent when it changed no files
-tracked by git). %(where)s
+answer is in judge/answer.md and its changes are in judge/diff.patch (absent when it changed no files).
+%(where)s
 Do not fix anything and do not run commands that change files.
+
+About the diff: %(about_diff)s
 
 Review the work against the brief:
 1. Does the change do what the brief asked, completely? Name anything missing.
@@ -106,41 +108,77 @@ def resume_message(reason, at_iso):
     return RESUME_PROMPT % {"reason": reason or "unknown reason", "at": at_iso}
 
 
-_IN_RE = re.compile(r"(?i)(?:try again|retry|resets?|available again)\s+in\s+(\d+(?:\.\d+)?)\s*"
-                    r"(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b")
-_AT_RE = re.compile(r"(?i)(?:try again|retry|resets?|available again)\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)?")
+_LEAD = r"(?:try again|retry|resets?|available again)"
+_IN_HEAD_RE = re.compile(r"(?i)" + _LEAD + r"\s+in\s+")
+# One `N unit` pair; pairs may be joined by spaces, commas or "and" ("1 day,
+# 3 hours and 5 minutes") or written compactly ("1h30m"). Months are left
+# out on purpose: no engine resets that far ahead, and a guess would park
+# the engine for weeks.
+_PAIR_RE = re.compile(r"(?i)(?:\s|,|\band\b)*(\d+(?:\.\d+)?)\s*"
+                      r"(weeks?|wks?|w|days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])")
+_UNIT_S = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
+_AT_RE = re.compile(r"(?i)" + _LEAD + r"\s+at\s+(?:([a-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*"
+                    r"(?:(\d{4}),?\s*)?)?(?:at\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?")
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+# A parsed reset further away than this is not trusted: the pause (and the
+# retry wait) is capped here, and `unpause` clears it earlier.
+MAX_RESET_S = 7 * 86400
 
 
 def reset_delay(retry_delay_ms, text, now=None):
     """Seconds until an engine says it can be retried: claude's api_retry
-    `retry_delay_ms`, else `try again in N seconds|minutes|hours` or
-    `try again at 3:05 PM` in the error text. None when nothing parses."""
-    if isinstance(retry_delay_ms, (int, float)) and retry_delay_ms > 0:
-        return max(1, int(round(retry_delay_ms / 1000.0)))
-    if not text:
+    `retry_delay_ms`, else `try again in 2 hours 30 minutes` (every unit from
+    seconds to weeks, summed; `1h30m` too) or `try again at [Oct 23rd, 2026]
+    3:05 PM` in the error text. Capped at MAX_RESET_S; None when nothing
+    parses or the named time has passed."""
+    if isinstance(retry_delay_ms, (int, float)) and not isinstance(retry_delay_ms, bool) and retry_delay_ms > 0:
+        return min(MAX_RESET_S, max(1, int(round(retry_delay_ms / 1000.0))))
+    if not isinstance(text, str) or not text:
         return None
-    m = _IN_RE.search(text)
-    if m:
-        n = float(m.group(1))
-        unit = m.group(2).lower()
-        mult = 3600 if unit.startswith("h") else 60 if unit.startswith("m") else 1
-        return max(1, int(n * mult))
+    head = _IN_HEAD_RE.search(text)
+    if head:
+        total, pos = 0.0, head.end()
+        while True:
+            m = _PAIR_RE.match(text, pos)
+            if not m:
+                break
+            total += float(m.group(1)) * _UNIT_S[m.group(2)[0].lower()]
+            pos = m.end()
+        if total > 0:
+            return min(MAX_RESET_S, max(1, int(total)))
     m = _AT_RE.search(text)
     if m:
         import time as _time
         now = now or _time.time()
-        hour, minute = int(m.group(1)), int(m.group(2))
-        ampm = (m.group(3) or "").lower()
+        month, day, year = m.group(1), m.group(2), m.group(3)
+        hour, minute = int(m.group(4)), int(m.group(5))
+        ampm = (m.group(6) or "").lower()
+        if hour > 23 or minute > 59:
+            return None
         if ampm == "pm" and hour < 12:
             hour += 12
         if ampm == "am" and hour == 12:
             hour = 0
         lt = list(_time.localtime(now))
+        dated = bool(month and day)
+        if dated:
+            mon = month[:3].lower()
+            if mon not in _MONTHS:
+                return None
+            lt[1], lt[2] = _MONTHS.index(mon) + 1, int(day)
+            if year:
+                lt[0] = int(year)
         lt[3], lt[4], lt[5] = hour, minute, 0
-        target = _time.mktime(tuple(lt))
+        lt[8] = -1
+        try:
+            target = _time.mktime(tuple(lt))
+        except (OverflowError, ValueError):
+            return None
         if target <= now:
+            if dated:
+                return None
             target += 86400
-        return max(1, int(target - now))
+        return min(MAX_RESET_S, max(1, int(target - now)))
     return None
 
 
@@ -302,9 +340,17 @@ class Parser(object):
         self.pending_tasks = {}
         self.ignored_results = 0
         self.live_usage = None
+        # Events whose shape the parser could not use (the runner counts
+        # exceptions; the parser itself skips fields of the wrong type).
+        self.unparsed = 0
 
     def feed(self, obj):
         raise NotImplementedError
+
+    def set_session(self, value):
+        """Take a session id only when it is a non-empty string."""
+        if isinstance(value, str) and value:
+            self.session_id = value
 
     def turn_settled(self):
         """True once the engine has finished the turn: a terminal event arrived
@@ -351,7 +397,7 @@ class ClaudeParser(Parser):
         same id; the latest counts replace the earlier ones."""
         usage = message.get("usage")
         mid = message.get("id")
-        if not isinstance(usage, dict) or not mid:
+        if not isinstance(usage, dict) or not isinstance(mid, str) or not mid:
             return
         part = normalize_usage(usage, "claude")
         if not part:
@@ -371,11 +417,12 @@ class ClaudeParser(Parser):
         if sub == "background_tasks_changed" and isinstance(obj.get("tasks"), list):
             self.pending_tasks = {}
             for t in obj["tasks"]:
-                if isinstance(t, dict) and t.get("task_id"):
-                    self.pending_tasks[str(t["task_id"])] = t.get("description") or ""
+                if isinstance(t, dict) and isinstance(t.get("task_id"), (str, int)) and t["task_id"] != "":
+                    desc = t.get("description")
+                    self.pending_tasks[str(t["task_id"])] = desc if isinstance(desc, str) else ""
             return
         tid = obj.get("task_id")
-        if not tid:
+        if not isinstance(tid, (str, int)) or tid == "":
             return
         tid = str(tid)
         if sub == "task_started":
@@ -400,9 +447,10 @@ class ClaudeParser(Parser):
             elif sub == "init":
                 if self.got_terminal:
                     self.continued = True
-                self.session_id = obj.get("session_id") or self.session_id
-                self.emit("init", "init: session %s model %s" % (self.session_id, obj.get("model")),
-                          {"session_id": self.session_id, "model": obj.get("model")})
+                self.set_session(obj.get("session_id"))
+                model = obj.get("model") if isinstance(obj.get("model"), str) else None
+                self.emit("init", "init: session %s model %s" % (self.session_id, model),
+                          {"session_id": self.session_id, "model": model})
             elif sub == "api_retry":
                 self.api_retries += 1
                 err = obj.get("error")
@@ -421,13 +469,17 @@ class ClaudeParser(Parser):
         elif kind == "assistant":
             if self.got_terminal:
                 self.continued = True
-            if isinstance(obj.get("message"), dict):
-                self._track_usage(obj["message"])
-            content = (obj.get("message") or {}).get("content") or []
+            message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            self._track_usage(message)
+            content = message.get("content")
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            elif not isinstance(content, list):
+                content = []
             for block in content:
                 if not isinstance(block, dict):
                     continue
-                if block.get("type") == "text" and block.get("text"):
+                if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"]:
                     self.emit("assistant", "assistant: %s" % block["text"], {"text": block["text"]})
                 elif block.get("type") == "tool_use":
                     self.tool_calls += 1
@@ -435,7 +487,8 @@ class ClaudeParser(Parser):
                               {"tool": block.get("name"), "input": compact(block.get("input", {}), 400),
                                "id": block.get("id")})
         elif kind == "user":
-            content = (obj.get("message") or {}).get("content") or []
+            message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            content = message.get("content") if isinstance(message.get("content"), list) else []
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     text = compact(blocks_text(block.get("content")))
@@ -443,24 +496,26 @@ class ClaudeParser(Parser):
                               {"tool_use_id": block.get("tool_use_id"), "text": text,
                                "is_error": bool(block.get("is_error"))})
         elif kind == "result":
-            if (not obj.get("is_error") and obj.get("num_turns") == 0
-                    and not (obj.get("result") or "").strip()):
+            text = obj.get("result") if isinstance(obj.get("result"), str) else None
+            subtype = obj.get("subtype") if isinstance(obj.get("subtype"), str) else None
+            if not obj.get("is_error") and obj.get("num_turns") == 0 and not (text or "").strip():
                 # The empty placeholder claude can emit first on --resume: not the end of the turn.
                 self.ignored_results += 1
-                self.session_id = obj.get("session_id") or self.session_id
+                self.set_session(obj.get("session_id"))
                 self.emit("result", "--- empty placeholder result (num_turns 0) ignored",
-                          {"subtype": obj.get("subtype"), "ignored": True, "num_turns": 0})
+                          {"subtype": subtype, "ignored": True, "num_turns": 0})
                 return
             self.got_terminal = True
             self.continued = False
-            if isinstance(obj.get("result"), str):
-                self.answer = obj["result"]
+            if text is not None:
+                self.answer = text
             self.is_error = bool(obj.get("is_error"))
-            self.subtype = obj.get("subtype")
-            self.session_id = obj.get("session_id") or self.session_id
-            if isinstance(obj.get("total_cost_usd"), (int, float)):
-                self.cost = obj["total_cost_usd"]
-            if isinstance(obj.get("num_turns"), int):
+            self.subtype = subtype
+            self.set_session(obj.get("session_id"))
+            cost = obj.get("total_cost_usd")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                self.cost = cost
+            if isinstance(obj.get("num_turns"), int) and not isinstance(obj.get("num_turns"), bool):
                 self.num_turns = obj["num_turns"]
             raw_usage = dict(obj.get("usage") or {}) if isinstance(obj.get("usage"), dict) else {}
             if isinstance(obj.get("modelUsage"), dict):
@@ -475,8 +530,8 @@ class ClaudeParser(Parser):
                     if isinstance(d, dict):
                         self.add_denial(d.get("tool_name") or d.get("tool"),
                                         compact(d.get("tool_input") or d.get("input") or {}, 80))
-            if self.is_error and isinstance(obj.get("result"), str):
-                self.error_text = obj["result"]
+            if self.is_error and text is not None:
+                self.error_text = text
             elif self.is_error and isinstance(obj.get("error"), str):
                 self.error_text = obj["error"]
             self.emit("result", "--- result %s turns=%s cost=$%s" % (self.subtype, self.num_turns, self.cost),
@@ -505,7 +560,7 @@ class CodexParser(Parser):
         elif kind == "item.started":
             # A long command (tests, a build) is quiet until it completes; logging
             # the start keeps ACTIVITY honest and shows what the child is waiting on.
-            item = obj.get("item") or {}
+            item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
             itype = item.get("type")
             if itype == "command_execution":
                 self.emit("tool_start", "cmd started: %s" % compact(item.get("command", "")),
@@ -513,7 +568,7 @@ class CodexParser(Parser):
             elif itype in ("mcp_tool_call", "web_search"):
                 self.emit("tool_start", "tool started: %s" % compact(item), {"item": compact(item, 400)})
         elif kind == "item.completed":
-            item = obj.get("item") or {}
+            item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
             itype = item.get("type")
             if itype == "agent_message":
                 text = item.get("text")
@@ -527,7 +582,8 @@ class CodexParser(Parser):
                           {"command": compact(item.get("command", ""), 400), "exit_code": item.get("exit_code"),
                            "output": compact(item.get("aggregated_output", ""), 400)})
             elif itype == "file_change":
-                paths = [c.get("path") for c in item.get("changes", []) if isinstance(c, dict)]
+                changes = item.get("changes") if isinstance(item.get("changes"), list) else []
+                paths = [c.get("path") for c in changes if isinstance(c, dict)]
                 self.emit("edit", "edit: %s" % ", ".join(str(p) for p in paths if p), {"paths": paths})
             elif itype in ("mcp_tool_call", "web_search"):
                 self.tool_calls += 1
@@ -557,9 +613,11 @@ class GeminiParser(Parser):
     def feed(self, obj):
         kind = obj.get("type")
         if kind == "init":
-            self.session_id = obj.get("session_id") or obj.get("sessionId") or self.session_id
-            self.emit("init", "init: session %s model %s" % (self.session_id, obj.get("model")),
-                      {"session_id": self.session_id, "model": obj.get("model")})
+            self.set_session(obj.get("session_id"))
+            self.set_session(obj.get("sessionId"))
+            model = obj.get("model") if isinstance(obj.get("model"), str) else None
+            self.emit("init", "init: session %s model %s" % (self.session_id, model),
+                      {"session_id": self.session_id, "model": model})
         elif kind == "message":
             if obj.get("role") in (None, "assistant", "model"):
                 text = blocks_text(obj.get("content"))
@@ -588,8 +646,8 @@ class GeminiParser(Parser):
             status = obj.get("status")
             if status and status not in ("success", "ok", "completed"):
                 self.is_error = True
-                self.error_text = self.error_text or "gemini result status %s" % status
-            self.subtype = status
+                self.error_text = self.error_text or "gemini result status %s" % compact(status, 80)
+            self.subtype = status if isinstance(status, str) else None
             self.usage = normalize_usage(obj.get("stats"), "gemini")
             self.emit("result", "--- result %s" % (status or "done"), {"status": status, "usage": self.usage})
 
@@ -641,6 +699,7 @@ class Engine(object):
     def __init__(self):
         self._binary = _UNSET
         self._version = _UNSET
+        self.version_error = None
 
     # -- discovery
     def binary(self):
@@ -648,9 +707,26 @@ class Engine(object):
             self._binary = find_binary(self.name)
         return self._binary
 
+    def child_path(self):
+        """PATH for the engine (its child and `--version`): the caller's PATH,
+        with the binary's directory and its script interpreter's directory in
+        front when the binary was only found through a login shell (an nvm or
+        Homebrew node CLI the caller's PATH does not reach)."""
+        base = os.environ.get("PATH", "")
+        binary = self.binary()
+        if not binary or not found_via_login_shell(binary):
+            return base
+        parts = [p for p in base.split(os.pathsep) if p]
+        extra = [d for d in interpreter_dirs(binary) if d not in parts]
+        return os.pathsep.join(extra + parts)
+
+    def engine_env(self):
+        return dict(os.environ, PATH=self.child_path())
+
     def version(self):
-        """First line of `<bin> --version`, cached per binary path and mtime in
-        the state root so spawn does not pay the engine's start-up time twice."""
+        """First line of `<bin> --version`, cached per binary path, mtime and
+        size in the state root so spawn does not pay the engine's start-up time
+        twice. None when it does not run; `version_error` then says why."""
         if self._version is not _UNSET:
             return self._version
         binary = self.binary()
@@ -658,7 +734,8 @@ class Engine(object):
             self._version = None
             return None
         try:
-            key = "%s:%d" % (binary, int(os.stat(binary).st_mtime))
+            st = os.stat(binary)
+            key = "%s:%d:%d" % (binary, st.st_mtime_ns, st.st_size)
         except OSError:
             key = binary
         cache_p = os.path.join(STATE_ROOT, "engine-versions.json")
@@ -668,9 +745,12 @@ class Engine(object):
         if isinstance(cache.get(key), str):
             self._version = cache[key]
             return self._version
-        cp = run([binary, "--version"], timeout=30)
+        cp = run([binary, "--version"], timeout=30, env=self.engine_env())
         lines = (cp.stdout.strip() or cp.stderr.strip()).splitlines()
         self._version = lines[0].strip() if cp.returncode == 0 and lines else None
+        if not self._version:
+            why = [l.strip() for l in (cp.stderr.strip() or cp.stdout.strip()).splitlines() if l.strip()]
+            self.version_error = "exit %d%s" % (cp.returncode, ": %s" % compact(why[0], 200) if why else "")
         if self._version:
             cache[key] = self._version
             try:
@@ -687,19 +767,27 @@ class Engine(object):
         return self.tiers.get(tier)
 
     def auth_status(self):
+        """ok, missing or unknown (no free check); None when not installed."""
         return "unknown"
 
-    # Flags build_cmd depends on that the CLI's --help must list; checked only
-    # for engines not verified against a real CLI.
+    def login_hint(self):
+        return None
+
+    # Flags build_cmd depends on that the CLI's help must list, and the argv
+    # that prints that help. `doctor` checks them for every engine, so a CLI
+    # release that drops or renames a flag is reported before any spend.
     required_flags = ()
+    help_argv = ("--help",)
+    # The CLI version the adapter was last run against live (tests/live-smoke.sh).
+    tested_version = None
 
     def missing_flags(self):
-        """Flags of required_flags absent from `<bin> --help`: a list ([] when
-        all are there), or None when not checked or --help gave nothing."""
+        """Flags of required_flags absent from the CLI's help: a list ([] when
+        all are there), or None when not checked or the help printed nothing."""
         binary = self.binary()
         if not binary or not self.required_flags:
             return None
-        cp = run([binary, "--help"], timeout=30)
+        cp = run([binary] + list(self.help_argv), timeout=30)
         text = (cp.stdout or "") + (cp.stderr or "")
         if not text.strip():
             return None
@@ -721,6 +809,11 @@ class Engine(object):
     # -- running
     def readonly_flags(self):
         return []
+
+    def mcp_plan(self):
+        """(servers to switch off, servers that stay loaded, problem text or
+        None) for --mcp none. The base engine cannot switch any off."""
+        return [], [], "%s has no switch for its MCP servers; --mcp none is not enforced" % self.name
 
     def build_cmd(self, meta, turn, paths):
         raise NotImplementedError
@@ -790,6 +883,11 @@ class ClaudeEngine(Engine):
     tiers = CLAUDE_TIERS
     parser_class = ClaudeParser
     install_hint = "npm install -g @anthropic-ai/claude-code"
+    # --max-turns is passed too but is not listed in `claude --help`.
+    required_flags = ("--output-format", "--verbose", "--session-id", "--resume", "--model", "--json-schema",
+                      "--max-budget-usd", "--dangerously-skip-permissions", "--strict-mcp-config", "--add-dir",
+                      "--permission-mode", "--tools")
+    tested_version = "2.1.308"
 
     def base_capabilities(self):
         caps = Engine.base_capabilities(self)
@@ -802,6 +900,28 @@ class ClaudeEngine(Engine):
         # reviewer does not need the user's database or browser tools, and
         # their tool schemas are a large share of a cheap turn's cost.
         return ["--permission-mode", "dontAsk", "--tools", READONLY_TOOLS, "--strict-mcp-config"]
+
+    def auth_status(self):
+        """`claude auth status` prints JSON with loggedIn and spends nothing;
+        it covers API keys and cloud providers too. unknown when the CLI is
+        too old to have the command."""
+        binary = self.binary()
+        if not binary:
+            return None
+        cp = run([binary, "auth", "status"], timeout=20, env=self.engine_env())
+        try:
+            doc = json.loads(cp.stdout)
+        except ValueError:
+            return "unknown"
+        if isinstance(doc, dict) and isinstance(doc.get("loggedIn"), bool):
+            return "ok" if doc["loggedIn"] else "missing"
+        return "unknown"
+
+    def login_hint(self):
+        return "run `claude auth login`, or set ANTHROPIC_API_KEY"
+
+    def mcp_plan(self):
+        return [], [], None
 
     def build_cmd(self, meta, turn, paths):
         cmd = [meta["binary"], "-p", "--output-format", "stream-json", "--verbose"]
@@ -820,6 +940,12 @@ class ClaudeEngine(Engine):
             cmd += self.readonly_flags()
         else:
             cmd += ["--dangerously-skip-permissions"]
+            # --mcp none (the default since meta recorded it): no MCP server,
+            # so an unattended child cannot act through the user's connectors.
+            if meta.get("mcp") == "none":
+                cmd += ["--strict-mcp-config"]
+        for d in meta.get("add_dirs") or []:
+            cmd += ["--add-dir", d]
         return cmd
 
     def subtype_class(self, parser):
@@ -852,6 +978,11 @@ class CodexEngine(Engine):
     tiers = {}
     parser_class = CodexParser
     install_hint = "npm install -g @openai/codex"
+    # build_cmd passes the short forms -o, -m and -c of the last three.
+    required_flags = ("--json", "--skip-git-repo-check", "--output-schema", "--dangerously-bypass-approvals-and-sandbox",
+                      "--output-last-message", "--model", "--config")
+    help_argv = ("exec", "--help")
+    tested_version = "0.163.0"
 
     def base_capabilities(self):
         caps = Engine.base_capabilities(self)
@@ -862,13 +993,56 @@ class CodexEngine(Engine):
         binary = self.binary()
         if not binary:
             return None
-        cp = run([binary, "login", "status"], timeout=20)
+        cp = run([binary, "login", "status"], timeout=20, env=self.engine_env())
         return "ok" if cp.returncode == 0 else "missing"
+
+    def login_hint(self):
+        return "run `codex login`, or set OPENAI_API_KEY"
 
     def readonly_flags(self):
         # `codex exec resume` has no --sandbox option; the -c override is
         # accepted by both `exec` and `exec resume`, so it is used for every turn.
         return ["-c", 'sandbox_mode="read-only"']
+
+    def mcp_plan(self):
+        """Switch off every enabled MCP server codex can address by
+        `-c mcp_servers.<name>.enabled=false`: those declared in its config.
+        A server a plugin provides has no config entry, and naming it makes
+        codex refuse to start ("invalid transport"), so each refused name is
+        kept and the override retried; the result is checked with the same
+        `codex mcp list --json` the engine would use. Spends no tokens."""
+        binary = self.binary()
+        if not binary:
+            return [], [], None
+        env = self.engine_env()
+        cp = run([binary, "mcp", "list", "--json"], timeout=30, env=env)
+        try:
+            entries = json.loads(cp.stdout) if cp.returncode == 0 else None
+        except ValueError:
+            entries = None
+        if not isinstance(entries, list):
+            return [], [], ("could not list codex's MCP servers (`codex mcp list --json` exited %d), so none was "
+                            "switched off" % cp.returncode)
+        names = [e["name"] for e in entries if isinstance(e, dict) and isinstance(e.get("name"), str)
+                 and e.get("enabled", True) is not False]
+        kept = [n for n in names if not MCP_BARE_KEY.match(n)]
+        off = [n for n in names if MCP_BARE_KEY.match(n)]
+        for _ in range(len(off) + 1):
+            if not off:
+                break
+            argv = [binary, "mcp", "list", "--json"]
+            for n in off:
+                argv += ["-c", "mcp_servers.%s.enabled=false" % n]
+            cp = run(argv, timeout=30, env=env)
+            if cp.returncode == 0:
+                break
+            m = re.search(r"mcp_servers\.([A-Za-z0-9_-]+)", cp.stdout + "\n" + cp.stderr)
+            if not m or m.group(1) not in off:
+                return [], names, "codex refused the MCP override (%s), so none was switched off" % compact(
+                    last_line(cp.stderr) or last_line(cp.stdout) or "exit %d" % cp.returncode, 160)
+            off.remove(m.group(1))
+            kept.append(m.group(1))
+        return off, sorted(kept), None
 
     def build_cmd(self, meta, turn, paths):
         cmd = [meta["binary"], "exec"]
@@ -883,6 +1057,8 @@ class CodexEngine(Engine):
             cmd += self.readonly_flags()
         else:
             cmd += ["--dangerously-bypass-approvals-and-sandbox"]
+        for name in meta.get("mcp_disabled") or []:
+            cmd += ["-c", "mcp_servers.%s.enabled=false" % name]
         cmd += ["-"]
         return cmd
 
@@ -948,6 +1124,8 @@ class GeminiEngine(Engine):
         cmd += ["--skip-trust"]
         if meta.get("model"):
             cmd += ["--model", meta["model"]]
+        for d in meta.get("add_dirs") or []:
+            cmd += ["--include-directories", d]
         if (turn > 1 or paths.get("resume")) and meta.get("conversation_id"):
             cmd += ["--resume", meta["conversation_id"]]
         return cmd
@@ -977,6 +1155,9 @@ class GeminiEngine(Engine):
                                     "check the gemini version and its trust settings")
         return None
 
+
+# A server name codex's `-c` dotted path can carry without quoting.
+MCP_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _ENGINES = {}
 

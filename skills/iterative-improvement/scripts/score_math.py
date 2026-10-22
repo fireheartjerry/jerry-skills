@@ -5,8 +5,10 @@ usage: score_math.py baseline A B [C] [--json]
        score_math.py budget --total X --spent Y --per-round Z [--rounds R]
                             [--rounds-used N] [--json]
        score_math.py decide --threshold T --target X --max-rounds R --scores S0,S1,...
-                            [--rounds-used N | --first-round K]
-                            [--gates PASS|FAIL] [--confirm-score C] [--json]
+                            --gates PASS|FAIL [--rounds-used N | --first-round K]
+                            [--confirm-score C] [--json]
+       score_math.py check-criteria DOC [--mode lite|full]
+       score_math.py check-scorer OUT [--criteria DOC]
 
 baseline A B   Two scorer runs on the same unmodified snapshot and evidence. Prints
                baseline=<mean, half up> noise=<|A-B|> threshold=<max(3, 2*noise)>
@@ -17,20 +19,25 @@ baseline A B   Two scorer runs on the same unmodified snapshot and evidence. Pri
 
 baseline A B C Three runs. Sorted lo <= mid <= hi with gaps g1 = mid-lo, g2 = hi-mid:
                  range <= 8                   mean of three, noise = range
-                 one gap <= 8, gaps unequal   the run on the wide side is the outlier;
-                                              baseline and noise come from the other
-                                              two, log the outlier in the score log
-                 otherwise (no single outlier: mean of three, noise = range, soft=true:
-                 equal gaps, or both > 8)     tighten the criteria and rebaseline
+                 one end run is more than 8   that run is the outlier; baseline and
+                 from its neighbour and the   noise come from the other two; log it.
+                 other gap is 8 or less       soft=true when it sits more than 20 away
+                                              (the instrument disagreed badly once)
+                 otherwise (both gaps over 8, mean of three, noise = range, soft=true:
+                 or both 8 or less with a     tighten the criteria and rebaseline once
+                 range over 8)
                Line 1 ends third-run=done outlier=<value|none>; a detail line follows
-               when there is an outlier or the check lines are soft.
+               when there is an outlier or the check lines are soft. A rebaseline is
+               allowed once; if the second set is soft too, proceed with the T printed
+               and tell the user the instrument is noisy.
 
 budget         Units are the caller's (minutes or dollars) and must be consistent.
                remaining = total - spent (may be negative); rounds-affordable =
                max(0, floor(remaining / per-round)), the rounds still to come;
                max-rounds = rounds-used + rounds-affordable, capped at --rounds when
                given. max-rounds is a total ceiling on the same scale as decide's
-               rounds used, so pass it to decide as --max-rounds unchanged.
+               rounds used, so pass it to decide as --max-rounds unchanged (decide
+               then says STOP rounds-exhausted when no round fits).
                --rounds-used is the number of real rounds already run (default 0,
                right only before round 1). Exit 2 when --total or --per-round is not
                positive, or --spent or --rounds-used is negative.
@@ -68,12 +75,34 @@ decide         --scores is the comparable series, first entry the baseline (or t
                Two consecutive deltas inside T whose total exceeds T are a slow real
                trend (reported as such) and the loop continues. A single drop smaller
                than T is reported as within-noise, exactly like a rise smaller than T.
-               Budget left is never a reason to continue. Exit 0 for every decision,
-               2 on bad input.
+               Budget left is never a reason to continue. --gates is required: a
+               forgotten flag must not turn a HALT into a STOP. Exit 0 for every
+               decision, 2 on bad input (including nan and infinite values).
+
+check-criteria Lints a criteria doc before round 0: criteria headed "### C<n>. <name>
+               (<w> pts)", optionally followed by "[ASSUMED: ...]" tags, with weights
+               summing to 100; 3 to 5 criteria in lite, 6 to 12 in full (--mode, else
+               the doc's Mode label, else 3 to 12); each with a "How to check it" line
+               and numeric anchors (bullets "- `0`: ...", or inline on the Anchors
+               line) whose first is 0 and last is the weight; every gate line "- **G<n>.**" carries "check:"; a DERIVED doc
+               has a "Source:" line per criterion. Prints "ok" or one line per problem
+               and exits 3.
+
+check-scorer   Checks a scorer's output before decide reads it: the points of the
+               scored criteria sum to the Score line, their maxes to its adjusted max,
+               every max sums to 100, Scaled = round(points * 100 / max), and each N/A
+               criterion is listed under Unscoreable. With --criteria, each max must
+               equal that criterion's weight in the doc. Formatting habits are read as
+               the brief's format: emphasis and code ticks, any heading level, a
+               trailing "pts" or "points", "30/50" in a points cell whose max is 50,
+               and "/100" after Scaled. Prints the series token
+               ("49/80", or "58" at max 100), the N/A list and the gate results; exits
+               3 with one line per problem when the arithmetic does not hold.
 """
 
 import argparse
 import json
+import re
 import sys
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
 
@@ -106,6 +135,8 @@ def parse_score(token):
         adjusted = Decimal(max_text)
     except Exception:
         fail("score is not numeric: %r" % token)
+    if not raw.is_finite() or not adjusted.is_finite():
+        fail("score is not a finite number: %r" % token)
     if adjusted <= 0:
         fail("adjusted max must be positive: %r" % token)
     if raw < 0:
@@ -138,11 +169,13 @@ THIRD_RUN_ZERO = ("two identical runs say nothing about spread; run the scorer a
                   "on the same snapshot and evidence and pass all three runs")
 THIRD_RUN_WIDE = ("two runs %s apart may be one aberrant run or soft check lines; run a third "
                   "on the same snapshot and evidence before rewriting criteria")
-OUTLIER_DETAIL = ("run %s is an outlier against %s and %s; log it in the score log, diff its "
-                  "per-criterion table against the others and tighten the criteria where it disagrees")
+OUTLIER_DETAIL = ("run %s is an outlier, %s from the nearest run, against %s and %s; log it in the score log, "
+                  "diff its per-criterion table against the others and tighten the criteria where it disagrees")
+OUTLIER_FAR = ("; it sits more than 20 away, so the check lines are soft: tighten them and rebaseline once")
 SOFT_DETAIL = ("no single outlier: the three runs spread over %s (gaps %s and %s), more than 8; "
                "the check lines are soft: tighten the criteria with the largest per-criterion "
-               "disagreement and take two fresh baseline runs")
+               "disagreement and take two fresh baseline runs, once; if those are soft too, proceed with this T "
+               "and tell the user the instrument is noisy")
 
 
 def baseline_two(a, b):
@@ -175,14 +208,17 @@ def baseline_three(runs):
         kept = [lo, mid, hi]
         noise = spread
         soft = False
-    elif g1 != g2 and min(g1, g2) <= 8:
-        # The outlier sits on the wide side, so its gap to the nearest run is positive
-        # and no other run shares its value; the kept pair stays in input order.
-        outlier = hi if g2 > g1 else lo
+    elif (g1 > 8) != (g2 > 8):
+        # Exactly one end run is more than 8 from its neighbour: it is the outlier, and
+        # no other run shares its value; the kept pair stays in input order.
+        outlier = lo if g1 > 8 else hi
+        distance = max(g1, g2)
         kept = [r for r in runs if r != outlier]
         noise = min(g1, g2)
-        soft = False
-        detail = OUTLIER_DETAIL % (fmt(outlier), fmt(kept[0]), fmt(kept[1]))
+        soft = distance > 20
+        detail = OUTLIER_DETAIL % (fmt(outlier), fmt(distance), fmt(kept[0]), fmt(kept[1]))
+        if soft:
+            detail += OUTLIER_FAR
     else:
         kept = [lo, mid, hi]
         noise = spread
@@ -340,10 +376,14 @@ def decide(scores, threshold, target, max_rounds, rounds_used, gates_pass, confi
 
 
 def cmd_decide(args):
+    for name in ("threshold", "target"):
+        value = getattr(args, name)
+        if value != value or value in (float("inf"), float("-inf")):
+            fail("--%s must be a finite number" % name)
     if args.threshold < 1:
         fail("--threshold must be at least 1")
-    if args.max_rounds < 1:
-        fail("--max-rounds must be at least 1")
+    if args.max_rounds < 0:
+        fail("--max-rounds must be 0 or more")
     if not 0 <= args.target <= 100:
         fail("--target must be between 0 and 100, got %s" % as_number(args.target))
     if args.rounds_used is not None and args.first_round is not None:
@@ -381,6 +421,219 @@ def cmd_decide(args):
     return 0
 
 
+# A DERIVED doc may tag the heading with one or more "[ASSUMED: ...]" notes after "(w pts)".
+CRITERION_HEAD = re.compile(r"^### (C\d+)\. (.*?)\((\d+) pts\)(?:\s*\[[^\]\n]*\])*\s*$", re.M)
+GATE_LINE = re.compile(r"^\s*[-*] \*\*(G\d+)\.\*\*(.*)$", re.M)
+ANCHOR = re.compile(r"^\s*- `([^`]+)`:", re.M)
+INLINE_ANCHORS = re.compile(r"^\*\*Anchors:\*\*(.*)$", re.M)
+
+
+def anchors_of(block):
+    """Anchor labels of one criterion: the bullet form, else the inline form
+    "**Anchors:** `0`: ... `6`: ... `12`: ..." on the Anchors line itself."""
+    found = ANCHOR.findall(block)
+    if found:
+        return found
+    inline = INLINE_ANCHORS.search(block)
+    return re.findall(r"`([^`]+)`:", inline.group(1)) if inline else []
+
+
+def criteria_blocks(text):
+    """[(id, name, weight, block text)] for each "### C<n>. name (w pts)" criterion."""
+    heads = list(CRITERION_HEAD.finditer(text))
+    blocks = []
+    for index, match in enumerate(heads):
+        end = heads[index + 1].start() if index + 1 < len(heads) else len(text)
+        following = re.search(r"^## ", text[match.end():end], re.M)
+        if following:
+            end = match.end() + following.start()
+        blocks.append((match.group(1), match.group(2).strip(), int(match.group(3)), text[match.start():end]))
+    return blocks
+
+
+def read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except (OSError, ValueError) as error:
+        fail("cannot read %s (%s)" % (path, error))
+
+
+def cmd_check_criteria(args):
+    text = read_text(args.doc)
+    mode = args.mode
+    if mode is None:
+        label = re.search(r"\*\*Mode:\*\*\s*(\w+)", text)
+        mode = label.group(1).lower() if label and label.group(1).lower() in ("lite", "full") else None
+    bounds = {"lite": (3, 5), "full": (6, 12), None: (3, 12)}[mode]
+    blocks = criteria_blocks(text)
+    problems = []
+    if not blocks:
+        problems.append("no criteria found (each needs a heading like '### C1. Name (20 pts)')")
+    total = sum(weight for _, _, weight, _ in blocks)
+    if blocks and total != 100:
+        problems.append("weights sum to %d, not 100" % total)
+    if blocks and not bounds[0] <= len(blocks) <= bounds[1]:
+        problems.append("%d criteria; %s mode takes %d to %d" % (len(blocks), mode or "either", bounds[0], bounds[1]))
+    seen = set()
+    derived = re.search(r"\*\*Status:\*\*\s*DERIVED", text) is not None
+    for cid, name, weight, block in blocks:
+        if cid in seen:
+            problems.append("%s appears twice" % cid)
+        seen.add(cid)
+        if "**How to check it:**" not in block:
+            problems.append("%s has no **How to check it:** line" % cid)
+        anchors = anchors_of(block)
+        numeric = [a for a in anchors if re.fullmatch(r"\d+(?:\.\d+)?", a.strip())]
+        if len(anchors) < 3:
+            problems.append("%s has %d anchors; it needs 0, a middle one and %d" % (cid, len(anchors), weight))
+        elif len(numeric) != len(anchors):
+            problems.append("%s anchors must be numbers (0, a middle value, %d), not %s"
+                            % (cid, weight, ", ".join(a for a in anchors if a not in numeric)))
+        else:
+            if Decimal(numeric[0]) != 0:
+                problems.append("%s first anchor is %s, not 0" % (cid, numeric[0]))
+            if Decimal(numeric[-1]) != weight:
+                problems.append("%s last anchor is %s, not its weight %d" % (cid, numeric[-1], weight))
+        if derived and "**Source:**" not in block:
+            problems.append("%s has no **Source:** line (the doc is DERIVED)" % cid)
+    for gid, rest in GATE_LINE.findall(text):
+        if "check:" not in rest:
+            problems.append("%s has no check: command" % gid)
+    if problems:
+        for line in problems:
+            print("problem: %s" % line)
+        return 3
+    print("ok: %d criteria summing to 100 (%s mode), %d gates" % (len(blocks), mode or "unstated",
+                                                                   len(GATE_LINE.findall(text))))
+    return 0
+
+
+def section(text, heading):
+    """The body under a heading of any level, up to the next heading."""
+    match = re.search(r"^#{1,6}[ \t]*%s[ \t]*$(.*?)(?=^#{1,6}[ \t]|\Z)" % re.escape(heading), text, re.M | re.S)
+    return match.group(1) if match else None
+
+
+def plain(cell):
+    """A cell or heading without markdown emphasis or code ticks: "**30**" -> "30"."""
+    return re.sub(r"[*`]", "", cell).strip()
+
+
+def table(block):
+    rows = []
+    for line in (block or "").splitlines():
+        line = line.strip()
+        if not line.startswith("|") or re.match(r"^\|[-\s|:]+\|$", line):
+            continue
+        rows.append([plain(cell) for cell in line.strip("|").split("|")])
+    return rows[1:] if rows else []
+
+
+UNIT = re.compile(r"\s*(?:pts?|points?)\.?$", re.I)
+
+
+def plain_text(text):
+    """Headings without emphasis or ticks; the Score and Scaled lines at any heading
+    level read as "##", without a trailing "points" or "pts" or a "/100" on Scaled."""
+    lines = []
+    for line in text.splitlines():
+        if re.match(r"^\s*#{1,6}[ \t]", line):
+            line = plain(line)
+        if re.match(r"^\s*#{1,6}[ \t]*(?:Score|Scaled):", line):
+            line = re.sub(r"^\s*#{1,6}[ \t]*", "## ", line)
+            line = UNIT.sub("", line)
+            line = re.sub(r"^(## Scaled:\s*\d+)\s*/\s*100$", r"\1", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def points_cell(cell, maximum):
+    """The points in a Points cell: "30", "30 pts" or "30/50" when 50 is the row's max."""
+    cell = UNIT.sub("", cell)
+    over = re.fullmatch(r"(.+?)\s*/\s*(\d+)", cell)
+    if over and int(over.group(2)) == maximum:
+        return over.group(1).strip()
+    return cell
+
+
+def cmd_check_scorer(args):
+    text = plain_text(read_text(args.out))
+    problems = []
+    head = re.search(r"^## Score:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+)\s*$", text, re.M)
+    scaled_line = re.search(r"^## Scaled:\s*(\d+)\s*$", text, re.M)
+    if not head:
+        fail("no '## Score: <points>/<adjusted max>' line in %s" % args.out)
+    points, adjusted = Decimal(head.group(1)), int(head.group(2))
+    rows = [r for r in table(section(text, "Per-criterion")) if r and re.fullmatch(r"C\d+", r[0])]
+    if not rows:
+        problems.append("no per-criterion rows")
+    scored_points = Decimal(0)
+    scored_max = 0
+    all_max = 0
+    na = []
+    for row in rows:
+        if len(row) < 4:
+            problems.append("%s row has %d cells, expected 5" % (row[0], len(row)))
+            continue
+        try:
+            maximum = int(UNIT.sub("", row[3]))
+        except ValueError:
+            problems.append("%s max is not a whole number: %r" % (row[0], row[3]))
+            continue
+        all_max += maximum
+        row[2] = points_cell(row[2], maximum)
+        row[3] = str(maximum)
+        if row[2].upper() == "N/A":
+            na.append(row[0])
+            continue
+        try:
+            value = Decimal(row[2])
+        except InvalidOperation:
+            problems.append("%s points are not a number: %r" % (row[0], row[2]))
+            continue
+        if not 0 <= value <= maximum:
+            problems.append("%s scores %s outside 0 to %d" % (row[0], row[2], maximum))
+        scored_points += value
+        scored_max += maximum
+    if rows and scored_points != points:
+        problems.append("per-criterion points sum to %s, but the Score line says %s" % (fmt(scored_points), fmt(points)))
+    if rows and scored_max != adjusted:
+        problems.append("maxes of the scored criteria sum to %d, but the adjusted max is %d" % (scored_max, adjusted))
+    if rows and all_max != 100:
+        problems.append("every criterion's max sums to %d, not 100" % all_max)
+    if adjusted <= 0:
+        problems.append("adjusted max is 0: nothing was scored")
+    elif scaled_line is None:
+        problems.append("no '## Scaled:' line")
+    elif int(scaled_line.group(1)) != round_half_up(points * 100 / adjusted):
+        problems.append("Scaled is %s, but round(%s * 100 / %d) is %d"
+                        % (scaled_line.group(1), fmt(points), adjusted, round_half_up(points * 100 / adjusted)))
+    unscoreable = section(text, "Unscoreable") or ""
+    for cid in na:
+        if not re.search(r"\b%s\b" % cid, unscoreable):
+            problems.append("%s is N/A but not listed under ## Unscoreable" % cid)
+    if args.criteria:
+        weights = dict((cid, weight) for cid, _, weight, _ in criteria_blocks(read_text(args.criteria)))
+        for row in rows:
+            if len(row) >= 4 and row[0] in weights and row[3].isdigit() and int(row[3]) != weights[row[0]]:
+                problems.append("%s max is %s, but its weight in the criteria doc is %d" % (row[0], row[3], weights[row[0]]))
+        missing = sorted(set(weights) - set(r[0] for r in rows))
+        if missing:
+            problems.append("criteria missing from the output: %s" % ", ".join(missing))
+    gates = [(r[0], r[1].upper()) for r in table(section(text, "Gates")) if len(r) >= 2 and re.fullmatch(r"G\d+", r[0])]
+    if problems:
+        for line in problems:
+            print("problem: %s" % line)
+        return 3
+    token = fmt(points) if adjusted == 100 else "%s/%d" % (fmt(points), adjusted)
+    print("token=%s scaled=%s na=%s gates=%s" % (token, scaled_line.group(1), ",".join(na) or "none",
+                                                 ",".join("%s:%s" % g for g in gates) or "none"))
+    if any(result != "PASS" for _, result in gates):
+        print("detail: a gate is not PASS in the scorer's table; compare with your own gate runs before passing --gates")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="score_math.py",
@@ -414,12 +667,22 @@ def build_parser():
                           help="real round number of the last entry (required after a rubric amendment)")
     decision.add_argument("--first-round", type=int, default=None,
                           help="real round number of the first entry (alternative to --rounds-used; default 0)")
-    decision.add_argument("--gates", default="PASS", choices=["PASS", "FAIL", "pass", "fail"],
+    decision.add_argument("--gates", required=True, choices=["PASS", "FAIL", "pass", "fail"],
                           help="PASS when every gate passes in the latest round (from the orchestrator's gate runs)")
     decision.add_argument("--confirm-score", default=None,
                           help="the second scorer run on the latest snapshot, after CONFIRM (\"86\" or \"69/80\")")
     decision.add_argument("--json", action="store_true")
     decision.set_defaults(func=cmd_decide)
+
+    lint = sub.add_parser("check-criteria", help="lint a criteria doc: weights, anchors, check lines, gates")
+    lint.add_argument("doc", help="the criteria doc")
+    lint.add_argument("--mode", choices=("lite", "full"), default=None, help="lite (3 to 5 criteria) or full (6 to 12)")
+    lint.set_defaults(func=cmd_check_criteria)
+
+    scorer = sub.add_parser("check-scorer", help="check a scorer output's arithmetic and print its series token")
+    scorer.add_argument("out", help="the scorer's output file")
+    scorer.add_argument("--criteria", default=None, help="the criteria doc, to check each max against its weight")
+    scorer.set_defaults(func=cmd_check_scorer)
     return parser
 
 
@@ -429,7 +692,7 @@ def main(argv=None):
     if args.command == "decide":
         for name in ("threshold", "target"):
             value = getattr(args, name)
-            if value == int(value):
+            if value == value and value not in (float("inf"), float("-inf")) and value == int(value):
                 setattr(args, name, int(value))
     return args.func(args)
 

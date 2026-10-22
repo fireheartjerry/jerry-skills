@@ -1,7 +1,8 @@
-"""The phase-1 `bench.py` subcommands (run, compare, scale) on the shared timing core.
+"""The deprecated `bench.py` subcommands (run, compare, scale) on the shared timing core.
 
-Output lines and JSON keys are those of phase 1; `scale` carries the three phase-2 fixes
-(SCALE_FLOOR 0.5 s, the baseline/no-baseline usage error, an exponent CI as an extra key).
+Output lines and JSON keys are unchanged for existing scripts; `scale` also has the later
+fixes (SCALE_FLOOR 0.5 s, the baseline/no-baseline usage error, an exponent CI as an extra
+key).
 """
 import json
 

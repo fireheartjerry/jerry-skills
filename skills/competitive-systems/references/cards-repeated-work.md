@@ -1,11 +1,13 @@
 # Repeated-work cards
 
 Covers the same computation done many times for the same inputs, within a run or across
-runs. Signal: the profile shows a function's call count far above its number of distinct
+runs, including a recursion that solves the same subproblem many times. Signal: the profile shows a function's call count far above its number of distinct
 inputs, or a step whose inputs rarely change reruns every time. Gate 1 evidence for this file
 is that ratio (calls over distinct inputs, or reruns over changed inputs), not a doubling
-test. If the work is not repeated but genuinely superlinear, go back to the symptom index; if
-the repeated step is a graph build, the traversal cards are in `cards-graphs-impact.md`.
+test. If the work is not repeated but genuinely superlinear, go back to the symptom index. A
+graph rebuilt on every call or run is repeated work and is handled here (Content-hash cache
+or Incremental recompute); traversing a graph that is already built is in
+`cards-graphs-impact.md`.
 
 ## Memoise pure functions
 
@@ -22,21 +24,15 @@ or this card fails.
 **Sketch:**
 
 ```python
-import functools, hashlib
+import functools
 
-@functools.lru_cache(maxsize=4096)
-def parse_config(text):                 # pure in its argument; returns a tuple, so callers
-    return _parse(text)                 # cannot mutate the cached value
+@functools.lru_cache(maxsize=4096)      # bounded: at most 4096 distinct texts are kept
+def parse_config(text):                 # pure in its argument; _parse returns a tuple, so
+    return _parse(text)                 # callers cannot mutate the cached value
 
-_by_content = {}
-
-def parse_config_file(path):            # key on content, not path
-    with open(path, "rb") as f:
-        data = f.read()
-    key = hashlib.sha256(data).hexdigest()
-    if key not in _by_content:
-        _by_content[key] = _parse(data.decode())
-    return _by_content[key]
+def parse_config_file(path):            # key on content, not path: the text is the key, so
+    with open(path, "rb") as f:         # an edited file is a new entry, never a stale one
+        return parse_config(f.read().decode())
 ```
 
 **Oracle:** Run cached and uncached versions on the same call sequence and compare outputs;
@@ -47,8 +43,9 @@ include a caller that mutates what it receives, then calls again.
   call. Return immutable values (tuples, frozen dataclasses) or `copy.deepcopy` on the way out.
 - Mutable arguments (lists, dicts): reduce to tuples or a content hash.
 - Methods: the cache holds `self` alive; cache a module-level function instead.
-- Unbounded memory: set `maxsize`.
-- Functions that read time, env or files are not pure: key on the content.
+- Unbounded memory: set `maxsize`; a plain dict as the cache grows without limit.
+- Functions that read the clock or the environment have no content to key on: pass the value
+  in as an argument, or this card fails.
 
 **Not when:**
 - Distinct inputs are nearly as many as calls: no reuse.
@@ -257,3 +254,67 @@ distinct key per window.
 - Results are user-specific and the key cannot include the user.
 
 See also: the reverse BFS and topological order used above are in `cards-graphs-impact.md`.
+
+## Memoised recursion and dynamic programming
+
+**Problem shape:** A recursive function whose run time explodes with the input: naive
+Fibonacci, counting paths or ways, edit distance, 0/1 knapsack, "best split" recursions.
+Pairwise slopes from the doubling test keep rising instead of settling on an exponent.
+
+**Precondition test:** The recursion is pure and its result depends only on a small state
+(its arguments, or indices into fixed inputs), and the same states recur: count calls
+against distinct argument tuples on a small input; calls >= 10x distinct passes. The number
+of distinct states must fit in memory. If states are subsets of n items (2^n of them), this
+card fails beyond n of about 20: use a capped search or another card.
+
+**Complexity:** exponential -> O(states x transitions per state).
+
+**Sketch:**
+
+```python
+import functools
+
+def count_ways_memo(n, steps):                # top-down: the naive recursion plus a cache
+    steps = tuple(sorted(set(steps)))           # defined inside the call, keyed on k
+
+    @functools.lru_cache(maxsize=None)
+    def ways(k):
+        if k == 0:
+            return 1
+        return sum(ways(k - s) for s in steps if 0 < s <= k)
+
+    return ways(n)                              # recursion depth grows with n
+
+def count_ways(n, steps):                     # bottom-up: the same table, no depth limit
+    steps = sorted(set(s for s in steps if s > 0))
+    table = [1] + [0] * n
+    for k in range(1, n + 1):
+        table[k] = sum(table[k - s] for s in steps if s <= k)
+    return table[n]
+
+def edit_distance(a, b):                      # bottom-up: two rows, no recursion depth
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+        prev = cur
+    return prev[-1]
+```
+
+**Oracle:** The naive recursion on small inputs (n <= 20, strings up to 7 characters, random
+step sets), compared exactly.
+
+**Traps:**
+- Recursion depth: a top-down memo deeper than Python's limit (1,000 frames by default)
+  raises RecursionError; `count_ways_memo(5000, [1])` does. Fill the table bottom-up in
+  dependency order instead of raising the limit.
+- A cache defined at module level and keyed on part of the input (k but not steps) serves
+  stale answers when the rest changes: define it inside the call, or key on every input.
+- Unhashable arguments (lists): key on a tuple or on indices into the fixed input.
+- Floats summed in a different order top-down and bottom-up: compare with a tolerance, or
+  use integers.
+
+**Not when:**
+- Subproblems do not overlap (merge sort, binary search): memoising only adds overhead.
+- The function is not pure (reads files, the clock, or globals that change).

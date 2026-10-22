@@ -6,7 +6,7 @@ verification commands, hard boundaries) is never dropped; everything else compet
 remaining budget. Gate 1 evidence for this file is tokens, not timing: must-keep tokens plus
 candidate tokens against B. If the packer's time is spent re-indexing on every call rather
 than ranking, go to `cards-repeated-work.md`; if the graph it expands is stale or incomplete,
-see `cards-graphs-impact.md`. On a repository, `dev.py context "<task>" --budget N` runs
+see `cards-graphs-impact.md`. On a repository, `dev.py context "<names and errors from the task>" --budget N` runs
 all four cards (exact names, BM25, two-hop import expansion, this pack) and lists every
 chunk with its line range, tokens and reason (`tooling.md`, `context`).
 
@@ -56,8 +56,10 @@ Add the file containing each definition hit to the must-keep set as a direct tar
 file whose path or defining symbol is named in the task (recall 1.0 on that subset).
 
 **Traps:**
-- Identifiers that are common words: require whole-word matching plus a non-word character,
-  a capital, or a minimum length of 4 (the sketch does).
+- Identifiers that are common words: the sketch keeps only code-like names (an underscore,
+  dot, slash or camelCase) and drops plain words, even long ones. `dev.py context` also uses
+  plain words of 4+ characters, but only as directory names or file stems and never common
+  instruction words (after, empty, status, run), so a task's prose does not pick targets.
 - Generated and vendored directories: exclude by a fixed list before searching.
 - Binary files: skip by extension or by a null-byte check.
 

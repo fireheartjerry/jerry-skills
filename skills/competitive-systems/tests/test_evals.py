@@ -3,6 +3,7 @@ import filecmp
 import importlib.util
 import json
 import os
+import shutil
 import re
 import subprocess
 import sys
@@ -273,16 +274,19 @@ class GradeTest(unittest.TestCase):
 
 
 class RunEvalTest(unittest.TestCase):
-    def test_dry_run_lists_48_and_spends_nothing(self):
+    def test_dry_run_lists_every_scenario_and_spends_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "out")
             env = dict(os.environ, CLAUDE_BIN=os.path.join(tmp, "no-such-claude"), PATH="/usr/bin:/bin")
             p = run(RUN, "--dry-run", "--out", out, env=env)
             self.assertEqual(p.returncode, 0, p.stderr)
+            with open(os.path.join(EVALS, "scenarios.json")) as f:
+                k = len(json.load(f))
+            self.assertGreaterEqual(k, 12)
             lines = [ln for ln in p.stdout.splitlines() if ln.startswith("$ ")]
-            self.assertEqual(len(lines), 48)
-            self.assertIn("48 runs: 12 scenario(s) x 2 arm(s) x 2 seed(s)", p.stdout)
-            self.assertEqual(sum("--append-system-prompt" in ln for ln in lines), 24)
+            self.assertEqual(len(lines), 4 * k)
+            self.assertIn("%d runs: %d scenario(s) x 2 arm(s) x 2 seed(s)" % (4 * k, k), p.stdout)
+            self.assertEqual(sum("--append-system-prompt" in ln for ln in lines), 2 * k)
             self.assertTrue(all("--disable-slash-commands" in ln for ln in lines))
             self.assertFalse(os.path.exists(out))             # nothing written
             p = run(RUN, "--dry-run", "--trigger", "--out", out, env=env)
@@ -314,13 +318,84 @@ class RunEvalTest(unittest.TestCase):
             old = os.environ.get("CODEX_HOME")
             os.environ["CODEX_HOME"] = real
             try:
-                home = r.isolated_codex_home(os.path.join(tmp, "out"))
+                home = r.isolated_codex_home()
             finally:
                 if old is None:
                     del os.environ["CODEX_HOME"]
                 else:
                     os.environ["CODEX_HOME"] = old
-            self.assertEqual(os.listdir(home), ["auth.json"])
+            try:
+                self.assertEqual(os.listdir(home), ["auth.json"])
+                self.assertEqual(os.stat(home).st_mode & 0o777, 0o700)
+                self.assertTrue(os.path.realpath(home).startswith(
+                    os.path.realpath(tempfile.gettempdir())))
+            finally:
+                shutil.rmtree(home, ignore_errors=True)
+
+    def test_live_runs_need_yes_and_stop_at_the_total_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = os.path.join(tmp, "claude")
+            with open(fake, "w") as f:
+                f.write("#!/bin/sh\nexit 0\n")
+            os.chmod(fake, 0o755)
+            env = dict(os.environ, CLAUDE_BIN=fake)
+            p = run(RUN, "--out", os.path.join(tmp, "o"), "--scenarios", "S-C", "--seeds", "1",
+                    env=env)
+            self.assertEqual(p.returncode, 2, p.stderr)
+            self.assertIn("worst case 1.50 USD (2 runs x 0.75 USD per-run cap)", p.stdout)
+            self.assertIn("--yes", p.stderr)
+            env = dict(os.environ, CODEX_BIN=fake)
+            p = run(RUN, "--runner", "codex", "--out", os.path.join(tmp, "o"), "--scenarios",
+                    "S-C", "--seeds", "1", "--yes", env=env)
+            self.assertEqual(p.returncode, 2)
+            self.assertIn("--max-runs", p.stderr)
+        r = load("cs_run_eval", RUN)
+
+        class A(object):
+            jobs, max_runs, max_total_usd, runner = 1, None, 1.0, "claude"
+        ran = []
+
+        def fn(job):
+            ran.append(job)
+            return 0.4
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            r.run_capped(list(range(10)), fn, A(), lambda c: c)
+        self.assertEqual(ran, [0, 1, 2])        # 0.4 + 0.4 + 0.4 >= 1.00: no fourth run
+        self.assertIn("stopped after 3 of 10 job(s)", out.getvalue())
+        A.max_runs, A.max_total_usd = 2, 100.0
+        del ran[:]
+        r.run_capped(list(range(10)), fn, A(), lambda c: c)
+        self.assertEqual(ran, [0, 1])
+
+    @unittest.skipUnless(os.name == "posix", "process groups are POSIX")
+    def test_timeout_kills_the_agents_children(self):
+        r = load("cs_run_eval", RUN)
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "bg")
+            _, _, status = r.run_proc(["sh", "-c", "sleep 30 & echo $! > %s; wait" % pidfile],
+                                      tmp, 1)
+            self.assertEqual(status, "timeout")
+            import time
+            time.sleep(0.2)
+            with self.assertRaises(OSError):
+                os.kill(int(open(pidfile).read()), 0)
+
+    def test_sibling_decoys_are_read_live(self):
+        r = load("cs_run_eval", RUN)
+        with open(os.path.join(EVALS, "trigger.json")) as f:
+            trig = json.load(f)
+        live = [d for d in trig["decoys"] if d.get("from_skill")]
+        self.assertTrue(live)
+        for d in live:
+            text = r.decoy_description(d)
+            self.assertGreater(len(text), 50, d)
+            self.assertNotIn("description:", text)
+        jobs = r.trigger_jobs(type("A", (), {"runner": "claude", "model": None})())
+        self.assertEqual(len(jobs), len(trig["should_fire"]) + len(trig["should_not_fire"]))
+        self.assertTrue(all("iterative-improvement" in j["names"] for j in jobs))
 
     def test_parse_choice(self):
         r = load("cs_run_eval", RUN)

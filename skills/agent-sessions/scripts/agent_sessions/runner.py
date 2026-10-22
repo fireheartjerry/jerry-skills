@@ -21,12 +21,13 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 from agent_sessions.common import (
     HOOK_DONE, IDLE, LADDER_S, LINGER, POST_RESULT_WAIT, RETRYABLE, STALL_DEFAULT, STDERR_TAIL,
     append_jsonl, compact, die, now_iso, passes_env, read_json, read_text, tail_text, write_json, write_text,
 )
-from agent_sessions.procs import killpg, ps_lstart
+from agent_sessions.procs import group_alive, killpg, ps_lstart
 from agent_sessions.state import (
     add_usage, build_result, empty_usage, ledger_add, ledger_exhausted, load_ledger, load_turns, write_pause,
 )
@@ -44,10 +45,21 @@ FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)\n\s*```", re.S)
 HOOK_TIMEOUT = 30
 
 
+def gate_env(meta):
+    """AGENT_SESSION_BASE (the commit the child's changes are measured from:
+    the worktree's base commit, else the HEAD of a shared tree at spawn) and
+    AGENT_SESSION_WORKTREE (the worktree path, empty without one), for
+    --verify and --on-finish, so a gate can check the diff's scope with
+    `git diff --name-only "$AGENT_SESSION_BASE"`."""
+    wt = meta.get("worktree") if isinstance(meta.get("worktree"), dict) else {}
+    return {"AGENT_SESSION_BASE": wt.get("base_commit") or meta.get("head_at_spawn") or "",
+            "AGENT_SESSION_WORKTREE": wt.get("path") or ""}
+
+
 def run_on_finish(meta, sdir, res):
     """Run the child's --on-finish command once for this result: /bin/sh -c CMD
     in the workdir (the state dir when the workdir is gone), with
-    AGENT_SESSION_NAME, _STATUS, _FAILURE_CLASS and _RESULT set, a 30 s limit
+    AGENT_SESSION_NAME, _STATUS, _FAILURE_CLASS, _RESULT, _BASE and _WORKTREE set, a 30 s limit
     and output appended to <name>/hooks.log. The marker file hook.done (created
     exclusively) makes a second call for the same result a no-op; resume
     removes it. A failing hook adds a warning to result.json and never changes
@@ -65,6 +77,7 @@ def run_on_finish(meta, sdir, res):
     env.update({"AGENT_SESSION_NAME": meta["name"], "AGENT_SESSION_STATUS": res.get("status") or "",
                 "AGENT_SESSION_FAILURE_CLASS": res.get("failure_class") or "",
                 "AGENT_SESSION_RESULT": result_p})
+    env.update(gate_env(meta))
     workdir = meta.get("workdir") if os.path.isdir(meta.get("workdir") or "") else sdir
     log_p = os.path.join(sdir, "hooks.log")
     problem = None
@@ -75,9 +88,9 @@ def run_on_finish(meta, sdir, res):
             proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=workdir, stdin=subprocess.DEVNULL,
                                     stdout=fh, stderr=subprocess.STDOUT, start_new_session=True, env=env,
                                     close_fds=True)
-            started = time.time()
+            started = time.monotonic()
             while proc.poll() is None:
-                if time.time() - started > HOOK_TIMEOUT:
+                if time.monotonic() - started > HOOK_TIMEOUT:
                     killpg(proc.pid, signal.SIGKILL)
                     problem = "timed out after %ds" % HOOK_TIMEOUT
                     break
@@ -263,6 +276,7 @@ class Runner(object):
                "last_event_epoch": self.last_event_epoch,
                "usage_so_far": usage, "cost_so_far": self.cost_so_far,
                "stall_deadline_epoch": stall_deadline, "deadline_epoch": self.deadline(),
+               "turn_started_epoch": self.turn_started if phase == "turn" else None,
                "verify": self.verify_running,
                "engine_pid": self.proc.pid if self.proc else None,
                "runner_pid": os.getpid(), "runner_lstart": self.runner_lstart,
@@ -285,12 +299,12 @@ class Runner(object):
 
     def sleep_checked(self, seconds):
         """Sleep, waking early for kill or the deadline. Returns False when interrupted."""
-        end = time.time() + seconds
-        while time.time() < end:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
             if self.stopping() or self.past_deadline():
                 return False
             self.progress("waiting", turn=self.turn_no, force=False)
-            time.sleep(min(0.5, max(0.0, end - time.time())))
+            time.sleep(min(0.5, max(0.0, end - time.monotonic())))
         return True
 
     # -- main
@@ -335,6 +349,72 @@ class Runner(object):
             os.environ.pop("AGENT_SESSIONS_LEDGER", None)
 
     def main(self):
+        """Run the child. Whatever happens, env.json (the passthrough secrets)
+        is gone afterwards; an exception nothing else handled stops the engine
+        group and records a crash result instead of leaving an engine with
+        permissions bypassed running with no runner."""
+        try:
+            return self._main()
+        except Exception as exc:  # noqa: BLE001 - the runner's last line of defence
+            return self.crashed(exc)
+        finally:
+            try:
+                os.unlink(self.path("env.json"))
+            except OSError:
+                pass
+
+    def crashed(self, exc):
+        tb = traceback.format_exc()
+        self.log("runner crashed:\n%s" % tb.rstrip())
+        if self.pgid:
+            self.sweep_group(self.pgid, grace=3)
+        if self.proc is not None and self.proc.poll() is None:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+        self.proc = None
+        self.pgid = None
+        if self.meta and not os.path.exists(self.path("result.json")):
+            last = [l.strip() for l in tb.strip().splitlines() if l.strip()][-3:]
+            reason = "the runner crashed: %s: %s (the engine was stopped; traceback in %s: %s)" % (
+                type(exc).__name__, exc, self.log_path, " | ".join(last))
+            try:
+                res = build_result(self.meta, self.turns, "error", "completed", compact(reason, 600),
+                                   failure_class="crash", warnings=self.warnings)
+                write_json(self.path("result.json"), res)
+                if self.meta.get("on_finish"):
+                    self.run_hook(res)
+            except Exception as exc2:  # noqa: BLE001
+                self.log("could not write the crash result: %s" % exc2)
+        try:
+            self.progress("finished", turn=len(self.turns))
+        except Exception:  # noqa: BLE001
+            pass
+        self.kick_queue()
+        return 2
+
+    def sweep_group(self, pgid, grace=5):
+        """Terminate whatever is left in the engine's process group (TERM,
+        then KILL after `grace` seconds). True when something was there."""
+        if not group_alive(pgid):
+            return False
+        killpg(pgid, signal.SIGTERM)
+        end = time.monotonic() + grace
+        while group_alive(pgid) and time.monotonic() < end:
+            time.sleep(0.1)
+        if group_alive(pgid):
+            killpg(pgid, signal.SIGKILL)
+        return True
+
+    def kick_queue(self):
+        try:
+            from agent_sessions.launch import kick
+            kick(timeout=60)
+        except Exception as exc:  # scheduling must never undo a written result
+            self.log("warning: kick failed: %s" % exc)
+
+    def _main(self):
         meta = self.meta
         if not meta:
             sys.stderr.write("agent-session _run: no meta.json in %s\n" % self.sdir)
@@ -419,16 +499,12 @@ class Runner(object):
              "cost_usd": res.get("cost_usd"), "usage": res.get("usage")})
         if meta.get("on_finish"):
             self.run_hook(res)
-        try:
-            from agent_sessions.launch import kick
-            kick()
-        except Exception as exc:  # scheduling must never undo a written result
-            self.log("warning: kick failed: %s" % exc)
+        self.kick_queue()
         if ended != "killed" and meta.get("backend") != "process":
             self.progress("linger", turn=len(self.turns))
             self.log("lingering %ds for inspection; agent-session kill %s ends it early" % (LINGER, meta["name"]))
-            deadline = time.time() + LINGER
-            while time.time() < deadline:
+            deadline = time.monotonic() + LINGER
+            while time.monotonic() < deadline:
                 if self.stopping():
                     break
                 time.sleep(1)
@@ -436,7 +512,7 @@ class Runner(object):
         return 0
 
     def steer_loop(self):
-        last_end = time.time()
+        last_end = time.monotonic()
         while True:
             if self.stopping() or (self.turns and self.turns[-1]["status"] == "killed"
                                    and not self.turns[-1].get("interrupted")):
@@ -460,11 +536,11 @@ class Runner(object):
                 except OSError:
                     pass
                 self.run_turn(len(self.turns) + 1, message_id, text)
-                last_end = time.time()
+                last_end = time.monotonic()
                 if self.turns[-1].get("failure_class") == "budget":
                     return "stopped"
                 continue
-            if time.time() - last_end > IDLE:
+            if time.monotonic() - last_end > IDLE:
                 return "idle"
             self.progress("waiting", turn=len(self.turns), force=False)
             time.sleep(0.25)
@@ -572,19 +648,20 @@ class Runner(object):
         self.verify_running = {"command": cmd, "attempt": k, "started_iso": now_iso()}
         self.progress("verify", turn=len(self.turns))
         self.event("verify", "verify %d: %s" % (k, cmd), {"command": cmd, "attempt": k, "state": "started"})
-        started = time.time()
+        started = time.monotonic()
         try:
             with open(out_file, "wb") as fh:
+                env = os.environ.copy()
+                env.update(gate_env(self.meta))
                 proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=self.meta["workdir"], stdin=subprocess.DEVNULL,
-                                        stdout=fh, stderr=subprocess.STDOUT, start_new_session=True,
-                                        env=os.environ.copy())
+                                        stdout=fh, stderr=subprocess.STDOUT, start_new_session=True, env=env)
         except OSError as exc:
             self.verify_running = None
             return "error", None, 0.0, None, out_file, "cannot start /bin/sh: %s" % exc
         error = None
         term_at = None
         while proc.poll() is None:
-            now = time.time()
+            now = time.monotonic()
             if term_at is None:
                 why = None
                 if now - started > limit:
@@ -603,7 +680,7 @@ class Runner(object):
             self.progress("verify", turn=len(self.turns), force=False)
             time.sleep(0.2)
         rc = proc.returncode
-        duration = round(time.time() - started, 1)
+        duration = round(time.monotonic() - started, 1)
         tail = tail_text(out_file, 4000)
         self.verify_running = None
         if error:
@@ -785,6 +862,10 @@ class Runner(object):
     def attempt_turn(self, n, message_id, text, resume=False):
         meta = self.meta
         started = time.time()
+        # Intervals (turn timeout, stall watchdog, signal ladder, post-result
+        # linger) use the monotonic clock: a laptop sleep or a clock step must
+        # not fire them. Only the absolute --deadline compares wall time.
+        started_mono = time.monotonic()
         self.turn_no = n
         self.turn_started = started
         turns_dir = self.path("turns")
@@ -882,15 +963,17 @@ class Runner(object):
         parser = self.engine.parser(self.event)
         events_fh = open(events_path, "ab")
         fd = proc.stdout.fileno()
-        state = {"buf": b"", "last_line": time.time()}
+        state = {"buf": b"", "last_line": time.monotonic()}
         eof = False
         exited_at = None
         stop = {"status": None, "reason": None, "steps": [], "next_at": None}
         linger = {"terminal_at": None, "term_at": None, "killed": False}
         turns_limit = b.get("turns_limit")
 
+        unparsed = {"count": 0}
+
         def handle_line(raw):
-            state["last_line"] = time.time()
+            state["last_line"] = time.monotonic()
             if not raw.strip():
                 return
             events_fh.write(raw + b"\n")
@@ -904,7 +987,13 @@ class Runner(object):
             if not isinstance(obj, dict):
                 return
             rec["events"] += 1
-            parser.feed(obj)
+            try:
+                parser.feed(obj)
+            except Exception as exc:  # noqa: BLE001 - an odd event shape must not end the child
+                unparsed["count"] += 1
+                if unparsed["count"] <= 3:
+                    self.log("warning: engine event not understood (%s: %s), skipped: %s"
+                             % (type(exc).__name__, exc, compact(line, 200)))
             # Any parsed event is activity, rendered or not (claude stream_event,
             # codex item.started), so ACTIVITY in `list` means "silent", not "idle".
             self.last_event_epoch = time.time()
@@ -922,7 +1011,7 @@ class Runner(object):
                 first, gap = signal.SIGTERM, 10
             self.log("%s: %s; sending %s to engine group %s" % (status, reason, first.name, self.pgid))
             killpg(self.pgid, first)
-            stop["next_at"] = time.time() + gap
+            stop["next_at"] = time.monotonic() + gap
 
         interrupt_p = self.path("interrupt")
         while True:
@@ -945,7 +1034,7 @@ class Runner(object):
                             handle_line(line)
             else:
                 time.sleep(0.25)
-            now = time.time()
+            now = time.monotonic()
             # Settled: a terminal event arrived, no background task is pending and
             # no new segment began after it (claude reports a result per segment).
             # Until then the turn timeout, the deadline and the stall watchdog apply.
@@ -960,9 +1049,9 @@ class Runner(object):
                 elif self._interrupt_requested(interrupt_p, n):
                     rec["interrupted"] = True
                     request_stop("killed", "interrupted by send --interrupt", "int")
-                elif not settled and now - started > meta["timeout_s"]:
+                elif not settled and now - started_mono > meta["timeout_s"]:
                     request_stop("timeout", "turn exceeded %ds" % meta["timeout_s"], "int")
-                elif not settled and self.deadline() is not None and now >= self.deadline():
+                elif not settled and self.deadline() is not None and time.time() >= self.deadline():
                     self.deadline_hit = True
                     request_stop("timeout", "the --deadline was reached", "int")
                 elif (self.stall_s > 0 and not settled and now - state["last_line"] > self.stall_s):
@@ -1001,7 +1090,7 @@ class Runner(object):
                 if eof or now - exited_at > 2.0:
                     break
             self.progress("turn", turn=n, force=False, parser=parser, events=rec["events"],
-                          stall_from=state["last_line"])
+                          stall_from=time.time() - (time.monotonic() - state["last_line"]))
         if state["buf"]:
             handle_line(state["buf"])
         if stop["status"] is None and self.stopping():
@@ -1009,12 +1098,21 @@ class Runner(object):
             stop["reason"] = "runner received %s" % self.signalled if self.signalled else "kill requested"
         events_fh.close()
         rc = proc.wait()
+        # The engine is gone; anything it started and left running (a dev
+        # server, a watcher) is still in its process group. End it now: with
+        # engine.pid removed nothing else could find it.
+        if self.sweep_group(self.pgid):
+            self.warn("processes the engine left running in its process group were terminated after it exited")
         self.proc = None
         self.pgid = None
         try:
             os.unlink(self.path("engine.pid"))
         except OSError:
             pass
+        if unparsed["count"]:
+            self.warn("%d engine event%s could not be parsed and %s skipped (raw lines in %s)" % (
+                unparsed["count"], "" if unparsed["count"] == 1 else "s",
+                "was" if unparsed["count"] == 1 else "were", events_path))
         if linger["killed"]:
             self.warn("engine lingered after its result and was terminated")
             rc = 0 if rc in (-signal.SIGTERM, -signal.SIGKILL, 143, 137) else rc

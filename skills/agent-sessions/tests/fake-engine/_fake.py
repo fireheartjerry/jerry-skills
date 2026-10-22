@@ -55,6 +55,11 @@ Behaviour is driven by directives embedded anywhere in the prompt, matched by
   @@commit:MSG     git add -A and commit with message MSG in the cwd
   @@on-turn:K:<directive>   apply <directive> only when this is prompt number K of the conversation
   @@when:<suffix>:<directive>  apply <directive> only when AGENT_SESSION_NAME ends with <suffix>
+  @@malformed      emit events with unexpected shapes (a message that is a string, an unhashable
+                   message id, codex items that are strings or carry changes: null) before the
+                   normal answer
+  @@leave-bg:N     start `sleep N` in the background in the engine's process group, write its pid
+                   to $FAKE_ENGINE_HOME/bg-<AGENT_SESSION_NAME>.pid, then answer and exit normally
 
 `@@on-turn` and `@@when` are read from every prompt of the conversation, so a
 directive planted in turn 1 can shape a later fixup turn. FAKE_ENGINE_DIRECTIVES
@@ -67,8 +72,14 @@ the conversation so far (including this one). Conversations persist under
 $FAKE_ENGINE_HOME/sessions/. Every invocation appends one line to
 $FAKE_ENGINE_HOME/calls.jsonl, and every SIGINT or SIGTERM it receives one line
 to $FAKE_ENGINE_HOME/signals.jsonl. `codex login status` exits 0 ("Logged in")
-unless FAKE_ENGINE_CODEX_LOGGED_OUT is set. `gemini --help` lists the flags the
-adapter uses, minus any named in FAKE_ENGINE_GEMINI_HELP_DROP.
+unless FAKE_ENGINE_CODEX_LOGGED_OUT is set; `claude auth status` prints JSON with
+loggedIn true (exit 0), or false (exit 1) when FAKE_ENGINE_CLAUDE_LOGGED_OUT is
+set. `codex mcp list --json` lists the servers named in FAKE_ENGINE_CODEX_MCP
+(comma list; `name:plugin` marks a server a plugin provides): like the real CLI,
+`-c mcp_servers.<name>.enabled=false` switches a configured one off and makes
+codex refuse to start ("invalid transport") for a plugin one. `gemini --help`,
+`claude --help` and `codex exec --help` list the flags the adapter uses, minus
+any named in FAKE_ENGINE_<ENGINE>_HELP_DROP (comma list).
 """
 
 import hashlib
@@ -239,6 +250,8 @@ def record(engine, argv, stdin, extra=None):
                      "AGENT_SESSION_STARTED": os.environ.get("AGENT_SESSION_STARTED"),
                      "FAKE_ENGINE_PROBE": os.environ.get("FAKE_ENGINE_PROBE"),
                      "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY"),
+                     "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY"),
+                     "CLAUDE_CODE_USE_BEDROCK": os.environ.get("CLAUDE_CODE_USE_BEDROCK"),
                      "HTTPS_PROXY": os.environ.get("HTTPS_PROXY"),
                      "AWS_PROFILE": os.environ.get("AWS_PROFILE"),
                      "UNRELATED_SECRET": os.environ.get("UNRELATED_SECRET"),
@@ -315,7 +328,38 @@ def count_of(d, name):
     return 0
 
 
+MALFORMED = {
+    "claude": [{"type": "assistant", "message": "x"}, {"type": "user", "message": "x"},
+               {"type": "assistant", "message": {"id": {"a": 1}, "usage": {"input_tokens": 1}, "content": "text"}},
+               {"type": "system", "subtype": "init", "session_id": {}},
+               {"type": "system", "subtype": "background_tasks_changed", "tasks": [1, None, {"task_id": {}}]}],
+    "codex": [{"type": "item.started", "item": "x"}, {"type": "item.completed", "item": "x"},
+              {"type": "item.completed", "item": {"type": "file_change", "changes": None}},
+              {"type": "item.completed", "item": {"type": "file_change", "changes": 5}}],
+    "gemini": [{"type": "message", "content": 5}, {"type": "tool_use", "parameters": 5}],
+}
+
+
+def malformed(engine, d, stream):
+    if "malformed" in d and stream:
+        for obj in MALFORMED[engine]:
+            emit(obj)
+
+
+def leave_bg(d):
+    """Start a background process in this process group and leave it running."""
+    raw = d.get("leave-bg")
+    if not raw or raw is True:
+        return
+    proc = subprocess.Popen(["sleep", str(raw)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    os.makedirs(HOME, exist_ok=True)
+    with open(os.path.join(HOME, "bg-%s.pid" % (os.environ.get("AGENT_SESSION_NAME") or "x")), "w") as fh:
+        fh.write("%d\n" % proc.pid)
+
+
 def pre_answer(d):
+    leave_bg(d)
     if "stderr" in d and d["stderr"] is not True:
         err(str(d["stderr"]).replace("_", " "))
     if "hang" in d or "hang-hard" in d:
@@ -348,10 +392,34 @@ def exit_code(d, default=0):
 
 # --------------------------------------------------------------------------- claude
 
+def print_help(engine, flags):
+    """Help text listing `flags`, minus FAKE_ENGINE_<ENGINE>_HELP_DROP, like an older CLI."""
+    drop = set(os.environ.get("FAKE_ENGINE_%s_HELP_DROP" % engine.upper(), "").split(","))
+    print("Usage: %s [options]\n" % engine)
+    for flag in flags:
+        if flag not in drop:
+            print("  %s" % flag)
+    return 0
+
+
+CLAUDE_HELP_FLAGS = ("--output-format", "--verbose", "--session-id", "--resume", "--model", "--json-schema",
+                     "--max-budget-usd", "--dangerously-skip-permissions", "--strict-mcp-config", "--add-dir",
+                     "--permission-mode", "--tools")
+CODEX_HELP_FLAGS = ("--json", "--skip-git-repo-check", "--output-schema", "--dangerously-bypass-approvals-and-sandbox",
+                    "--output-last-message", "--model", "--config")
+
+
 def claude_main(argv):
     if argv == ["--version"] or argv == ["-v"]:
         print(VERSION["claude"])
         return 0
+    if argv == ["--help"]:
+        return print_help("claude", CLAUDE_HELP_FLAGS)
+    if argv[:2] == ["auth", "status"]:
+        out = not not os.environ.get("FAKE_ENGINE_CLAUDE_LOGGED_OUT")
+        print(json.dumps({"loggedIn": not out, "authMethod": "none" if out else "claude.ai",
+                          "apiProvider": "firstParty"}, indent=2))
+        return 1 if out else 0
     opts = {"print": False, "format": "text", "verbose": False, "session_id": None, "resume": None,
             "model": None, "flags": [], "permission_mode": None, "tools": None, "json_schema": None,
             "max_budget_usd": None, "max_turns": None}
@@ -392,6 +460,9 @@ def claude_main(argv):
             opts["max_turns"] = argv[i]
         elif a in ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--strict-mcp-config"):
             opts["flags"].append(a)
+        elif a == "--add-dir":
+            i += 1
+            opts.setdefault("add_dirs", []).append(argv[i])
         elif a.startswith("-"):
             err("fake claude: unknown option %s" % a)
             return 2
@@ -443,6 +514,7 @@ def claude_main(argv):
         if d["empty-lead"] is not True:
             time.sleep(float(d["empty-lead"]))
     stall(d)
+    malformed("claude", d, stream)
     for k in range(count_of(d, "tool-calls")):
         if stream:
             emit({"type": "assistant", "message": {"role": "assistant", "content": [
@@ -568,18 +640,50 @@ def write_rollout(cid, cwd):
         fh.write(json.dumps({"timestamp": iso, "type": "turn_context", "payload": {"cwd": cwd}}) + "\n")
 
 
+def codex_mcp_list(rest):
+    servers = []
+    for raw in (os.environ.get("FAKE_ENGINE_CODEX_MCP") or "").split(","):
+        raw = raw.strip()
+        if raw:
+            name, _, kind = raw.partition(":")
+            servers.append((name, kind == "plugin"))
+    off = []
+    i = 0
+    while i < len(rest):
+        if rest[i] in ("-c", "--config") and i + 1 < len(rest):
+            m = re.match(r"^mcp_servers\.([^.=]+)\.enabled=false$", rest[i + 1])
+            if m:
+                off.append(m.group(1))
+            i += 2
+            continue
+        i += 1
+    plugin = dict(servers)
+    for name in off:
+        if plugin.get(name, True):
+            err("Error: failed to load bootstrap configuration\n\nCaused by:\n    invalid transport\n    in "
+                "`mcp_servers.%s`" % name)
+            return 1
+    print(json.dumps([{"name": n, "enabled": n not in off, "disabled_reason": None,
+                       "transport": {"type": "stdio", "command": "/bin/true"}} for n, _p in servers], indent=2))
+    return 0
+
+
 def codex_main(argv):
     if argv == ["--version"] or argv == ["-V"]:
         print(VERSION["codex"])
         return 0
+    if argv == ["exec", "--help"]:
+        return print_help("codex", CODEX_HELP_FLAGS)
     if argv[:2] == ["login", "status"]:
         if os.environ.get("FAKE_ENGINE_CODEX_LOGGED_OUT"):
             err("Not logged in")
             return 1
         print("Logged in using ChatGPT")
         return 0
+    if argv[:2] == ["mcp", "list"]:
+        return codex_mcp_list(argv[2:])
     if not argv or argv[0] != "exec":
-        err("fake codex: only `exec` and `login status` are supported")
+        err("fake codex: only `exec`, `login status` and `mcp list` are supported")
         return 2
     rest = argv[1:]
     resume = False
@@ -666,6 +770,7 @@ def codex_main(argv):
             emit({"type": "thread.started", "thread_id": cid})
         emit({"type": "turn.started"})
     stall(d)
+    malformed("codex", d, opts["json"])
     for k in range(count_of(d, "tool-calls")):
         if opts["json"]:
             emit({"type": "item.completed", "item": {"id": "tc_%d" % k, "type": "command_execution",
@@ -759,6 +864,8 @@ def gemini_main(argv):
         elif a in ("-p", "--prompt"):
             i += 1
             opts["prompt"] = argv[i]
+        elif a == "--include-directories":
+            i += 1
         elif a.startswith("-"):
             err("fake gemini: unknown option %s" % a)
             return 2
@@ -789,6 +896,7 @@ def gemini_main(argv):
         emit({"type": "init", "session_id": cid, "model": opts["model"] or "default",
               "approval_mode": opts["approval"] or "default"})
     stall(d)
+    malformed("gemini", d, stream)
     for k in range(count_of(d, "tool-calls")):
         if stream:
             emit({"type": "tool_use", "tool_name": "run_shell_command", "tool_id": "tc%d" % k,

@@ -3,7 +3,13 @@
 
 usage: run_eval.py [--runner claude|codex] [--arms none,skill] [--scenarios S-C,S-E]
                    [--seeds N] [--out DIR] [--jobs N] [--timeout S] [--model M]
-                   [--max-budget-usd X] [--dry-run] [--trigger] [--force]
+                   [--max-budget-usd X] [--max-total-usd X] [--max-runs N] [--yes]
+                   [--dry-run] [--trigger] [--force]
+
+Spend guards: a live run needs --yes and first prints the worst case (runs x per-run cap).
+--max-total-usd (default 1.00) stops submitting runs once the reported cost reaches it;
+codex reports no cost, so a live codex run needs --max-runs. A timeout kills the agent's
+whole process group, so commands it started do not outlive the run.
 
 Each run copies its fixture (built by fixtures/make_fixtures.py) into a throwaway work
 directory and runs the agent there with the scenario's user message. Arms: `none` has no skill
@@ -18,7 +24,8 @@ cannot find this skill by walking up; it is kept for grade.py's command probes. 
 Isolation: the claude runner passes --setting-sources project, --strict-mcp-config and
 --disable-slash-commands (no user settings, MCP servers or skills), but Bash runs unsandboxed
 as you, so run the evals in a container or a disposable account (README.md). The codex runner
-uses --sandbox workspace-write and an isolated CODEX_HOME holding only auth.json. grade.py
+uses --sandbox workspace-write and an isolated CODEX_HOME holding only auth.json, created
+in a private temporary directory (mode 0700, outside any repository) and deleted on exit. grade.py
 reports any no-skill transcript that touched an installed copy of the skill.
 
 --trigger instead asks the model, once per prompt in trigger.json, which skill it would load
@@ -34,6 +41,7 @@ import random
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -50,10 +58,10 @@ SELF_NAME = "competitive-systems"
 
 
 def default_out():
-    """eval-runs/competitive-systems/phase2-runs inside the skills repo, else ./eval-runs."""
+    """eval-runs/competitive-systems/runs inside the skills repo, else ./eval-runs."""
     repo = os.path.dirname(os.path.dirname(SKILL))
     if os.path.isdir(os.path.join(repo, "eval-runs")) or os.path.isfile(os.path.join(repo, "scripts", "validate.py")):
-        return os.path.join(repo, "eval-runs", "competitive-systems", "phase2-runs")
+        return os.path.join(repo, "eval-runs", "competitive-systems", "runs")
     return os.path.join(os.getcwd(), "eval-runs")
 
 
@@ -67,8 +75,18 @@ def read(path):
         return f.read()
 
 
-def skill_description():
-    text = read(os.path.join(SKILL, "SKILL.md"))
+def decoy_description(d):
+    """A decoy's description, or for {"from_skill": NAME} the live description of the sibling
+    skill in this repository, so the routing check uses real neighbours and never drifts."""
+    if d.get("from_skill"):
+        path = os.path.join(os.path.dirname(SKILL), d["from_skill"], "SKILL.md")
+        if os.path.isfile(path):
+            return skill_description(path)
+    return d.get("description", "")
+
+
+def skill_description(path=None):
+    text = read(path or os.path.join(SKILL, "SKILL.md"))
     m = re.search(r'^description:\s*"(.*)"\s*$', text, re.M)
     if m:
         return m.group(1)
@@ -103,13 +121,13 @@ def user_prompt(message):
     return msg + "\n\n" + SUFFIX
 
 
-def isolated_codex_home(out):
+def isolated_codex_home():
     """An empty CODEX_HOME for both arms holding only the login (auth.json), so installed
-    skills, AGENTS.md and config in the real ~/.codex cannot reach either arm."""
-    home = os.path.join(out, "codex-home")
-    if os.path.isdir(home):
-        shutil.rmtree(home)
-    os.makedirs(home)
+    skills, AGENTS.md and config in the real ~/.codex cannot reach either arm. It is a private
+    temporary directory (0700) outside any repository, so the credential never lands in a
+    working tree; the caller deletes it."""
+    home = tempfile.mkdtemp(prefix="cs-evals-codex-home-")
+    os.chmod(home, 0o700)
     real = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
     auth = os.path.join(real, "auth.json")
     if os.path.isfile(auth):
@@ -260,19 +278,49 @@ def parse_events(raw):
 
 
 def run_proc(argv, cwd, timeout, extra_env=None):
+    """Run argv in its own session; on timeout kill the whole process group, so the agent's
+    Bash children die with it."""
     env = dict(os.environ)
     for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PLUGIN_ROOT", "DEVKIT_DEV_PY"):
         env.pop(k, None)
     env.update(extra_env or {})
+    kw = {"start_new_session": True} if os.name == "posix" else {}
     try:
-        p = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           universal_newlines=True, timeout=timeout, env=env)
-        return p.stdout, p.stderr, ("ok" if p.returncode == 0 else "exit %d" % p.returncode)
-    except subprocess.TimeoutExpired as e:
-        dec = lambda b: b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or "")  # noqa: E731
-        return dec(e.stdout), dec(e.stderr), "timeout"
+        p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             universal_newlines=True, env=env, **kw)
     except OSError as e:
         return "", str(e), "cannot start: %s" % e
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return out, err, ("ok" if p.returncode == 0 else "exit %d" % p.returncode)
+    except subprocess.TimeoutExpired:
+        kill_group(p)
+        out, err = p.communicate()
+        return out or "", err or "", "timeout"
+    except BaseException:
+        kill_group(p)
+        raise
+
+
+def kill_group(p):
+    try:
+        if os.name == "posix":
+            os.killpg(p.pid, signal.SIGKILL)
+        else:
+            p.kill()
+    except OSError:
+        pass
+
+
+def run_cost(events):
+    """total_cost_usd from a claude stream's result event, or None."""
+    for ev in reversed(events):
+        if ev.get("type") == "result" and ev.get("total_cost_usd") is not None:
+            try:
+                return float(ev["total_cost_usd"])
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 # ------------------------------------------------------------------ scenario runs
@@ -285,7 +333,7 @@ def run_one(job, a):
     base = os.path.join(a.out, arm, "%s.s%d" % (s["id"], seed))
     md = base + ".md"
     if os.path.exists(md) and not a.force and "\nstatus: ok\n" in read(md)[:4000]:
-        return arm, s["id"], seed, "skipped (done)", 0.0
+        return arm, s["id"], seed, "skipped (done)", 0.0, 0.0
     if os.path.exists(work):
         shutil.rmtree(work)
     shutil.copytree(os.path.join(a.fixtures, s["fixture"]), work, symlinks=True)
@@ -302,7 +350,7 @@ def run_one(job, a):
         f.write(header + body)
         if err.strip():
             f.write("\n### stderr\n```\n" + err[-4000:] + "\n```\n")
-    return arm, s["id"], seed, status, time.time() - t0
+    return arm, s["id"], seed, status, time.time() - t0, run_cost(events)
 
 
 def scenario_jobs(a, scenarios):
@@ -324,7 +372,8 @@ def trigger_jobs(a):
     items = [(p, True) for p in data["should_fire"]] + [(p, False) for p in data["should_not_fire"]]
     jobs = []
     for i, (prompt, should) in enumerate(items):
-        skills = [me] + list(data["decoys"])
+        skills = [me] + [{"name": d["name"], "description": decoy_description(d)}
+                         for d in data["decoys"] if decoy_description(d)]
         random.Random(i).shuffle(skills)
         argv, shown = trigger_command(a.runner, prompt, skills, a.model)
         jobs.append({"i": i, "prompt": prompt, "should_fire": should, "argv": argv, "shown": shown,
@@ -363,8 +412,7 @@ def run_trigger(jobs, a):
         return dict(job, argv=None, status=status, answer=text.strip()[:200], cost_usd=cost, model=model,
                     choice=parse_choice(text, job["names"]))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        rows = list(ex.map(one, jobs))
+    rows = run_capped(jobs, one, a, lambda r: r.get("cost_usd"))
     fired = [r for r in rows if r["choice"] == SELF_NAME]
     tp = sum(1 for r in fired if r["should_fire"])
     n_should = sum(1 for r in rows if r["should_fire"])
@@ -400,7 +448,17 @@ def main(argv=None):
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--timeout", type=int, default=1500, help="seconds per run")
     ap.add_argument("--model", default=None)
-    ap.add_argument("--max-budget-usd", type=float, default=3.0, help="per-run cap passed to claude (0 = none)")
+    ap.add_argument("--max-budget-usd", type=float, default=0.75,
+                    help="per-run cap passed to claude (default 0.75; measured runs cost "
+                         "0.05 to 0.53; 0 = none)")
+    ap.add_argument("--max-total-usd", type=float, default=1.0,
+                    help="stop submitting runs once the reported total cost reaches this "
+                         "(default 1.00; raise it deliberately for a full run)")
+    ap.add_argument("--max-runs", type=int, default=None,
+                    help="run at most N jobs (required for a live codex run, which reports "
+                         "no cost)")
+    ap.add_argument("--yes", action="store_true",
+                    help="confirm a live run that spends money (printed first: the worst case)")
     ap.add_argument("--dry-run", action="store_true", help="print the commands; spend nothing")
     ap.add_argument("--trigger", action="store_true", help="run the trigger-routing check instead")
     ap.add_argument("--force", action="store_true", help="rerun finished runs")
@@ -413,9 +471,70 @@ def main(argv=None):
         die("--arms takes none and/or skill: %s" % ",".join(a.arms))
     if a.seeds < 1 or a.jobs < 1:
         die("--seeds and --jobs must be at least 1")
+    if a.max_runs is not None and a.max_runs < 1:
+        die("--max-runs must be at least 1")
+    if a.max_total_usd <= 0:
+        die("--max-total-usd must be positive")
     a.codex_home = None
+    try:
+        return _main(a)
+    finally:
+        if a.codex_home:
+            shutil.rmtree(a.codex_home, ignore_errors=True)
+
+
+def confirm_spend(a, n):
+    """Print the worst case for n runs and refuse without --yes (or a codex run without
+    --max-runs). Returns the number of runs allowed."""
+    allowed = min(n, a.max_runs) if a.max_runs else n
+    if a.runner == "claude":
+        cap = a.max_budget_usd or 0
+        worst = ("%.2f USD (%d runs x %.2f USD per-run cap)" % (allowed * cap, allowed, cap)
+                 if cap else "unbounded per run (--max-budget-usd 0)")
+        print("live run: %d of %d job(s); worst case %s; stops submitting at a reported total "
+              "of %.2f USD (--max-total-usd)" % (allowed, n, worst, a.max_total_usd))
+    else:
+        if not a.max_runs:
+            die("codex reports no cost, so a live codex run needs --max-runs N")
+        print("live run: %d of %d job(s) with codex (no cost reported; --max-runs bounds it)"
+              % (allowed, n))
+    if not a.yes:
+        die("this spends money; rerun with --yes after reading the worst case above, or use "
+            "--dry-run")
+    return allowed
+
+
+def run_capped(jobs, fn, a, cost_of):
+    """Run fn over jobs with a.jobs workers, never submitting a job once the reported cost
+    reaches a.max_total_usd or a.max_runs jobs ran. Results in job order (None: not run)."""
+    jobs = list(jobs)[:a.max_runs] if a.max_runs else list(jobs)
+    results, spent, stopped = [None] * len(jobs), [0.0], [False]
+    pending = {}
+    nxt = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as ex:
+        while nxt < len(jobs) or pending:
+            while nxt < len(jobs) and len(pending) < a.jobs and not stopped[0]:
+                if a.runner == "claude" and spent[0] >= a.max_total_usd:
+                    stopped[0] = True
+                    break
+                pending[ex.submit(fn, jobs[nxt])] = nxt
+                nxt += 1
+            if not pending:
+                break
+            done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in done:
+                i = pending.pop(fut)
+                results[i] = fut.result()
+                spent[0] += cost_of(results[i]) or 0.0
+    if stopped[0] or nxt < len(jobs):
+        print("stopped after %d of %d job(s): reported cost %.4f USD reached --max-total-usd "
+              "%.2f" % (nxt, len(jobs), spent[0], a.max_total_usd))
+    return [r for r in results if r is not None]
+
+
+def _main(a):
     if a.runner == "codex" and not a.dry_run:
-        a.codex_home = isolated_codex_home(a.out)
+        a.codex_home = isolated_codex_home()
     if a.trigger:
         jobs = trigger_jobs(a)
         if a.dry_run:
@@ -425,6 +544,7 @@ def main(argv=None):
             return 0
         if shutil.which(find_bin(a.runner, a.runner.upper() + "_BIN")) is None:
             die("%s CLI not found on PATH" % a.runner, 3)
+        confirm_spend(a, len(jobs))
         run_trigger(jobs, a)
         return 0
     all_sc = json.loads(read(SCENARIOS))
@@ -443,17 +563,21 @@ def main(argv=None):
         return 0
     if shutil.which(find_bin(a.runner, a.runner.upper() + "_BIN")) is None:
         die("%s CLI not found on PATH" % a.runner, 3)
+    confirm_spend(a, len(jobs))
     if "skill" in a.arms:
         snapshot_skill(a.out)
     if not os.path.isdir(a.fixtures):
         subprocess.run([sys.executable, MAKE_FIXTURES, "--out", a.fixtures], check=True)
     for arm in a.arms:
         os.makedirs(os.path.join(a.out, arm), exist_ok=True)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        futs = [ex.submit(run_one, j, a) for j in jobs]
-        for fut in concurrent.futures.as_completed(futs):
-            arm, sid, seed, status, secs = fut.result()
-            print("%-5s %-4s s%d %-16s %4.0f s" % (arm, sid, seed, status, secs), flush=True)
+    def one(job):
+        arm, sid, seed, status, secs, cost = run_one(job, a)
+        print("%-5s %-4s s%d %-16s %4.0f s%s" % (arm, sid, seed, status, secs,
+                                                  "  %.4f USD" % cost if cost else ""),
+              flush=True)
+        return cost
+
+    run_capped(jobs, one, a, lambda cost: cost)
     return 0
 
 

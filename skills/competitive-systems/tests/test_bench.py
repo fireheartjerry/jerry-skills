@@ -141,7 +141,7 @@ class ExponentTests(unittest.TestCase):
         self.assertLess(raw, 1.7)
         fitted, warnings = bench.scale_exponent(sizes, medians, startup)
         self.assertAlmostEqual(fitted, 2.0, delta=0.02)
-        self.assertTrue(any("10x the startup baseline" in w for w in warnings), warnings)
+        self.assertTrue(any("5x the startup baseline" in w for w in warnings), warnings)
 
     def test_scale_exponent_without_baseline_is_the_raw_fit(self):
         fitted, warnings = bench.scale_exponent([1000, 2000, 4000], [1.0, 4.0, 16.0], 0.0)

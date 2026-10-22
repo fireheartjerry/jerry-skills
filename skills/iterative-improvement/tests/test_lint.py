@@ -93,17 +93,49 @@ class FrontmatterTests(unittest.TestCase):
         self.assertIn("Not for", description)
         self.assertLess(description.index("Not for"), 150, "exclusions must appear before index 150")
         for phrase in ("world class", "next level", "this is good but", "iterate on this", "audit and fix",
-                       "iterate until", "designs", "pages", "UI", "code", "docs", "copy"):
+                       "iterate until", "designs", "pages", "UI", "code", "docs", "copy", "existing",
+                       "building from scratch", "one-line edit", "linter or metric"):
             self.assertIn(phrase, description, "description lacks phrase %r" % phrase)
         self.assertNotIn("lite mode", description)
         self.assertNotIn(EXTERNAL_SKILL, self.text)
         self.assertNotIn(ELLIPSIS, description)
 
     def test_size(self):
-        self.assertLessEqual(os.path.getsize(SKILL_MD), 9500)
+        # Raised from 9500 when the Paths rule, the consent stop with its spend line and
+        # the scope rule joined the lite card, and from 10500 for the verify-command
+        # gate, the background rule for child runs, resume and the pre-report check;
+        # test_path_budgets below keeps text from moving into the mandatory reads instead.
+        self.assertLessEqual(os.path.getsize(SKILL_MD), 11600)
 
     def test_full_protocol_size(self):
-        self.assertLessEqual(os.path.getsize(FULL_PROTOCOL), 14000)
+        # Raised from 15500 for the verify-command gate, the recorded decisions, the
+        # pre-report check and measured money (--max-usd).
+        self.assertLessEqual(os.path.getsize(FULL_PROTOCOL), 16500)
+
+    def test_path_budgets(self):
+        """What an agent must read before acting, per mode. A per-file cap alone let text
+        migrate from SKILL.md into the mandatory references; these totals stop that."""
+        size = lambda name: os.path.getsize(os.path.join(SKILL, name))
+        lite = sum(size(n) for n in ("SKILL.md", "references/reviewer-brief.md", "references/scorer-brief.md",
+                                     "references/cross-agent.md"))
+        full = lite + size("references/full-protocol.md") + size("references/criteria-guide.md")
+        # Raised from 38000 and 67500 when image evidence (who can see a capture, how to
+        # check a child did), background child runs and the verify-command gate joined;
+        # the full-only blind judge lives in judge-brief.md, outside these totals.
+        self.assertLessEqual(lite, 41000, "lite path is %d bytes" % lite)
+        self.assertLessEqual(full, 71500, "full path is %d bytes" % full)
+        self.assertLessEqual(size("references/cross-agent.md"), 10500,
+                             "builder detail belongs in references/isolation.md, which no loop step reads")
+
+    def test_consent_and_paths_rules(self):
+        card = lite_card(self.text)
+        for phrase in ("end your turn", "nothing is created or spawned before the reply", "billed", "vendor",
+                       "--dry-run", "3 to 7", "--path"):
+            self.assertIn(phrase, card, "lite card lacks %r" % phrase)
+        self.assertIn("SKILL_DIR", self.text)
+        self.assertLess(self.text.index("SKILL_DIR"), self.text.index("## 1. Fit and mode"))
+        self.assertIn("requires:", self.front)
+        self.assertNotIn("(commit it)", self.text)
 
     def test_required_phrases(self):
         for phrase in ("## 2. Lite card", "reply ok or edit", "T = 3", "2 rounds max", "full-protocol.md",
@@ -122,6 +154,21 @@ class FrontmatterTests(unittest.TestCase):
             self.assertIn(phrase, card, "lite card lacks %r" % phrase)
         for phrase in ("T = max", "third-run", "twice"):
             self.assertNotIn(phrase, card, "lite card carries full-only mechanics: %r" % phrase)
+
+    def test_verify_command_is_the_first_gate(self):
+        """Refactors can raise every criterion while breaking behaviour; the repo's own
+        verify command must be a PRESERVE gate in both modes."""
+        card = lite_card(self.text)
+        self.assertIn("the first the repo's verify command", card)
+        self.assertIn('"no verify command found"', card)
+        self.assertIn("verify command", read(FULL_PROTOCOL))
+        self.assertIn("The repo's verify command is the first PRESERVE gate",
+                      read(os.path.join(REFERENCES, "criteria-guide.md")))
+
+    def test_long_child_runs_go_to_the_background(self):
+        self.assertIn("--background", self.text)
+        self.assertIn("--background", read(os.path.join(REFERENCES, "cross-agent.md")))
+        self.assertIn("loop.py status --loop LOOP", self.text, "resume must be in the always-read text")
 
     def test_full_mode_pointer_precedes_lite_card(self):
         self.assertLess(self.text.index("full-protocol.md"), self.text.index("## 2. Lite card"))
@@ -192,6 +239,21 @@ class SweepTests(unittest.TestCase):
                 except ValueError as exc:
                     self.fail("evals/%s does not parse: %s" % (name, exc))
 
+    def test_no_procedure_written_twice(self):
+        """A sentence of 12 or more words appears in one file only: a procedure has one
+        owner and the others point at it, so two copies cannot drift apart. Code blocks
+        (the briefs' prompts, commands) are exempt."""
+        names = ["SKILL.md"] + ["references/" + n for n in sorted(os.listdir(REFERENCES)) if n.endswith(".md")]
+        owners = {}
+        for name in names:
+            text = re.sub(r"```.*?```", "", read(os.path.join(SKILL, name)), flags=re.S)
+            for sentence in re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", text)):
+                words = re.findall(r"[a-z0-9']+", sentence.lower())
+                if len(words) >= 12:
+                    key = " ".join(words)
+                    self.assertIn(owners.setdefault(key, name), (name,),
+                                  "sentence in both %s and %s: %s" % (owners[key], name, sentence[:120]))
+
     def test_cmd_record_path_is_consistent(self):
         for name in ("SKILL.md", "references/criteria-guide.md", "references/example-loop.md", "references/cross-agent.md"):
             text = read(os.path.join(SKILL, name))
@@ -245,7 +307,7 @@ class PointerTests(unittest.TestCase):
             rel = os.path.relpath(path, SKILL)
             for name in token.findall(text):
                 self.assertIn(name, shipped, "%s names scripts/%s, which the skill does not ship" % (rel, name))
-            for helper in ("frames.mjs", "check-overflow.mjs"):
+            for helper in ("frames.mjs", "check-overflow.mjs", "shot.mjs"):
                 stray = re.search(r"(?<!tools/)" + re.escape(helper), text)
                 self.assertIsNone(stray, "%s mentions %s without the tools/ prefix" % (rel, helper))
 
@@ -271,16 +333,55 @@ class ReferenceContentTests(unittest.TestCase):
         self.assertEqual(re.sub(r"\s+", " ", text).count("Never score `0` for a tooling failure"), 1)
 
     def test_cross_agent(self):
+        """cross-agent.md says what the agent must do; isolation.md holds how the script
+        does it (argv, flags, what was verified on which CLI version)."""
         text = read(os.path.join(REFERENCES, "cross-agent.md"))
-        self.assertNotIn(BYPASS_FLAG, text)
-        self.assertNotIn(YOLO_FLAG, text)
-        for phrase in ("-s read-only", '--setting-sources ""', "--disable-slash-commands", "--skills-dir", "CODEX_HOME",
-                       "project_doc_max_bytes=0", "Edit(//", "< /dev/null", "--same-engine", "--preflight",
-                       "--model", "--unsandboxed", "keyring", "Verified", "# duration", "byte-identical",
-                       "Read(//<stage>/**)", "## What each engine enforces", "tokens used"):
+        builder = read(os.path.join(REFERENCES, "isolation.md"))
+        for doc in (text, builder):
+            self.assertNotIn(BYPASS_FLAG, doc)
+            self.assertNotIn(YOLO_FLAG, doc)
+        for phrase in ("Five", "--same-engine", "--preflight", "--check", "--model", "--unsandboxed", "keyring",
+                       "# duration", "byte-identical", "## What each engine enforces", "tokens used", "full model id",
+                       "billed", "vendor", "localhost", "timed out", "switching engine does not help", "-iname",
+                       "references/isolation.md"):
             self.assertIn(phrase, text, phrase)
-        for stale in ("--no-bash", "Bash(cat:*)\" ", "stricter variant"):
-            self.assertNotIn(stale, text, stale)
+        self.assertNotIn("the only option", text)
+        self.assertNotIn("preferred scorer", text)
+        for phrase in ("-s read-only", '--setting-sources ""', "--disable-slash-commands", "--skills-dir", "CODEX_HOME",
+                       "project_doc_max_bytes=0", "Edit(//", "< /dev/null", "Verified", "Read(//<stage>/**)",
+                       "--no-session-persistence", "snapshot.py fingerprint", "process group", "case-insensitively"):
+            self.assertIn(phrase, builder, phrase)
+        for stale in ("--no-bash", "Bash(cat:*)\" ", "stricter variant", "gtimeout"):
+            self.assertNotIn(stale, text + builder, stale)
+
+    def test_briefs_never_offer_a_url(self):
+        reviewer = read(os.path.join(REFERENCES, "reviewer-brief.md"))
+        scorer = read(os.path.join(REFERENCES, "scorer-brief.md"))
+        for text in (reviewer, scorer):
+            self.assertNotIn("URL of a server", text)
+            self.assertIn("Never a URL", text)
+        self.assertNotIn("start the dev server and give the", reviewer)
+
+    def test_round_two_brief_keeps_the_standards(self):
+        """Round 2+ replaces only WHAT I WANT FROM YOU; the finding standards live in their
+        own STANDARDS block, so the replacement cannot drop them."""
+        text = read(os.path.join(REFERENCES, "reviewer-brief.md"))
+        round_one = text[text.index("## Round 1"):text.index("## Round 2+")]
+        prompt = round_one[round_one.index("```") + 3:round_one.rindex("```")]
+        want = prompt.index("WHAT I WANT FROM YOU")
+        standards = prompt.index("STANDARDS")
+        output = prompt.index("OUTPUT FORMAT")
+        self.assertLess(want, standards)
+        self.assertLess(standards, output)
+        block = prompt[standards:output]
+        for phrase in ("LOCATION", "CONSEQUENCE", "SURVIVABILITY", "Rank findings", "Verify before you assert",
+                       "genuinely good"):
+            self.assertIn(phrase, block, phrase)
+        self.assertNotIn("LOCATION", prompt[want:standards])
+        replacement = text[text.index("## Round 2+"):text.index("## What to pass along")]
+        self.assertIn("whole\nSTANDARDS block", replacement)
+        self.assertIn("criteria-for-scorer.md", replacement)
+        self.assertIn("PROTECTED", replacement)
 
     def test_criteria_guide(self):
         text = read(os.path.join(REFERENCES, "criteria-guide.md"))
@@ -400,8 +501,9 @@ class ArithmeticTests(unittest.TestCase):
         self.assertEqual(sum(int(r[3]) for r in body), int(total[3]))
         self.assertEqual(sum(int(r[4]) for r in body), int(total[4]))
         self.assertEqual((int(total[3]), int(total[4])), (43, 80))
-        headline = re.search(r"\*\*Result: (\d+) -> (\d+)", text)
-        self.assertEqual((int(headline.group(1)), int(headline.group(2))), (43, 80))
+        headline = re.search(r"\*\*Result: (\d+) -> (\d+) on rubric v2", text)
+        self.assertEqual((int(headline.group(1)), int(headline.group(2))), (58, 80),
+                         "the headline compares within one rubric version")
 
     def test_example_round_one_matches_fixture(self):
         text = read(os.path.join(REFERENCES, "example-loop.md"))

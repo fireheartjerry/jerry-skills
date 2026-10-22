@@ -57,7 +57,8 @@ class ParserTests(SessionTest):
         report = json.loads(cp.stdout)
         self.assertEqual(sorted(report), ["claude", "codex", "gemini"])
         self.assertEqual(report["codex"]["auth"], "ok")
-        self.assertEqual(report["claude"]["auth"], "unknown")
+        # `claude auth status` is a free check of the login (the fake reports logged in).
+        self.assertEqual(report["claude"]["auth"], "ok")
         self.assertFalse(report["gemini"]["verified"])
         self.assertTrue(report["claude"]["verified"])
         self.assertTrue(report["claude"]["capabilities"]["native_budget_usd"])
