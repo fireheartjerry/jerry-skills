@@ -1110,7 +1110,7 @@ class BisectTests(unittest.TestCase):
 
     def test_no_slowdown_refuses_and_bad_refs_are_usage_errors(self):
         self.commit_series(slow_from=99, total=4)
-        p = self.bisect()
+        p = self.bisect("--min-effect", "0.5")  # identical commits: only a real gap this large counts, not runner noise
         self.assertEqual(p.returncode, 1, p.stderr)
         self.assertIn("nothing to bisect", p.stderr)
         self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)

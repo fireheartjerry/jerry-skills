@@ -448,11 +448,15 @@ class Engine:
             t0 = time.time()
             try:
                 res = self.backend.call(unit, prompt, attempts)
-            finally:
+            except BaseException:
                 self._release(reserve)
+                raise
             dur = time.time() - t0
             cost = self._call_cost(res)
             with self.lock:
+                # count the call and free its slot in one step, so no other thread sees it as neither
+                self.reserved = max(0.0, self.reserved - reserve)
+                self._inflight = max(0, self._inflight - 1)
                 self.calls += 1
                 self.tokens += res.tokens or 0
                 self.cost += cost or 0.0
