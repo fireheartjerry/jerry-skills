@@ -553,6 +553,35 @@ def cmd_tracking(args, paths, cfg, log):
     return EXIT_OK
 
 
+def cmd_foresight(args, paths, cfg, log):
+    from mr import foresight
+    try:
+        if args.action == "report":
+            summary = foresight.report(paths)
+        elif args.action == "replay":
+            from mr.replay import freeze_cases
+            from mr.config import read_json
+            if not args.after or not args.out:
+                raise foresight.ForesightError("replay needs --after <UTC timestamp> and --out <private directory>")
+            excluded = set((read_json(paths.split, {}) or {}).get("train_ids", []))
+            if args.exclude_sessions:
+                extra = read_json(args.exclude_sessions)
+                if not isinstance(extra, list) or any(not isinstance(s, str) for s in extra):
+                    raise foresight.ForesightError("--exclude-sessions must contain a JSON list of source:session strings")
+                excluded.update(extra)
+            summary = freeze_cases(read_jsonl(paths.messages), args.out, args.after, excluded_sessions=excluded, limit=args.limit)
+        else:
+            data = _stdin_json(log)
+            if data is None:
+                return EXIT_USAGE
+            summary = (foresight.record if args.action == "record" else foresight.observe)(paths, data)
+    except (ValueError, OSError) as exc:
+        log("foresight: %s" % exc)
+        return EXIT_INVALID
+    print(json.dumps(summary, ensure_ascii=False, indent=None if args.json else 2))
+    return EXIT_OK
+
+
 def cmd_schedule(args, paths, cfg, log):
     from mr.schedule import ScheduleError, plan
     try:
@@ -717,6 +746,14 @@ def build_parser():
     p.add_argument("--key")
     p.add_argument("--answers")
     p.set_defaults(func=cmd_tracking)
+
+    p = sub.add_parser("foresight", help="register predictions before later turns and measure explicit human outcomes")
+    p.add_argument("action", choices=["record", "observe", "report", "replay"])
+    p.add_argument("--out")
+    p.add_argument("--after")
+    p.add_argument("--exclude-sessions")
+    p.add_argument("--limit", type=int, default=24)
+    p.set_defaults(func=cmd_foresight)
 
     p = sub.add_parser("schedule", help="prepare a portable weekly candidate refresh runner")
     p.add_argument("action", choices=["plan"])
