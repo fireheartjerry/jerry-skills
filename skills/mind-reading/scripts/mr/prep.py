@@ -17,6 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from . import agent_context as _ac
+from . import filters
 from .config import read_json, write_json, write_jsonl
 from .corpus import load_corpus, normalize, now_iso
 
@@ -319,6 +320,9 @@ def _msg_out(m):
     context when there is one."""
     out = {"time": m.get("time"), "origin": m.get("origin", "typed"), "text": m.get("text", ""),
            "time_reliable": bool(m.get("time_reliable", True))}
+    for key in ("key", "record_id", "typed_text", "authorship_version"):
+        if key in m:
+            out[key] = m[key]
     if m.get("agent_context"):
         out["agent_context"] = m["agent_context"]
     return out
@@ -333,6 +337,8 @@ def chunk_msg(m, p, omitted=None):
     `omitted` accumulates the characters cut, for prep-report."""
     text = m.get("text", "") or ""
     origin = m.get("origin", "typed")
+    if origin == "typed":
+        text = filters.authored_message(m)
     cap = p.get("chunk_message_max_chars") or 0
     if origin in NONTYPED_ORIGINS and p.get("chunk_nontyped_head_chars"):
         cap = min(cap, p["chunk_nontyped_head_chars"]) if cap else p["chunk_nontyped_head_chars"]
@@ -341,7 +347,10 @@ def chunk_msg(m, p, omitted=None):
         text = text[:cap].rstrip() + " [%d chars omitted]" % cut
         if omitted is not None:
             omitted[origin] = omitted.get(origin, 0) + cut
-    return {"time": m.get("time") if m.get("time_reliable", True) else None, "origin": origin, "text": text}
+    out = {"time": m.get("time") if m.get("time_reliable", True) else None, "origin": origin, "text": text}
+    if m.get("key"):
+        out["key"] = m["key"]
+    return out
 
 
 def chunk_context(m, p):
@@ -636,8 +645,10 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
             no_test, train_before, frozen_split = True, frozen_split.get("train_before"), None
         elif not frozen_split or not frozen_split.get("test_ids"):
             raise PrepRefused("--keep-split needs an existing derived/split.json with test_ids")
+    n_in = len(rows)
+    rows = [r for r in rows if filters.keep(filters.clean(r.get("text") or "")[0])]
+    legacy_harness_removed = n_in - len(rows)
     sessions = _sessions_from_rows(rows)
-    n_in = sum(len(s["messages"]) for s in sessions)
     bulk, bulk_msgs = flag_bulk_stamped(sessions, p)
     twins, copies = ([], []) if no_twins else detect_twins(sessions, p)
     dups = dedup_within_session(sessions, p)
@@ -728,6 +739,7 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
     write_jsonl(paths.sessions, rows_out)
     report = {
         "created": now_iso(), "messages_in": n_in, "messages_out": sum(len(s["messages"]) for s in all_kept),
+        "legacy_harness_removed": legacy_harness_removed,
         "sessions": len(sessions), "bulk_stamped_sessions": bulk, "bulk_stamped_messages": bulk_msgs,
         "bulk_copies": copies, "bulk_copies_removed": sum(c["dropped"] for c in copies), "twins": twins,
         "within_session_duplicates_removed": dups, "ineligible_post_cutoff_dropped": split["dropped_post_cutoff"],
@@ -767,3 +779,95 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
 
 def chunk_files(paths):
     return sorted(Path(paths.chunks).glob("chunk-*.jsonl"))
+
+
+def training_rows(paths, report=None):
+    """Only prepared training messages, never raw future/dev/test corpus text.
+
+    Filtering raw corpus by session id alone reintroduces deduplicated/leaked text
+    and the tail of a session trimmed at train_before. Old prepared artifacts lack
+    keys; fallback ids remain tied to exact prepared text. Prep restores source keys.
+    """
+    split = read_json(paths.split)
+    if not isinstance(split, dict) or not isinstance(split.get("train_ids"), list) or not split.get("split_id"):
+        raise PrepRefused("training evidence requires derived/split.json with train_ids; run prep first")
+    train = set(split["train_ids"])
+    held = set(split.get("test_ids") or []) | set(split.get("dev_ids") or [])
+    if train & held:
+        raise PrepRefused("training and held-out session ids overlap")
+    if not paths.sessions.exists():
+        raise PrepRefused("training evidence requires derived/sessions.jsonl; run prep first")
+    out, found = [], set()
+    provenance = {"input_messages": 0, "kept_messages": 0, "harness_removed": 0, "authorship_reparsed": 0,
+                  "authorship_version": filters.AUTHORSHIP_VERSION}
+    for line in paths.sessions.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            session = json.loads(line)
+        except (ValueError, TypeError) as exc:
+            raise PrepRefused("invalid prepared session record: %s" % exc)
+        if not isinstance(session, dict):
+            raise PrepRefused("prepared session record must be an object")
+        sid = "%s:%s" % (session.get("source", ""), session.get("session", ""))
+        if sid not in train:
+            continue
+        if session.get("split") != "train":
+            raise PrepRefused("prepared session disagrees with training split: %s" % sid)
+        found.add(sid)
+        for ordinal, message in enumerate(session.get("messages") or []):
+            provenance["input_messages"] += 1
+            if not filters.keep(filters.clean(message.get("text") or "")[0]):
+                provenance["harness_removed"] += 1
+                continue
+            row = dict(message, source=session["source"], session=session["session"],
+                       project=session.get("project"), ordinal=ordinal)
+            row["time"] = message.get("time") if message.get("time_reliable", True) else None
+            row["key"] = message.get("key") or hashlib.sha256((sid + "\n" + str(ordinal) + "\n" +
+                                                               (message.get("text") or "")).encode("utf-8")).hexdigest()[:24]
+            row.setdefault("record_id", row["key"])
+            row["source_id"] = "%s:%s:%s" % (row["source"], row["session"], row["key"])
+            if row.get("origin", "typed") == "typed":
+                if row.get("authorship_version") != filters.AUTHORSHIP_VERSION:
+                    provenance["authorship_reparsed"] += 1
+                row["text"] = filters.authored_message(row)
+            out.append(row)
+    if found != train:
+        raise PrepRefused("prepared training sessions are missing; run prep again")
+    if not out:
+        raise PrepRefused("no prepared training messages; run prep with a valid training window")
+    provenance["kept_messages"] = len(out)
+    if report is not None:
+        report.update(provenance)
+    return out
+
+
+def validate_training_chunks(paths, rows=None):
+    """Reject stale or edited chunks before a mining engine can read them."""
+    rows = training_rows(paths) if rows is None else rows
+    by_session = defaultdict(list)
+    for row in rows:
+        by_session[(row["source"], row["session"])].append(row)
+    for path in chunk_files(paths):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            block = json.loads(line)
+            candidates = by_session.get((block.get("source"), block.get("session")))
+            if candidates is None:
+                raise PrepRefused("%s contains a session outside the training split; run prep again" % path.name)
+            for message in (block.get("messages") or []) + (block.get("first_messages") or []):
+                text = re.sub(r" \[\d+ chars omitted\]$", "", message.get("text") or "").rstrip()
+                matches = [r for r in candidates if (not message.get("key") or r["key"] == message["key"])
+                           and (r.get("text") or "").startswith(text)]
+                if not matches:
+                    raise PrepRefused("%s contains text absent from prepared training evidence; run prep again" % path.name)
+                context = message.get("agent_context")
+                if context:
+                    head = re.sub(r" \.\.\.$", "", context.get("head") or "")
+                    valid = [r for r in matches if isinstance(r.get("agent_context"), dict)
+                             and re.sub(r"\s+", " ", r["agent_context"].get("head") or "").startswith(head)
+                             and set(context.get("markers") or []).issubset(set(r["agent_context"].get("markers") or []))]
+                    if not valid:
+                        raise PrepRefused("%s contains context absent from prepared training evidence; run prep again" % path.name)
+    return rows

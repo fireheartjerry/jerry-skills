@@ -53,27 +53,41 @@ Requirements by skill: `python3` (3.8 or newer) for the scripts; `tmux` plus the
 
 ## mind-reading
 
-People type "keep going", "ship it" or "fix the nav" and mean a full paragraph. This
-skill writes that paragraph the way you would have with unlimited time, shows it with
-every inferred sentence tagged by its evidence, then does it.
+You type **"add the migration"**. Your agent remembers that you care about a rollback
+path, existing rows and offline use, because you have actually said so before.
+`mind-reading` turns that short request into a reviewable brief, shows where each
+inference came from, then acts within the authorization it already has.
 
-It has two halves:
+The useful part is what you did not type again: your constraints, scope, quality bar
+and expected follow-through. It is personal evidence, not a generic longer prompt.
 
-- **A local build pipeline** (`scripts/mind_reading.py`) that extracts only the text
-  you typed from your transcripts, scrubs secrets and personal data, removes duplicated
-  and re-imported sessions, splits by time, mines constraints, corrections, follow-through
-  habits, vocabulary and explicit standing grants, and synthesizes a small profile, an
-  always-on rules file and seed-to-prompt examples. It includes an evaluation command
-  with a one-look rule for held-out data.
-- **A runtime** that loads only the parts of the model a seed needs, reads your
-  corrections first, and never treats an inference as permission. Actions that reach
-  other people, destroy data, spend money or change security settings stay held unless
-  your literal words or an explicit standing grant you wrote cover them.
+**Try it without importing anything:** follow the
+[quickstart](skills/mind-reading/references/quickstart.md) for an offline fictional
+engineer demo. Its three seeds use the real selector and make no model calls.
 
-Everything stays on your machine. Start with
-[`references/build.md`](skills/mind-reading/references/build.md).
+For your own model, the [build guide](skills/mind-reading/references/build.md) walks
+through extraction, review, capped mining and evaluation in a separate candidate
+directory. Local scripts filter transcripts and scrub common secrets. Engine stages
+send the selected, scrubbed text to your configured model provider; the files remain
+on your machine. Scrubbing is best effort, so inspect it before those calls.
 
-It reads the constraints, scope and follow-through you usually leave unsaid, learns what has worked and what has failed for you before, and steers toward the better approach while keeping your explicit choices. A built-in correction tracker and weekly refresh keep the model improving as you work.
+At runtime, corrections take precedence, only relevant evidence is loaded, and each
+inferred sentence is tagged stated, recurring or guessed. A preference never grants
+permission. Lessons from your own later corrections can improve an approach while
+your current instructions remain decisive.
+
+**Intent echoes** add a concrete memory: a short request you actually typed beside
+what you later had to add. The selector retrieves relevant, source-linked precedents
+from training history. They show how this kind of request unfolded for you; old
+project details stay historical rather than becoming facts about today's task.
+`atlas --out <private-file.html>` turns those episodes and the confidence ledger
+into a searchable offline view: what you asked, what you later added, and the exact
+source references behind a model claim.
+
+Judge it by **blind human preference and fewer subsequent corrections**. Automated
+judges help diagnose misses, but their scores are untrusted until calibrated against
+human choices. Weekly refresh builds a candidate; it never activates a model or
+rewrites global agent instructions automatically.
 
 ## high-agency
 

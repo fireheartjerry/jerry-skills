@@ -4,7 +4,7 @@ import shutil
 import unittest
 
 import helpers
-from mr.config import read_json
+from mr.config import read_json, write_json
 from mr.evaluate import run_eval
 
 
@@ -68,6 +68,18 @@ class EvalFlowTests(unittest.TestCase):
         self.assertTrue(s1["dev"] and s2["dev"])
         self.assertTrue((paths.dev / "results" / s1["model_hash"] / "report.md").exists())
         self.assertEqual(s2["stages"]["expand"]["skipped"], read_json(paths.split)["counts"]["dev_seeds"] * 3)
+
+    def test_changed_runtime_json_ignores_stale_manifest_for_cache_and_ledger(self):
+        paths, cfg = helpers.build_home(through="synthesize")
+        first = run_eval(paths, cfg, "fake", fake_dir=helpers.FAKE, arms=["none"], max_sessions=1, log=helpers.quiet)
+        manifest_hash = read_json(paths.model_json)["model_hash"]
+        write_json(paths.model / "episodes.json", {"schema_version": 1, "episodes": []})
+        self.assertEqual(read_json(paths.model_json)["model_hash"], manifest_hash)
+        second = run_eval(paths, cfg, "fake", fake_dir=helpers.FAKE, arms=["none"], max_sessions=1, log=helpers.quiet)
+        self.assertNotEqual(first["model_hash"], second["model_hash"])
+        self.assertEqual(second["stages"]["expand"]["skipped"], 0)
+        self.assertEqual(second["stages"]["expand"]["ok"], 1)
+        self.assertEqual(len(read_json(paths.ledger)), 2)
 
     def test_print_mode_end_to_end_inside_eval_dir(self):
         """Three print/collect cycles land a report; every prompt and output stays under eval/<split_id>/ (mode 0700)."""

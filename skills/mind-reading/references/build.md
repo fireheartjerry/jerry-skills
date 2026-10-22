@@ -1,150 +1,310 @@
-# Building your mind-reading model
+# Build a model you would choose
 
-One CLI takes you from your own transcripts to a scored model: `scripts/mind_reading.py`. Python 3.9+, standard library only, run it with `python3 -I`. Everything it writes lives under `$MIND_READING_HOME` (default `~/.local/share/mind-reading`), never in a repo.
+The pipeline turns your Claude Code and Codex history into a private model of the
+constraints you repeatedly leave unsaid. The product is a better brief, not a
+longer profile. Keep a candidate only if you prefer its reads and need fewer
+corrections afterward.
 
-In the commands below, `MR` stands for `python3 -I <path-to-this-skill>/scripts/mind_reading.py`. Define it as a shell function or alias, not a plain variable: zsh does not split a variable into words, so `$MR init` fails there. Add `--home PATH` after the script path to build into another data home.
+New here? Run the [offline fictional demo](quickstart.md) first. It needs only Python
+3.9 or newer and reads no private transcripts.
 
-## 0. For the agent running this on someone's behalf
+## 1. Choose an isolated candidate and inspect the input
 
-- Nothing here runs unasked. The user asked for a build, rebuild or refresh by name; that covers reading this file and running `init`, `extract`, `prep`, `status`, `select` and `lint`, which spend no tokens.
-- Before every engine stage (`mine`, `synthesize`, `eval`, `refresh --corrections`, `refresh --extend`): run `MR status --estimate`, show the token estimate and the call count, and ask. One stage per yes.
-- Before any write outside the data home (`refresh --always-on --write-to <file>`, a `settings.json` edit): show the exact block or diff and the target path, and ask. `MR refresh --always-on` with no `--write-to` prints the block for review.
-- Never open `$MIND_READING_HOME/eval/` or quote anything from it. Report the eval through `report.md` only.
-- When the user is not present, stop at the first question and leave the resume command in the reply.
+The CLI is `scripts/mind_reading.py` in this skill. It uses the Python standard
+library and runs from any directory with `python3 -I`. In these examples, `MR` is
+this shell function after cloning the repository:
 
-## 1. What you get and what it costs
-
-Three model files (`light.md`, `profile.md`, `examples.md`) plus `grants.md` (your verbatim standing authorizations, built without an engine call) and an index, built by a long-context model from chunks of your typed messages, and a score on sessions the model never saw. `profile.md` includes a `What works and what doesn't` section: lessons about which of your approaches worked and which backfired, by your own later words, so the runtime can take the better way when you ask for one your history shows is worse (model-format.md section 2a).
-
-Token figures are estimates derived from what each prompt carries (characters divided by 4, plus the instructions and the model's output); `MR status --estimate` computes them for your corpus, and `runs/*/calls.jsonl` records what was spent for mine, synthesize and refresh. Eval spend is recorded under `eval/<split_id>/runs/<run_id>/calls.jsonl`, which an agent must not open and `report.md` does not summarize: read it yourself if you need the eval's token total.
-
-| Stage | Calls | Estimated tokens |
-|---|---|---|
-| mine | 1 per chunk per lens: 7 per chunk by default, 1 with `--single-pass`; about 1 chunk per 300 to 500 typed messages (200k characters of your text) | 50k to 100k per call, so 350k to 700k per chunk with the seven lenses; the lessons lens also reads the agent context, capped at half the chunk again |
-| synthesize | 3 (profile, light, examples) | 100k to 250k in total |
-| eval | 7 per held-out session with three arms (1 requirements, 3 expand, 3 score) | 20k to 60k per session; 20 sessions is roughly 0.4M to 1.2M |
-
-One measurement, on synthetic data with the default `claude` engine (Claude Code 2.1.305, Sonnet): a 172k-character chunk mined in 18 s for 92k tokens as the CLI reports them (input, cache writes and output together), about $0.39 at API prices; a three-call eval of one short session took 22k to 24k tokens per call on `codex` (codex-cli 0.162). Each call's usage breakdown lands in `calls.jsonl`.
-
-Mining lenses. Each lens rereads the whole chunk with one question, so the miner spends its output budget on one kind of evidence at a time: `core` (traits, seed expansions, preference changes, session counts), `defaults` (unsaid defaults), `reactions` (praise, frustration, corrections and the preference changes they reveal), `followthrough` (what was expected after the task), `vocabulary`, `grants` and `lessons` (approaches that backfired or worked, and the better way). A single combined prompt returned a thin profile on a real corpus (about 16 traits and 7 unsaid defaults per chunk); the lenses trade about seven times the mining tokens for a fuller one. A `config.json` that saved the earlier six-lens default verbatim runs the seven; any other list you set is used as written. `synthesize consolidate` merges the lens outputs inside each chunk (the same trait from two lenses is one item, its evidence unioned and its count not double-counted) and counts distinct chunks, not files. `MR mine --single-pass` keeps the old one-call prompt for comparison or a tight budget; `MR mine --lens core --lens grants` (repeatable) runs a subset, and `mine.lenses` in `config.json` sets the default list. `status --estimate` multiplies the mine figures by the configured lens count, and `status` reports progress as chunks with every lens mined.
-
-Wall time at concurrency 4: mining under a minute per call (six calls per chunk with the lenses), synthesis 5 to 20 minutes, eval about a minute per session. `--max-calls` and `--max-cost-usd` are hard stops on every engine stage; a stop is printed with the resume command and exits 3.
-
-## 2. Prerequisites
-
-- python3 3.9 or newer.
-- Transcripts on this machine: Claude Code (`~/.claude/projects/*/*.jsonl`) and/or Codex (`~/.codex/sessions/**/*.jsonl`).
-- One of: the Claude Code CLI logged in (`claude`; the engine uses your login, so a subscription is billed as usual and `ANTHROPIC_API_KEY` is optional), the Codex CLI logged in (`codex`), or neither, using print mode from inside an agent session (section 5).
-
-## 3. Privacy before anything
-
-- The corpus is your own typed messages: the agent's replies, tool output, injected harness text, subagent and headless runs are filtered out. It stays under `$MIND_READING_HOME`.
-- Beside each message the corpus keeps a short agent-context slice so the lessons lens can see outcomes: the first 400 characters of the agent's last reply before your message, scrubbed like your text, and markers for a failed command, a tool error, an interruption or a revert in that turn. It is labelled `agent_context`, never treated as your words, and never becomes a trait, rule, grant, vocabulary item or example by itself: only the lessons lens sees it, any trait, reaction or preference-change quote found only in it is dropped, and a lesson needs a substantive quote you typed in the session it cites. Set `"extract": {"agent_context_chars": 0}` in `config.json` before `extract` to keep no agent text at all. An existing corpus gets the field once, in place, on the next `extract`.
-- Scrub is best effort. It redacts common key formats (AWS, Anthropic, OpenAI, Stripe, GitHub, GitLab, Hugging Face, npm, Slack, Google, JWTs, private key blocks), labelled secrets (`password:`, `GITHUB_TOKEN=`, `aws_secret_access_key =`, `Authorization: Bearer ...`), emails, phone numbers, card numbers (Luhn-checked), URL credentials and signed query parameters, and rewrites home paths to `~/`. It does not understand context; read `corpus/scrub-report.json` and spot-check `corpus/messages.jsonl`. A new scrub version is applied to the stored corpus with `MR extract --rescrub`.
-- Add the people you work with to the config so their names become role tokens: `MR init --person "Full Name=<teammate>" --person "Other Name=<stakeholder>"`. Tokens in use: `<teammate>`, `<stakeholder>`, `<repo-owner>`, `<vendor>`, `<friend>`, `<family>`. Do this before `extract`; if you add people later, run `MR extract --rescrub` so the stored corpus picks up the tokens (the first name alone is replaced too).
-- Never commit `$MIND_READING_HOME`. The model files describe you; treat them as private. The always-on block goes into your personal `CLAUDE.md` or `AGENTS.md`, not into a repo.
-- What an engine run sees. `claude`: the prompt and the inline chunk only; no tools, no session persistence, no `CLAUDE.md`, settings or memory files (`--tools "" --setting-sources ""`). `codex`: the prompt and the chunk, with `CODEX_HOME` pointed at an isolated directory inside the run that holds only a link to your `auth.json`, so your global `AGENTS.md` and `config.toml` never enter the prompt (verified: `--ignore-user-config` alone still loads `AGENTS.md`); the read-only sandbox blocks writes and the network, but the model keeps its file tools and could read files if it chose to. Neither engine writes into your transcript history.
-- `eval/` is held out. It is created mode 0700, eval prompts and outputs are written inside it, and the runtime never opens it. Step 4 adds a harness-level guard.
-- The whole data home is private: the CLI runs with `umask 077`, every directory is 0700 and every file it writes is 0600. `init`, `extract` and `prep` tighten a tree created by an older version; `status` warns about anything still looser (fix with `chmod -R go-rwx $MIND_READING_HOME`).
-
-## 4. Steps
-
-```
-MR init --name <YourFirstName> --engine claude        # or --engine codex; adds --timezone, --person as needed
-MR extract                                            # reads both transcript trees, scrubs, appends to the corpus
-MR status                                             # counts per source, unknown tags, scrub counts
-MR prep --cutoff auto                                 # dedup, twins, bulk-stamp detection, time split, leak removal, chunks
+```bash
+MR() { python3 -I "$HOME/jerry-skills/skills/mind-reading/scripts/mind_reading.py" "$@"; }
 ```
 
-Read `derived/prep-report.json`: twin pairs, bulk-stamped sessions and messages (imports whose timestamps are fake), bulk copies removed, within-session duplicates, leak removals, chunk sizes and the characters cut by the chunk caps. `--cutoff auto` holds out the last 20% of reliable sessions (at least 10); to hold out a time window instead, read the session dates in `derived/split.json` and `sessions.jsonl` and pass `--cutoff <ISO>`. Re-running `prep` with another cutoff writes a new `eval/<split_id>/` and leaves the earlier one in place; delete it when it has no `results/`. Then:
+Use a separate data home while building. Do not overwrite your active model.
+`--home` takes precedence over `MIND_READING_HOME`, which takes precedence over the
+default data home at `~/.local/share/mind-reading`.
 
-```
-MR status --estimate                                  # tokens and calls for the stages below
-MR mine                                               # one call per chunk per lens (7 by default), resumable; --run latest to resume; --single-pass for one call per chunk
-MR synthesize                                         # consolidate, profile, lessons, light, examples, grants, index, lint, manifest
-```
-
-Read the model files. Fix anything wrong by hand (a wrong fact, a name that slipped through), then `MR synthesize index manifest` so the index and hash follow your edit.
-
-Read `profile.md`'s `What works and what doesn't` section too. Each lesson names what was done, how it turned out and the better way, with your own dated quotes; `synthesize` logs every lesson it dropped and why (no quote you typed, only the agent's text, an authorizing better way, a single low-cost episode). Delete a lesson you disagree with, or record a `kind: drop` correction so a rebuild does not bring it back. A lesson changes how the runtime does the work, never what it may do without asking.
-
-Read `model/grants.md` with particular care. The file exists only when at least one candidate verified; `synthesize` logs each dropped candidate with its reason, and `status` then shows `grants: 0 total`. To add grants by hand when it is absent, create it with the header and entry format in model-format.md section 3a, then run `MR synthesize index manifest`. It holds the standing authorizations the pipeline found in your own words: a typed message with an explicit grant phrase such as "you don't need to ask before pushing", located in the corpus, checked against the whole sentence it sits in (a negated phrase such as "never push without asking" is a prohibition and is left out), with `Covers` limited to what that sentence names and `Source` naming the corpus record. Nothing is inferred. Each entry is what lets the runtime do an otherwise-held class of action without asking you again, so: delete or set `Status: revoked YYYY-MM-DD` on anything you no longer mean (both are final: the pipeline records a tombstone in `MODEL.json` and never re-adds that record or quote), narrow `Covers` and extend `Never covers` where the quote was broader than you intended, and add entries in the same format for things you have decided but never typed (the quote must still carry a grant phrase and name the action). An entry with `Class: autonomy` comes from a quote that grants general autonomy ("you have max permissions", "ur in bypass perms", "you're pre-authorized"); its Covers is fixed text, it lifts the hold only on reversible, own-repo actions and on guesses that would otherwise be held, and it never reaches messages, destructive actions, spend or configuration changes (SKILL.md section 5); a bare mention of bypass permissions, a description of the setting or a request to turn it on is never a grant. A grant never covers permission, sandbox, security, hook, webhook, forwarding, configuration or credential changes, never spending without a stated cap, and never messages, posts, PRs or issues to people it does not name; `lint --model` enforces the format, and the runtime loads only grants that are active and pass every check. An entry that fails a check is fatal for `lint --model`, so `synthesize` and `refresh --extend` stop at their lint step and `status` is BLOCKED until you fix, revoke or delete it; a one-off approval ("you are free to delete regenerable things", "yes u can push") carries no standing grant phrase and will not pass. `MR synthesize grants` only appends newly verified records to this file; your edits, revocations and deletions survive every rebuild (`--force` discards the file and the tombstones and starts over). A later typed message that revokes a grant ("actually never push without asking me again"), mined as a preference change, sets that grant to revoked. Then:
-
-```
-MR eval                                               # one clean look at the held-out split; writes report.md
-MR status                                             # the ledger line shows the look
+```bash
+MR --home ~/.local/share/mind-reading-candidate init --name YourFirstName --engine claude
+MR --home ~/.local/share/mind-reading-candidate extract
+MR --home ~/.local/share/mind-reading-candidate status
 ```
 
-Install the skill in your agent's skills directory, then put the always-on block where every session loads it (review it first with `MR refresh --always-on`):
+Use `--engine codex` for a logged-in Codex CLI, or `--engine print` to run exported
+prompts through your current agent without a separate CLI login. Extraction reads
+Claude Code projects and Codex sessions from the roots in the candidate's config.
+Override them with `init --claude-dir PATH --codex-dir PATH` if needed. Confirm
+those roots before starting a large import.
 
+Inspect the candidate's `corpus/scrub-report.json` and spot-check scrubbed records
+in `corpus/messages.jsonl` before any model call. Extraction is local. Mining,
+synthesis and evaluation send their selected scrubbed content to the configured
+model provider. Using a CLI subscription still consumes its usage allowance.
+
+The corpus distinguishes typed text from drafts, pasted text, answers and imported
+material. The model must not treat accepted agent wording as words you originated.
+Only verified quotes from your typed messages can establish strong preferences;
+repeated copies of one session do not establish independent evidence. Project
+budgets, deadlines, branch names and owners belong in project memory.
+
+For people named in transcripts, add role replacements before extraction:
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate init --person 'Full Name=<teammate>'
+MR --home ~/.local/share/mind-reading-candidate extract --rescrub
 ```
+
+Available roles are `<teammate>`, `<stakeholder>`, `<repo-owner>`, `<vendor>`, `<friend>`
+and `<family>`. Scrubbing covers common secret formats, email addresses, phone and
+card numbers, credentialed URLs and home paths. It is best effort, not a guarantee.
+Do not commit the corpus, model or review files to a repository.
+
+## 2. Split before mining, then set a budget
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate prep --cutoff auto
+MR --home ~/.local/share/mind-reading-candidate status --estimate
+```
+
+Read `derived/prep-report.json` for duplicate sessions, re-imported copies,
+unreliable timestamps, leak removals and chunk caps. Automatic splitting reserves
+the last twenty percent of reliable sessions for test, subject to a minimum of ten.
+There is also a development split for iteration. If the corpus is too small for a
+clean split, collect more history; do not present a training result as a test.
+
+The estimate comes from your actual chunk sizes and configured lenses. No fixed
+wall-time promise applies across providers or corpora. Seven mining lenses are
+available: core, defaults, reactions, followthrough, vocabulary, grants and lessons.
+They trade repeated input for focused evidence gathering. `mine --single-pass`
+uses one combined call per chunk; `mine --lens core --lens grants` runs a subset.
+
+For example, start with an explicit call cap and at most two concurrent workflows:
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate mine --max-calls 12 --concurrency 2
+MR --home ~/.local/share/mind-reading-candidate synthesize --max-calls 3 --concurrency 2
+MR --home ~/.local/share/mind-reading-candidate recall build
+MR --home ~/.local/share/mind-reading-candidate lint --model --strict
+```
+
+`recall build` uses no engine. It indexes typed training-only episodes that pair a
+short seed with a later clarification, so selection can retrieve specific intent
+echoes as well as general preferences. Historical project details remain evidence
+about that episode, not facts about the current task.
+
+These call caps are hard limits, not a predicted total. A budget stop exits with
+code 3 and prints a resume command. Read the completed output and estimate before
+extending it. `--max-cost-usd` stops new calls after observed cost reaches the
+threshold; it cannot know a pending call's final cost and is not a strict ceiling
+on total dollars. It also depends on backend reporting and configured prices.
+Keep actual usage from each run beside its results. A subscription-only task
+must not inherit an API billing key or alternate provider endpoint.
+
+For an agent acting on someone's behalf: use the budget and authority already
+provided in the session. Surface the estimate before starting engine work; do not
+turn one approved build into repeated permission prompts. A missing spend budget
+or authority is a real boundary. Finish local preparation while it is unresolved.
+
+## 3. Review the evidence before using the model
+
+The model contains `light.md`, `profile.md`, `examples.md`, optional `grants.md`, an
+index and a manifest. The [model contract](model-format.md) documents their format.
+Read the candidate as a person checking whether it describes them accurately:
+
+- Every strong preference needs genuine, independent typed evidence, not repeated
+  imports, an assistant's suggestion or a story inferred from a few short replies.
+- General preferences belong in the model. Project-specific facts stay in project
+  memory. A useful omission is better than a convincing invention.
+- Lessons must connect an approach to your later words about its outcome. They can
+  suggest a better approach, but cannot authorize an action or override your latest
+  instruction.
+- Grants contain verbatim authorizations and their exact scope. Review each one.
+  Preferences and examples never supply permission. Revoke or remove anything you
+  no longer mean; tombstones preserve that decision through rebuilds.
+
+Fix an incorrect line or record a correction. After a manual edit, rebuild the
+index and manifest without an engine call:
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate synthesize index manifest
+MR --home ~/.local/share/mind-reading-candidate lint --model --strict
+```
+
+Try representative seeds with `select --seed-file -` and a quoted heredoc, as in
+the quickstart. Verify the retrieved constraints, unresolved referents and proposed
+scope. A large output is not evidence of a good read.
+
+For an interactive view of the receipts, export a private intent atlas:
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate atlas --out '<private atlas.html>'
+```
+
+It shows the exact short request beside its later addition, filters by request kind
+and signal, and opens the confidence ledger with source references and typed quotes.
+Search is local word matching, not an intent prediction. Nothing is sent anywhere.
+An empty store stays empty; the atlas never invents an insight. Existing unrelated
+files are preserved. `--force` rebuilds a previously generated atlas after the model
+changes. The file contains private evidence and should stay private.
+
+## 4. Measure the reads, with a human as the authority
+
+Use the development split while iterating. Compare the same seeds with no model,
+the light model and the full runtime slice:
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate eval --dev --max-sessions 8 --max-calls 56 --concurrency 2
+```
+
+The report's requirement coverage, contradictions and wrong upgrades are diagnostic.
+An automated judge has not established accuracy by grading its own style. Treat its
+scores as untrusted until calibrated against blind human preferences. The primary
+outcomes are human wins, ties and losses, and subsequent corrections per read, each
+with its denominator. Inspect harmful overreach separately from missed preferences.
+
+Export a blind review from the results directory printed by eval:
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate preferences build --baseline-results '<results directory>' --baseline-arm none --candidate-results '<results directory>' --candidate-arm full --out '<private review directory>'
+```
+
+Open the generated review page locally. Choose the brief you would actually want,
+including a tie or neither when appropriate; export its answers, then import them
+using the generated private key and the downloaded answer file:
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate preferences import --key '<private review directory>/private/preference-key.json' --answers '<downloaded answers.json>'
+```
+
+Keep that key private so reviewers cannot identify the arms. A small review is a
+pilot, not a reliable population estimate. Report the observed counts and uncertainty
+rather than promoting a model on a convenient score.
+
+When the candidate is fixed, evaluate the held-out test once:
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate eval --max-sessions 8 --max-calls 56 --concurrency 2
+```
+
+The ledger enforces one clean look per model version and split. If you change the
+model after seeing the test, that test is spent for the revised model. Continue on
+dev, then mint a later clean split when enough new sessions exist. `--force` records
+a tuned look; it does not restore a clean test. Automated comparisons should include
+absolute latency, usage and cost beside quality, not quality alone.
+
+The default evaluation gives each arm a context-free first message. `eval --mode
+context` gives every arm the same earlier user messages for a short mid-session
+seed. Neither mode supplies project memory or full agent state. Read the report's
+limitations before extrapolating to live use.
+
+## 5. Activate deliberately, then track corrections
+
+A candidate does not activate itself. After reviewing it, explicitly choose the
+model home in the agent environment. For example, to use the reviewed candidate:
+
+```bash
+export MIND_READING_HOME="$HOME/.local/share/mind-reading-candidate"
+MR status
+MR refresh --always-on
+```
+
+That last command previews the always-on block. Review its exact wording and target
+before writing global instructions. An agent may write an already authorized target;
+otherwise it should show the concrete block and obtain the missing authorization.
+The write command backs up an existing target first:
+
+```bash
 MR refresh --always-on --write-to ~/.claude/CLAUDE.md
 MR refresh --always-on --write-to ~/.codex/AGENTS.md
 ```
 
-Each target is backed up to `<file>.bak-<date>` first. Finally, guard the held-out set from every Claude Code session by adding to `~/.claude/settings.json`:
+The same model home must be visible to the agent that runs the skill. Do not put a
+personal block or model in a shared repository. The current request, project rules
+and harness constraints still take precedence.
 
-```json
-{"permissions": {"deny": ["Read(~/.local/share/mind-reading/eval/**)"]}}
+The runtime's `correct` and `log-decision` commands keep explicit corrections and
+counts locally. A correction applies on the next read; it need not wait for a
+rebuild. Track correction rate with a read count, along with scope errors and the
+human preference sample. `tracking report` reports recorded outcomes; absence of a
+record is unknown, not success. The pipeline's estimate of missing intent is not a
+substitute for the user's verdict.
+
+## 6. Refresh candidates weekly
+
+A weekly refresh should produce a new candidate from new history and corrections,
+run checks and prepare evidence for review. It must leave the active model and
+global instructions unchanged:
+
+```bash
+MR refresh --candidate-home ~/.local/share/mind-reading-weekly --extend --max-calls 12 --concurrency 2
 ```
 
-Use that `~/` form, or `//` plus the absolute path (`Read(//<absolute data home>/eval/**)`). A single leading slash is relative to the settings file and guards nothing; `MR status` reports such a rule as broken. If `$MIND_READING_HOME` is elsewhere, name that path. Permission rules for `Bash` match commands, not paths, so shell reads are covered by the directory mode (`chmod 700 <HOME_MR>/eval`, set by `prep`) and by the skill's rule never to open `eval/`. `MR status` reports both guards.
+Inspect the candidate's changes, deterministic checks, usage and human evidence
+before choosing it. `--extend` keeps the existing split frozen unless a new cutoff
+is explicitly requested. New post-cutoff training data changes what the original
+cutoff measures; mint a fresh split when enough new history exists.
 
-Useful flags: `--engine codex` on any stage, `--model <name>` to override the configured model for one stage, `--concurrency N` (default 4), `--json` for machine-readable summaries, `--home PATH` to use another data home. Less common: `init --model-for <stage>=<model>` (repeatable; stages mine, synthesize, expand, judge), `init --claude-dir` and `init --codex-dir` to save other transcript roots in the config; `eval --arm full-all` (the full arm with the plan-mode slice), `eval --max-sessions N`, `eval --judge-engine` and `eval --judge-model` to score with a different engine or model than the one that expands. After any hand edit to `profile.md`, `examples.md`, `light.md` or `grants.md`, run `MR synthesize index manifest`: until then `select` detects the stale index, rebuilds it in memory on every call and says so in the slice header, and `status` warns.
+To generate a scheduler plan and runnable command:
 
-## 5. Print mode from inside an agent
-
-If you are running inside Claude Code or Codex and do not want a second CLI login, add `--engine print` to `mine`, `synthesize`, `eval` or `refresh --corrections`. The stage writes every prompt to `<runs>/<run_id>/prompts/<stage>-<unit>.md` with its schema beside it and prints an instruction block: run each prompt in its own subagent with Read and Write as its only tools; the subagent reads its prompt file and writes one JSON object to `<runs>/<run_id>/out/<stage>-<unit>.json`. `<runs>` is `runs/` for mine, synthesize and refresh, and `eval/<split_id>/runs/` (or `derived/dev/runs/` with `--dev`) for eval, because eval prompts quote held-out truth. Then run the printed command, for example:
-
-```
-MR mine --run <run_id> --engine print --collect
-MR eval --run <run_id> --engine print --collect
+```bash
+MR schedule plan --out '<private schedule directory>' --weekday 0 --hour 9 --timezone UTC
 ```
 
-`--collect` validates whatever landed, writes the stage outputs, and lists units still missing. Eval has three stages (requirements, expand, score); repeat the print and collect cycle with the same `--run` until it reports a result.
+Use your timezone and inspect the generated command. This creates a plan; it does
+not install a scheduler or promise notifications. The scheduler must actually run
+the candidate command, stop on failure and make the result available for review.
+No weekly job should auto-promote a candidate.
 
-## 6. Reading the eval
+The generated weekly runner advances only the candidate's training boundary with
+`--train-before <run date>`. That date means midnight UTC: the deployment candidate
+can learn from completed preceding days, while the active model and its frozen
+evaluation split remain unchanged. This candidate has no held-out test split; use
+a separate clean evaluation build for claims about test performance. Ordinary
+`refresh --extend` retains its existing split unless an explicit boundary is given.
 
-The report (`eval/<split_id>/results/<model_hash>/report.md`) scores three arms on the same held-out sessions:
+Planning resolves the configured CLI executable and freezes its lookup path in the
+runner and launchd file, so a scheduler's minimal environment can still find it.
+An unavailable CLI stops planning before files are written. Review a new plan if
+the CLI installation moves; existing plans are preserved rather than overwritten.
 
-- `none`: a control with the same instructions and word budget and no model text.
-- `light`: the control plus `light.md`.
-- `full`: the control plus the exact slice the runtime would load for that seed.
+## 7. Privacy, isolation and recovery
 
-For each session a judge first lists the requirements the user expressed later (without seeing any expansion), then scores each expansion blind against that list: `full`, `partial` or `none` per requirement, plus contradictions, plus upgrades (rubric v4): an `upgrade` is a different approach than the seed literally asked for that the user's later messages show they moved to, and a `wrong upgrade` is one that overrode something the user wanted. The report's Upgrades table gives both per arm and their net; a lesson that helps shows up as upgrades in the `full` arm without wrong upgrades. Hit rate is `(full + 0.5 partial) / requirements` pooled over sessions; full-only is the same with partial weighted 0. Contradictions count expansion claims the user's later messages contradict: lower is better, and this is where over-generated restraint shows up. The 95% interval comes from resampling sessions; when it includes zero for an arm difference, the sessions do not yet separate the arms.
+Every data-home directory is created private (0700), and CLI-written files use
+0600. `status` flags loose permissions. Filesystem modes do not isolate the data
+from another process running as you; the runtime's rule never to open `eval/` and
+harness guards are separate protections.
 
-The one-look rule: each model version gets one clean look at the test split. The ledger records `(model_hash, split_id)`, and `eval` refuses a second look. If you revise the model because of what you saw in the report, that test set is spent for the revised model: iterate with `MR eval --dev` (the dev split, repeatable, no ledger), and mint a fresh test set with `MR prep --cutoff <later date>` once enough new sessions exist. `--force` records a look anyway, marked TUNED in the ledger and the report.
+Only the lessons lens sees a bounded `agent_context` slice beside typed messages:
+a short prior reply and outcome markers. It is untrusted context, not the user's
+voice. Set `extract.agent_context_chars` to zero before extraction to disable it.
+The model requires verified typed evidence regardless of what the assistant said.
 
-Limitation stated in every report: no arm sees project memory or the conversation, so the eval measures the model on context-free seeds. The runtime has both.
+The Claude engine disables tools, session persistence and settings sources. Codex
+uses an isolated `CODEX_HOME` for engine calls so global personalization does not
+contaminate the no-model control. Review backend configuration if you change it.
+`--engine print` exports a prompt and schema per unit with a requested output path;
+run those units with only the needed read/write access, then use the printed
+`--collect --run <run id>` command. Eval prompts contain held-out truth and stay
+under the eval tree; use its generated review/report interfaces rather than reading
+that truth into the runtime session.
 
-## 7. Keeping it current
+For Claude Code, a path-specific Read deny rule can guard the eval directory. Use
+`Read(~/.local/share/mind-reading/eval/**)` for the default home, or the corresponding
+path for your chosen home. A single leading slash has different settings semantics;
+`status` diagnoses the guard. Do not edit permission settings as a side effect of a
+model build.
 
-- Monthly: `MR refresh --extend` runs extract (from the transcript directories saved in `config.json`; it prints them), re-preps with the held-out set frozen, mines only chunks whose content changed, and updates the profile with the previous one as prior. Frozen means exactly that: the test and dev session ids, the cutoff and the `split_id` do not change. Sessions that started after the cutoff since the split was minted join train and are listed under `post_cutoff_in_train` in `prep-report.json`; the eval then measures the model relative to the original cutoff, not forward in time from the newest data. When enough new sessions exist (`min_test_sessions`, default 10), mint a new held-out set with `MR refresh --extend --new-cutoff <date>`; the old test sessions become training data and the next `eval` is a clean look for the rebuilt model.
-- `refresh --extend` re-mines changed chunks with every lens, so new lessons, and newer evidence about old ones, reach the `What works and what doesn't` section on the next synthesize; the newest evidence owns each lesson's wording.
-- Corrections accumulate in `model/corrections.md` as you use the skill (the runtime appends them with `MR correct`). `MR refresh --corrections` folds them in with minimal edits; `kind: drop` lines remove a model sentence, `scope: project:<name>` lines are set aside in `MODEL.json` for that project's memory.
-- `MR status` reports drift between `light.md` and every always-on target you wrote with `--write-to`; `MR refresh --always-on --write-to <file>` re-syncs. It also warns when the block sits in a Codex `AGENTS.md` and codex home isolation is off, because the `none` control arm and mining would then see it. `status` exits 2 whenever it prints a `BLOCKED:` list, so a script or CI step can gate on it.
-- `grants.md` is yours. `refresh --corrections` and `refresh --always-on` never touch it; `refresh --extend` runs `synthesize grants`, which appends newly verified records, applies typed revocations it mined, and leaves your edits alone. Revoke by hand with `Status: revoked YYYY-MM-DD` or delete the entry: either way it stays gone (tombstones in `MODEL.json`).
-- Decisions and corrections written from a sandbox that cannot reach the data home (Codex workspace-write) wait in a spool and are applied by the next `select` or `status` that can write; `status` shows the pending count. Point `MIND_READING_SPOOL` at a writable directory if the default temp directory is blocked too.
+Common recovery paths:
 
-## 8. Troubleshooting
+| Symptom | Action |
+|---|---|
+| Budget stop or failed unit | Read the actual error, then use the printed resume command; completed units are retained |
+| CLI login missing | Log in to the chosen CLI; print mode is available without a second CLI login |
+| Unknown transcript tags | Inspect their origin before changing filters; add a fixture for a new format |
+| Invalid model or grant | Run `lint --model --strict`; fix or revoke the named record, then rebuild index and manifest |
+| Stale index | Run `synthesize index manifest`; select can rebuild it in memory meanwhile |
+| Correction or decision spooled | Use a writable data home or spool; the next writable run drains pending records |
+| No lessons | Zero verified lessons is valid; inspect dropped evidence before mining more |
+| Demo target refused | Choose an empty separate directory; never force a demo into a private model |
 
-- `status` lists unknown tags: a harness started injecting a new kind of text. If it is not something you typed, add its prefix to `SKIP_PREFIXES` in `scripts/mr/filters.py` (with a fixture) and re-run `extract`; records are append-only, so run `prep` again to rebuild chunks.
-- A chunk fails validation twice: open `runs/<run_id>/calls.jsonl` for the validator message, then `MR mine --run <run_id>` to retry only the failed units.
-- A stage exits 3 with `budget stop`: `--max-calls` or `--max-cost-usd` was reached; the message carries the resume command.
-- `claude` fails with "not a valid JSON Schema": the engine strips `$schema`, `$id` and `title` before passing a schema; if you edited a schema file, keep the body standard JSON Schema. "Not logged in": run `claude` once interactively, or export `ANTHROPIC_API_KEY`; do not add `--bare` to `engine_cmd`, it disables the OAuth login.
-- The engine's flags changed: edit `engine_cmd` in `config.json`. Placeholders: `{model}`, `{schema}` (path), `{schema_json}` (inline), `{out}`, `{tmpdir}`. `codex_isolate_home: false` disables the isolated `CODEX_HOME` (not recommended while the always-on block is in `~/.codex/AGENTS.md`).
-- A session was wrongly dropped as a twin: check the pair in `prep-report.json`, confirm with `MR prep --no-twins`, then raise `prep.twin_containment` in `config.json`.
-- Bulk-stamped sessions and messages: an import re-stamped old messages with one timestamp (three or more messages inside one second). Such messages carry `time_reliable: false`, their times reach the miner as null, a session that starts with one is never test or dev, and copies of text already present in a real session are dropped.
-- `eval` refuses with exit 2: the one-look rule (section 6). Use `--dev` or a new cutoff.
-- `log-decision` or `correct` says "spooled": the data home is not writable from this sandbox (Codex workspace-write); the line waits in the spool and the next writable run applies it. Exit 5 means the spool was unwritable too: run Codex with `--add-dir ~/.local/share/mind-reading`, or set `MIND_READING_SPOOL` to a writable directory.
-- `status` says `lessons: 0`: the model was built before the lessons lens, or no lesson survived verification. Run `MR mine --lens lessons --run latest` and then `MR synthesize consolidate lessons examples index lint manifest` (ask before each engine stage); the consolidate log lists every dropped lesson and why.
-- `synthesize examples` fails with "pair(s) tagged `upgrade`": the profile has a lesson with a bad outcome, so the examples need 2 to 4 upgrade pairs, each with its `Changed:` line (model-format.md section 3). Re-run the stage.
-- `status` says the model is legacy: the model files predate the index format. `select` still works (it loads every example and the groups whose titles match); rebuild with `MR synthesize` when you next refresh to get the indexed slice and `grants.md`.
-- `status` lists an invalid `grants.md` entry: run `MR lint --model` for the line and reason. `select` drops invalid, revoked and malformed blocks before the slice is built, so an invalid grant never reaches the runtime; `status` counts it as invalid, not active.
-- `refresh --always-on` exits 4 naming a line of `light.md`: a hand edit added a forbidden rule (bypass, auto-approve, never ask, push without asking). Remove the line; nothing was rendered or written.
-- `correct` exits 4 with "correct refused": the correction read as a permission or a forbidden rule. Record the preference in the fixed wording instead; only `grants.md`, edited by hand, lifts a held category.
-- `status` warns that `index.json` is stale: a model file changed after `synthesize index`. `select` still works (it rebuilds the index in memory each call); run `MR synthesize index manifest` to settle it.
-
-## 9. Uninstall
-
-Delete the block between `<!-- BEGIN mind-reading` and `<!-- END mind-reading -->` in each file you wrote it to, remove the `Read(...)` deny rule, remove the skill directory, and delete `$MIND_READING_HOME`.
+To uninstall, remove the generated block from each target, remove the skill through
+the installer, and remove private data only after deciding what to retain. Do not
+silently delete a user's transcript corpus, model or review history.

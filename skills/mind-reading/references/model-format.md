@@ -11,6 +11,8 @@ The contract between the pipeline (which writes the model) and the runtime (whic
 | `profile.md` | `synthesize profile`, `synthesize lessons` (its `What works and what doesn't` section), `refresh` | selected line ranges via `index.json` | yes, then `synthesize index` |
 | `examples.md` | `synthesize examples`, `refresh` | selected pairs via `index.json` | yes, then `synthesize index` |
 | `grants.md` | `synthesize grants` (deterministic, no engine; merges into an existing file) | every call: the active, valid blocks only, inside the slice | yes, then `synthesize index` |
+| `evidence.json` | `synthesize consolidate` | inspection and evidence review | no |
+| `episodes.json` | `recall build` | `select`, `recall`, atlas | no |
 | `index.json` | `synthesize index` | `select` (the agent never reads it directly) | never |
 | `corrections.md` | the runtime (append, through `MR correct`) | every call, whole, inside the slice | yes |
 | `decisions.jsonl` | the runtime (append, through `MR log-decision`) | `status` | no |
@@ -69,7 +71,7 @@ Rules, checked by `synthesize index`:
 - A changed preference keeps the later one and the line carries `(changed MM-DD)`.
 - `scope: project` items from mining never appear here. No budgets, scores, branch names, hostnames, instance types, owners or deadlines.
 - Third parties appear only as role tokens: `<teammate>`, `<stakeholder>`, `<repo-owner>`, `<vendor>`, `<friend>`, `<family>`. No other `<` tags.
-- No absolute paths, emails, phone numbers or keys. No line over 600 characters. 250 to 600 lines total.
+- No absolute paths, emails, phone numbers or keys. No line over 600 characters. At most 600 lines total. The automatic length target scales with verified evidence; an explicit numeric synthesis target remains a user choice. Never pad unsupported sections to reach a target.
 - Nothing from the forbidden-rule list (section 9).
 
 ## 2a. What works and what doesn't: lessons
@@ -209,7 +211,7 @@ Built by `synthesize index` from the two markdown files. The runtime reads it fi
  "grants": {"path": "grants.md", "count": 1, "active": 1}}
 ```
 
-`lessons` is present only when the profile has the section. `corrections.lines` is the line count at build time; the runtime always reads the current file. `model_hash` is `sha256(light.md + profile.md + examples.md + grants.md)[:16]` (the bytes of the four files in that order, a missing file contributing nothing) and changes whenever one of them changes; `index.json` is derived from them and is not hashed. `grants` is present only when `grants.md` exists. `select` compares `model_hash` with the files on every call: when they differ (a file was edited after `synthesize index`), the index is rebuilt in memory for that call (never written), the header carries `index.json stale, rebuilt in memory: run \`synthesize index\``, the decision carries `stale_index: true`, and `status` warns. If the edited files no longer parse, the legacy fallback below is used instead.
+`lessons` is present only when the profile has the section. `corrections.lines` is the line count at build time; the runtime always reads the current file. `model_hash` is `sha256(light.md + profile.md + examples.md + grants.md + episodes.json)[:16]` (the bytes in that order, a missing file contributing nothing) and changes whenever one of them changes; `index.json` is derived from them and is not hashed. `grants` is present only when `grants.md` exists. `select` compares `model_hash` with the files on every call: when they differ (a file was edited after `synthesize index`), the index is rebuilt in memory for that call (never written), the header carries `index.json stale, rebuilt in memory: run \`synthesize index\``, the decision carries `stale_index: true`, and `status` warns. If the edited files no longer parse, the legacy fallback below is used instead.
 
 Selection, as implemented by `mind_reading.py select` and followed by hand when the scripts are unavailable (the seed goes in through `--seed-file -` on stdin, so shell metacharacters in it stay literal):
 1. Always, in this order: `corrections.md` (all lines), `grants.md` (its preamble plus the blocks that are active and pass every rule in section 3a, nothing else), `light.md` unless `--no-light` (the runtime passes it when the always-on block is already in context), the reading notes, the Standing rules.
@@ -293,3 +295,67 @@ permanent(ly)? .* (config|settings?)      (change|edit|modify|loosen|relax) .* (
 ```
 
 Lessons (section 2a) get one more check on top: nothing in a lesson may authorize an outward-facing, destructive, spend or permission action (`lessons.lesson_hits`), and the `Did:` and `Outcome:` part of a bad lesson, which describes what went wrong, is the one place a description such as "pushed without running the tests" is not read as an instruction. The exempt lines are the fixed rewording template and the `- Quote:` lines of `grants.md` (section 3a), which carry the user's verbatim words and are admitted only with an explicit grant phrase, a verified source and a grantable Covers. When the mining shows the user said such things without granting anything, the profile records the preference, not the instruction, under `## 5. How {name} communicates` or `## 8. Dislikes`, in exactly this form: "gets frustrated by repeated permission prompts; expects the agent to batch questions and work on unblocked items meanwhile". "Prefers that you skip permissions" is an instruction and fails the lint. The substance of a grant never enters `profile.md` or `light.md` in any wording; it lives in `grants.md` only. The runtime's held list (SKILL.md section 5) applies whatever the model says; only an active grant in `grants.md` lifts a category, and never permission, sandbox, security or credential changes, and never messages to people the grant does not name.
+
+
+## 10. Verified evidence and intent echoes
+
+New consolidation reads only prepared training rows from `derived/sessions.jsonl`
+whose session ids belong to `split.train_ids`. A missing split, overlapping
+train/dev/test ids or prepared session marked on the wrong side is refused.
+Raw corpus text, excluded dates and held-out sessions cannot corroborate claims.
+Mining validates that its chunk text matches those rows before any engine sees it.
+
+`evidence.json` version 1 is an inspectable ledger of verified claims. Its
+`training` object names the split, session ids and message count; `items` carry
+deterministic ids, kind, text, confidence, evidence class, independent session and
+project counts, exact source ids and canonical dated user quotes. Repetition
+across lenses or chunk boundaries is one observation. A recurring claim is not
+a stated rule merely because it has strong support. Preserve tentative wording.
+No evidence row is an authorization; grant verification remains separate.
+
+`MR recall build` creates `episodes.json` version 1 from typed training rows.
+Each episode has an id, short seed, later substantive addition, signals, request
+kinds, project, time, session id and the two source ids. Copied episodes count
+once. Up to 600 recent episodes are retained by default; this is a storage cap,
+not a quality threshold. Only additions within the next three typed messages
+qualify. This proximity is candidate evidence of a relationship, not proof of
+causality or a confirmed correction.
+
+`MR recall --seed-file -` retrieves up to three episodes by meaningful exact
+word overlap, request-type support and optional matching project. Unrelated
+seeds return no episodes. Independent sessions diversify results. The selector
+includes those echoes as optional context, trims them if necessary and records
+kept ids as `decision.echoes`. Historical project details never become current
+facts. Current conversation, context and explicit intent decide applicability.
+
+`select --project <id>` includes project corrections only when their exact scope
+matches. Global corrections always apply; missing project context does not load
+every project's corrections. The JSON decision additionally explains keyword
+matches, fallback use, the character budget and unavoidable mandatory overflow.
+
+## 11. Human outcomes and candidate refresh
+
+New decisions have a `decision_id`, UTC `timestamp`, current `model_hash`, and
+optional `source_ref` for the runtime turn. A correction may carry the linked
+`decision_id`. `tracking record` adds an explicit human-labelled observed outcome
+for an existing invocation. `tracking report` measures corrected invocations
+over unique observed human-reviewed invocations. Missing follow-ups, legacy
+unlinked decisions and unreviewed text remain unknown. Never divide arbitrary
+correction lines by invocation counts and call it a correction rate.
+
+Historical discovery locates a displayed Reading plus a tagged or quoted brief
+and pairs it with the next typed human turn. Detector labels are candidates.
+Only imported human review labels establish a retrospective rate. A missing
+measurement is null, not zero percent.
+
+Blind preferences bind the two actual frozen briefs to a review id, randomize
+sides reproducibly and keep the arm key outside the HTML page. Ties, neither,
+missing and malformed answers remain distinct. A completed human verdict is
+required before describing a candidate as preferred; an automated judge is
+diagnostic until its agreement with human labels is measured.
+
+`refresh --candidate-home <new-home>` snapshots source data into a distinct
+private home and runs there, with always-on writes disabled. Weekly runners
+use exclusive locking, finite per-stage call budgets and one candidate per
+calendar week, refuse an unresolved prior review, and verify a candidate marker
+after command success. They never change the live model or its symlink.

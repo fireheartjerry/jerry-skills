@@ -22,15 +22,15 @@ class SkillLintTests(unittest.TestCase):
     def make_skill(self, skill_md=GOOD_SKILL, copy_shipped=True):
         root = helpers.tmpdir() / "skill"
         if copy_shipped:
-            shutil.copytree(helpers.SKILL, root, ignore=shutil.ignore_patterns("__pycache__", "SKILL.md", "model-format.md", "examples-template.md"))
+            shutil.copytree(helpers.SKILL, root, ignore=shutil.ignore_patterns("__pycache__", "SKILL.md", "examples-template.md"))
         else:
             root.mkdir(parents=True)
         (root / "SKILL.md").write_text(skill_md, encoding="utf-8")
         return root
 
     def test_shipped_files_pass_with_known_good_frontmatter(self):
-        # SKILL.md, model-format.md and examples-template.md are owned by another package and replaced here by a
-        # known-good stub; the shipped scripts, prompts, schemas, build.md and tests are linted as committed.
+        # The entrypoint is replaced by a stub; linked shipped references must
+        # remain present so their actual link graph is checked.
         root = self.make_skill(LINKED_SKILL)
         hits = _lint.lint_skill(root, deny_file=None)
         self.assertEqual(hits, [])

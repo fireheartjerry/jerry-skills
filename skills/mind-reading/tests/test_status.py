@@ -154,6 +154,22 @@ class StatusTests(unittest.TestCase):
         finally:
             self.paths.corrections.unlink()
 
+    def test_no_test_split_has_no_security_guard_requirement(self):
+        split = read_json(self.paths.split)
+        original = dict(split)
+        split["no_test"] = True
+        write_json(self.paths.split, split)
+        settings = self.paths.home / "unguarded.json"
+        write_json(settings, {"permissions": {"deny": []}})
+        try:
+            st = gather(self.paths, dict(self.cfg, claude_settings_path=str(settings)))
+            self.assertIsNone(st["eval_guard"])
+            self.assertFalse(st["eval_guard_applicable"])
+            self.assertFalse(any("permissions.deny guard" in b for b in st["blocked"]))
+            self.assertIn("not applicable: this split holds no test data", format_text(st))
+        finally:
+            write_json(self.paths.split, original)
+
     def test_estimate_derives_from_chunk_characters(self):
         st = gather(self.paths, self.cfg)
         est = estimate(self.paths, self.cfg, st)

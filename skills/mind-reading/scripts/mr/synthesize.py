@@ -2,6 +2,7 @@
 substep resumable. `lessons` writes the profile's `## What works and what doesn't` section deterministically from the
 consolidated lessons (lessons.py); no engine call."""
 import json
+import hashlib
 import re
 import shutil
 from pathlib import Path
@@ -14,10 +15,11 @@ from . import select as _select
 from .config import read_json, write_json
 from .corpus import corpus_hash, load_corpus, now_iso
 from .mine import LENSES, latest_mined_run, mined_chunks, mined_files, privacy_line
-from .prep import NONTYPED_ORIGINS
+from .prep import NONTYPED_ORIGINS, PrepRefused, parse_time, training_rows
 
 SUBSTEPS = ["consolidate", "profile", "lessons", "light", "examples", "grants", "index", "lint", "manifest"]
 UPGRADE_TAG = "upgrade"
+VERIFICATION_VERSION = 2
 UPGRADES_MIN, UPGRADES_MAX = 2, 4
 LAYERS = ["thinking", "quality_bar", "building", "design_taste", "communication", "standing_rules", "likes",
           "dislikes", "workflow", "context"]
@@ -29,6 +31,7 @@ MERGE_JACCARD = 0.6
 _WORD = re.compile(r"[a-z0-9][a-z0-9'+-]*")
 _STOP = {"a", "an", "the", "and", "or", "of", "to", "for", "in", "on", "at", "by", "as", "so", "is", "are", "be", "that",
          "this", "it", "its", "with", "when", "then", "than", "not", "no", "do", "does", "every", "any", "all", "one"}
+_NEGATED = re.compile(r"(?i)\b(?:not|no|never|without|avoid|skip|don't|dont|cannot|can't)\b")
 PROFILE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["profile_md"],
                   "properties": {"profile_md": {"type": "string", "minLength": 200}}}
 LIGHT_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["light_md"],
@@ -72,11 +75,11 @@ EVIDENCE_CAP = 2
 
 
 def _trait_quote_key(e):
-    return _norm_text(e.get("quote"))
+    return (e.get("source_id") or e.get("session") or "", _norm_text(e.get("quote")))
 
 
 def _default_quote_key(e):
-    return (_norm_text(e.get("first")), _norm_text(e.get("later")))
+    return (e.get("source_id") or e.get("session") or "", _norm_text(e.get("first")), _norm_text(e.get("later")))
 
 
 def _cap_evidence(evidence, cap=EVIDENCE_CAP):
@@ -126,9 +129,13 @@ def merge_items(items, kind):
             if kind == "trait":
                 if o.get("layer") != it.get("layer"):
                     continue
+                if bool(_NEGATED.search(o.get("claim") or "")) != bool(_NEGATED.search(it.get("claim") or "")):
+                    continue
                 score = jaccard(o.get("claim"), it.get("claim"))
             else:
                 if o.get("kind") and it.get("kind") and o["kind"] != it["kind"]:
+                    continue
+                if bool(_NEGATED.search(o.get("default") or "")) != bool(_NEGATED.search(it.get("default") or "")):
                     continue
                 score = jaccard("%s %s" % (o.get("when"), o.get("default")), "%s %s" % (it.get("when"), it.get("default")))
             if score >= MERGE_JACCARD:
@@ -141,6 +148,7 @@ def merge_items(items, kind):
             if not target.get("kind") and it.get("kind"):
                 target["kind"] = it["kind"]
     for o in out:
+        o["support_evidence"] = list(o["evidence"])
         o["evidence"] = _cap_evidence(o["evidence"])
     return out
 
@@ -149,7 +157,7 @@ def _typed_index(paths, rows=None):
     """(normalized typed text joined by newlines, True when the corpus had typed records). Seeds and vocabulary must
     come from what the user typed, never from drafted, pasted, answered or goal-reminder text, and never from the
     agent context stored beside a message (it is not in `text`)."""
-    rows = load_corpus(paths) if rows is None else rows
+    rows = training_rows(paths) if rows is None else rows
     typed = [_norm_text(r.get("text")) for r in rows if (r.get("origin") or "typed") == "typed" and r.get("text")]
     return "\n".join(typed), bool(typed)
 
@@ -168,6 +176,173 @@ def _phrase_typed(phrase, blob):
                 return True
             i = blob.find(v, i + 1)
     return False
+
+
+_STATED = re.compile(r"(?i)(?:^|[.!?\n;:]\s*)(?:please\s+)?(?:always|never|from now on|remember|do not|don't)\b|"
+                     r"\b(?:non[- ]negotiable|standing rule)\b")
+_HEDGE = re.compile(r"(?i)\b(?:maybe|probably|usually|sometimes|i think|i prefer|i'd rather|perhaps)\b")
+_CORRECTION = re.compile(r"(?i)(?:\b(?:i meant|not that|i said)\b|^(?:critical\s+)?correction\b|"
+                         r"^no[,!:]\s*(?!(?:problem|worries|thanks|doubt|issue)\b))")
+_WORKFLOW = re.compile(r"(?i)\b(?:git|commit|push|merge|deploy|send|message|email|workflow|approval|ask)\b")
+
+
+def verify_evidence(evidence, rows, quote_key="quote", typed_only=False):
+    """Resolve a quote in its cited training session, replacing miner metadata.
+
+    A matching phrase in another session, pasted text, agent context or a future
+    corpus record cannot rescue it. Optional source/key constraints disambiguate
+    citations; abbreviated legacy rollout ids are accepted only when unambiguous.
+    """
+    quote = evidence.get(quote_key) or ""
+    cited = evidence.get("session")
+    if not quote.strip() or not cited:
+        return None
+    candidates = [r for r in rows if (not evidence.get("source") or r.get("source") == evidence["source"])
+               and (not evidence.get("key") or r.get("key") == evidence["key"])
+               and (not evidence.get("source_id") or r.get("source_id") == evidence["source_id"])]
+    exact = [r for r in candidates if r.get("session") == cited]
+    candidates = exact or [r for r in candidates if _lessons.same_session(r.get("session"), cited)]
+    if len({(r.get("source"), r.get("session")) for r in candidates}) != 1:
+        return None
+    matches = [r for r in candidates if (not typed_only or r.get("origin", "typed") == "typed")
+               and quote in (r.get("text") or "")]
+    if not matches:
+        return None
+    matches.sort(key=lambda r: (0 if r.get("time") == evidence.get("time") else 1,
+                                r.get("time") or "", r.get("ordinal", 0), r["key"]))
+    row = matches[0]
+    return {"quote": quote, "time": row.get("time"), "session": row["session"],
+            "origin": row.get("origin", "typed"), "source": row.get("source"), "key": row["key"],
+            "source_id": row.get("source_id"), "project": row.get("project"), "ordinal": row.get("ordinal", 0)}
+
+
+def verify_default(evidence, rows):
+    first = verify_evidence(_pair_ref(evidence, "first"), rows, "first")
+    later = verify_evidence(_pair_ref(evidence, "later", legacy_later=True), rows, "later", typed_only=True)
+    if (first is None or later is None or (first["source"], first["session"]) != (later["source"], later["session"])
+            or first["ordinal"] >= later["ordinal"]):
+        return None
+    return dict(later, first=first["quote"], later=later["quote"], first_source_id=first["source_id"],
+                first_time=first["time"], first_origin=first["origin"])
+
+
+def _pair_ref(evidence, prefix, legacy_later=False):
+    """A shared session/source names the pair; legacy key/source_id name its later turn."""
+    ref = {k: v for k, v in evidence.items() if k not in ("key", "source_id", "time")}
+    if legacy_later:
+        ref.update({k: evidence[k] for k in ("key", "source_id", "time") if k in evidence})
+    for key in ("source", "session", "key", "source_id", "time"):
+        if prefix + "_" + key in evidence:
+            ref[key] = evidence[prefix + "_" + key]
+    return ref
+
+
+def verify_change(change, rows):
+    earlier = verify_evidence(_pair_ref(change, "earlier"), rows, "earlier", typed_only=True)
+    later = verify_evidence(_pair_ref(change, "later", legacy_later=True), rows, "later", typed_only=True)
+    if earlier is None or later is None:
+        return None
+    same = (earlier["source"], earlier["session"]) == (later["source"], later["session"])
+    if same:
+        if earlier["ordinal"] >= later["ordinal"]:
+            return None
+    else:
+        # Independent sessions need explicit citations and reliable chronological
+        # dates; their unrelated per-session ordinals establish no ordering.
+        first_time, last_time = parse_time(earlier["time"]), parse_time(later["time"])
+        if not change.get("earlier_session") or not change.get("later_session") or not first_time or not last_time or first_time >= last_time:
+            return None
+    return dict(change, earlier_time=earlier["time"], later_time=later["time"], session=later["session"],
+                earlier_session=earlier["session"], later_session=later["session"],
+                earlier_source_id=earlier["source_id"], later_source_id=later["source_id"],
+                source_ids=[earlier["source_id"], later["source_id"]])
+
+
+def seed_sources(seed, rows):
+    """A historical seed is a complete user turn, with every supplied citation honored."""
+    text = _norm_text(seed.get("seed"))
+    if not text:
+        return []
+    candidates = [r for r in rows if r.get("origin", "typed") == "typed"
+                  and (not seed.get("source") or r.get("source") == seed["source"])
+                  and (not seed.get("key") or r.get("key") == seed["key"])
+                  and (not seed.get("source_id") or r.get("source_id") == seed["source_id"])]
+    if seed.get("session"):
+        exact = [r for r in candidates if r.get("session") == seed["session"]]
+        candidates = exact or [r for r in candidates if _lessons.same_session(r.get("session"), seed["session"])]
+        if len({(r.get("source"), r.get("session")) for r in candidates}) != 1:
+            return []
+    return sorted({r["source_id"] for r in candidates if text == _norm_text(r.get("text"))})
+
+
+def _support(text, evidence, sensitive=False):
+    """Confidence follows verified independent sessions, never lens/chunk counts."""
+    unique = {e["source_id"]: e for e in evidence if e.get("source_id")}
+    ev = sorted(unique.values(), key=lambda e: (e.get("time") or "", e["source_id"]))
+    typed = [e for e in ev if e.get("origin", "typed") == "typed"]
+    sessions = sorted({"%s:%s" % (e.get("source"), e["session"]) for e in typed})
+    projects = sorted({e["project"] for e in typed if e.get("project")})
+    tentative = [e["quote"] for e in typed if _HEDGE.search(e.get("quote") or "")]
+    stated = any(_STATED.search(e.get("quote") or "") and not _HEDGE.search(e["quote"]) for e in typed)
+    corrected = any(_CORRECTION.search(e.get("quote") or "") and not _HEDGE.search(e["quote"]) for e in typed)
+    sufficient = not sensitive or (len(sessions) >= 3 and len(projects) >= 2)
+    confidence = ("strong" if stated or corrected or (len(sessions) >= 3 and sufficient) else
+                  "moderate" if len(sessions) >= 2 and sufficient else "weak")
+    return {"confidence": confidence, "evidence_class": "correction" if corrected else "stated_rule" if stated else
+            "inferred" if typed else "endorsed", "session_count": len(sessions), "project_count": len(projects),
+            "sessions": sessions, "projects": projects, "source_ids": [e["source_id"] for e in ev],
+            "hedges": tentative, "evidence": ev}
+
+
+def attach_support(consolidated, rows, split):
+    """Attach auditable metadata and writeable sidecar data without changing model headings."""
+    groups = {}
+    entries = []
+    for kind, items in (("trait", [t for ts in consolidated["traits"].values() for t in ts]),
+                        ("default", consolidated["unsaid_defaults"]), ("lesson", consolidated["lessons"])):
+        for item in items:
+            text = item.get("claim") or item.get("default") or item.get("better_alternative") or ""
+            identity = kind + "\n" + item.get("scope", "person") + "\n" + _norm_text(text)
+            eid = kind[0].upper() + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+            item["id"] = eid
+            evidence = item.get("support_evidence") or item.get("evidence") or []
+            if kind == "lesson":
+                evidence = [verify_evidence(e, rows, typed_only=True) for e in evidence if e.get("role", "user") == "user"]
+                evidence = [e for e in evidence if e]
+            group = groups.setdefault(eid, {"id": eid, "kind": kind, "text": text, "evidence": [], "items": [],
+                                            "sensitive": item.get("layer") in ("workflow", "standing_rules", "communication")
+                                            or bool(_WORKFLOW.search(text))})
+            group["evidence"].extend(evidence)
+            group["items"].append(item)
+    for eid in sorted(groups):
+        group = groups[eid]
+        support = _support(group["text"], group["evidence"], group["sensitive"])
+        for item in group["items"]:
+            item["support"] = {k: v for k, v in support.items() if k != "evidence"}
+            item["strength"] = support["confidence"]
+            item["count"] = support["session_count"] or len(support["source_ids"])
+        entries.append(dict(support, id=eid, kind=group["kind"], text=group["text"]))
+    return {"version": 1, "training": {"split_id": split["split_id"], "session_ids": sorted(split["train_ids"]),
+                                       "message_count": len(rows), "content_hash": training_hash(rows)}, "items": entries}
+
+
+def training_hash(rows):
+    """Fingerprint prepared content, including context, so stale caches cannot cross a boundary."""
+    records = [{k: r.get(k) for k in ("source_id", "text", "time", "origin", "project", "agent_context")} for r in rows]
+    records.sort(key=lambda r: r.get("source_id") or "")
+    return hashlib.sha256(json.dumps(records, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def profile_minimum(cfg, consolidated):
+    """An explicit numeric target wins; automatic size follows verified content."""
+    requested = cfg["synth"].get("profile_min_lines")
+    if requested is not None:
+        return int(requested)
+    claims = [t for values in consolidated.get("traits", {}).values() for t in values]
+    claims += consolidated.get("unsaid_defaults") or []
+    unique = {t.get("id") or t.get("claim") or t.get("default") for t in claims}
+    entries = len(unique) + len(consolidated.get("vocabulary") or [])
+    return min(60, 24 + 2 * entries)
 
 
 def consolidate(paths, mined_run, budget_chars=600000, log=print):
@@ -191,10 +366,15 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
     vocab = {}
     stats = {"chunks": 0, "sessions_read": 0, "messages_read": 0, "time_reliable_sessions": 0}
     times = []
-    rows = load_corpus(paths)
+    migration = {}
+    try:
+        rows = training_rows(paths, report=migration)
+    except PrepRefused as exc:
+        raise SynthError(str(exc))
+    split = read_json(paths.split)
     blob, have_typed = _typed_index(paths, rows)
     idx = _lessons.corpus_index(rows)
-    dropped = {"seeds": 0, "vocabulary": 0, "endorsed_capped": 0, "agent_only": 0}
+    dropped = {"seeds": 0, "vocabulary": 0, "endorsed_capped": 0, "agent_only": 0, "unverified": 0}
 
     def from_agent(*quotes):
         """True when a quote occurs only in stored agent context: never the user's voice, whatever lens reported it."""
@@ -220,7 +400,11 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
                     dropped["agent_only"] += len(t.get("evidence") or []) - len(ev)
                     if not ev:
                         continue
-                    t["evidence"] = ev
+                checked = [verify_evidence(e, rows) for e in ev]
+                dropped["unverified"] += sum(e is None for e in checked)
+                t["evidence"] = [e for e in checked if e]
+                if not t["evidence"]:
+                    continue
                 chunk_traits.append(t)
             for u in data.get("unsaid_defaults") or []:
                 u = dict(u)
@@ -230,19 +414,31 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
                     dropped["agent_only"] += len(u.get("evidence") or []) - len(ev)
                     if not ev:
                         continue
-                    u["evidence"] = ev
+                checked = [verify_default(e, rows) for e in ev]
+                dropped["unverified"] += sum(e is None for e in checked)
+                u["evidence"] = [e for e in checked if e]
+                if not u["evidence"]:
+                    continue
                 chunk_unsaid.append(u)
             for s_ in data.get("seed_expansions") or []:
                 s_ = dict(s_)
                 s_["chunk"] = cid
-                if have_typed and _norm_text(s_.get("seed")) not in blob:
+                source_ids = seed_sources(s_, rows)
+                if not source_ids:
                     dropped["seeds"] += 1
                     continue
+                s_["source_ids"] = source_ids
+                s_["evidence_class"] = "reconstructed_example"
                 seeds.append(s_)
             for r in data.get("reactions") or []:
                 if from_agent(r.get("quote")):
                     dropped["agent_only"] += 1
                     continue
+                verified = verify_evidence(r, rows, typed_only=True)
+                if verified is None:
+                    dropped["unverified"] += 1
+                    continue
+                r = dict(r, **verified)
                 key = (r.get("kind"), _norm_text(r.get("quote")))
                 if key not in chunk_reactions:
                     chunk_reactions[key] = dict(r, chunk=cid)
@@ -250,7 +446,7 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
                 key = (v.get("phrase") or "").strip().lower()
                 if not key:
                     continue
-                if have_typed and not _phrase_typed(v.get("phrase"), blob):
+                if not have_typed or not _phrase_typed(v.get("phrase"), blob):
                     dropped["vocabulary"] += 1
                     continue
                 entry = vocab.setdefault(key, {"phrase": v.get("phrase"), "meanings": [], "chunks": []})
@@ -262,6 +458,11 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
                 if from_agent(c.get("earlier"), c.get("later")):
                     dropped["agent_only"] += 1
                     continue
+                verified = verify_change(c, rows)
+                if verified is None:
+                    dropped["unverified"] += 1
+                    continue
+                c = verified
                 key = (_norm_text(c.get("earlier")), _norm_text(c.get("later")))
                 if key not in chunk_changes:
                     chunk_changes[key] = dict(c, chunk=cid)
@@ -300,14 +501,23 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
         changes += list(chunk_changes.values())
     if not stats["chunks"]:
         raise SynthError("no readable mined chunks in mined/%s" % mined_run)
+    stats["sessions_read"] = len({(r["source"], r["session"]) for r in rows})
+    stats["messages_read"] = len(rows)
+    stats["time_reliable_sessions"] = len({(r["source"], r["session"]) for r in rows if r.get("time")})
     lessons, project_lessons, lesson_report = _lessons.consolidate(lesson_items, rows, log=log, idx=idx)
     project_facts += [dict(l, kind="lesson") for l in project_lessons]
-    out = {"chunks": stats["chunks"], "session_stats": stats, "date_range": _date_range(times),
+    out = {"version": 5, "verification_version": VERIFICATION_VERSION, "chunks": stats["chunks"], "session_stats": stats, "date_range": _date_range(times),
            "traits": traits, "unsaid_defaults": unsaid, "vocabulary": sorted(vocab.values(), key=lambda v: v["phrase"].lower()),
            "preference_changes": changes, "reactions": reactions, "seed_expansions": seeds,
            "project_facts": project_facts, "grant_candidates": grant_candidates, "trimmed": [],
            "lessons": lessons, "lesson_report": lesson_report,
+           "provenance_migration": migration,
            "origin_filter": dict(dropped, verified=have_typed)}
+    evidence = attach_support(out, rows, split)
+    out["training"] = evidence["training"]
+    paths.model.mkdir(parents=True, exist_ok=True)
+    archive_previous(paths, log)
+    write_json(paths.model / "evidence.json", evidence)
     if not have_typed:
         out["trimmed"].append("seed and vocabulary origin not verified: no typed corpus records")
     body = json.dumps(_prompt_body(out), ensure_ascii=False)
@@ -325,6 +535,8 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
         out["trimmed"].append("trimmed evidence to one quote")
     out["prompt_chars"] = len(json.dumps(_prompt_body(out), ensure_ascii=False))
     write_json(paths.mined / mined_run / "consolidated.json", out)
+    log("provenance: %d prepared messages, %d legacy harness records excluded, %d old authorship fields reparsed" % (
+        migration["input_messages"], migration["harness_removed"], migration["authorship_reparsed"]))
     log("consolidate: %d chunks, %d traits, %d project facts set aside, %d unsaid defaults, %d seeds, %d vocabulary; "
         "dropped %d seed(s) and %d vocabulary phrase(s) absent from typed text, %d agent-only quote(s), capped %d "
         "endorsed-only trait(s) at weak; "
@@ -366,7 +578,18 @@ def build_grants(paths, cfg, consolidated, force=False, log=print):
         if key and key not in seen:
             seen.add(key)
             candidates.append(c)
-    rows = load_corpus(paths)
+    try:
+        rows = training_rows(paths)
+    except PrepRefused as exc:
+        raise SynthError(str(exc))
+    verified_candidates = []
+    for candidate in candidates:
+        verified = verify_evidence(candidate, rows, typed_only=True)
+        if verified:
+            verified_candidates.append(dict(candidate, session=verified["session"], time=verified["time"], origin="typed"))
+        else:
+            log("grants: dropped candidate absent from its cited training session")
+    candidates = verified_candidates
     tokens = _people_tokens_list(cfg)
     manifest = read_json(paths.model_json, {}) or {}
     today = now_iso()[:10]
@@ -494,7 +717,7 @@ def archive_previous(paths, log=print):
     if dest.exists():
         return dest
     dest.mkdir(parents=True, exist_ok=True)
-    for name in ("light.md", "profile.md", "examples.md", "grants.md", "index.json", "MODEL.json"):
+    for name in ("light.md", "profile.md", "examples.md", "grants.md", "index.json", "evidence.json", "episodes.json", "MODEL.json"):
         p = paths.model / name
         if p.exists():
             shutil.copy2(p, dest / name)
@@ -504,7 +727,12 @@ def archive_previous(paths, log=print):
 
 def write_manifest(paths, cfg, run_id=None, mined_run=None, engine=None, parents=None, corrections_folded=None,
                    folded_through=None, extra=None):
-    rows = load_corpus(paths)
+    # Runtime correction folding can update a legacy model without its old corpus.
+    # A new build hashes the prepared training subset, never the future raw corpus.
+    try:
+        rows = training_rows(paths)
+    except PrepRefused:
+        rows = []
     split = read_json(paths.split, {}) or {}
     prev = read_json(paths.model_json, {}) or {}
     model_hash = _select.files_hash(paths.model)
@@ -520,7 +748,7 @@ def write_manifest(paths, cfg, run_id=None, mined_run=None, engine=None, parents
         "project_notes": prev.get("project_notes", []), "folded_drops": prev.get("folded_drops", []),
         "grant_tombstones": prev.get("grant_tombstones", []), "grants_added": prev.get("grants_added", []),
         "always_on_targets": cfg.get("always_on_targets", []),
-        "files": {n: (paths.model / n).stat().st_size for n in ("light.md", "profile.md", "examples.md", "grants.md", "index.json") if (paths.model / n).exists()},
+        "files": {n: (paths.model / n).stat().st_size for n in ("light.md", "profile.md", "examples.md", "grants.md", "index.json", "evidence.json", "episodes.json") if (paths.model / n).exists()},
     }
     if extra:
         manifest.update(extra)
@@ -529,7 +757,7 @@ def write_manifest(paths, cfg, run_id=None, mined_run=None, engine=None, parents
 
 
 def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None, force=False, collect=False, model=None,
-                   update=False, fake_dir=None, log=print, strict_lint=True, backoff=None):
+                   update=False, fake_dir=None, log=print, strict_lint=True, backoff=None, max_calls=None, max_cost_usd=None):
     substeps = substeps or SUBSTEPS
     mined_run = mined_run or latest_mined_run(paths)
     if not mined_run and any(s in substeps for s in ("consolidate", "profile", "examples")):
@@ -544,7 +772,8 @@ def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None,
         if run_id == "latest":
             run_id = _engine.latest_run_id(paths, "synthesize")
         eng = _engine.Engine(paths, cfg, kind, "synthesize", run_id=run_id, model=_engine.stage_model(cfg, kind, "synthesize", model),
-                             concurrency=1, fake_dir=fake_dir, log=log, backoff=backoff)
+                             concurrency=1, fake_dir=fake_dir, log=log, backoff=backoff,
+                             max_calls=max_calls, max_cost_usd=max_cost_usd)
         summary["run_id"] = eng.run_id
     archived = False
     name = cfg["name"]
@@ -553,13 +782,27 @@ def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None,
     forbidden = _lint.FORBIDDEN_RULES_TEXT
 
     if "consolidate" in substeps:
-        if force or not consolidated_path.exists() or not _newer(consolidated_path, *mined_files(paths, mined_run)):
+        cached = read_json(consolidated_path, {}) or {}
+        if (force or cached.get("version") != 5 or cached.get("verification_version") != VERIFICATION_VERSION
+                or not _newer(consolidated_path, *mined_files(paths, mined_run))
+                or not _newer(consolidated_path, paths.split, paths.sessions)):
             consolidated = consolidate(paths, mined_run, cfg["synth"]["budget_chars"], log)
             summary["substeps"]["consolidate"] = "built"
         else:
             summary["substeps"]["consolidate"] = "skipped (up to date)"
     if consolidated is None and consolidated_path and consolidated_path.exists():
         consolidated = read_json(consolidated_path)
+    if consolidated is not None and any(s in substeps for s in ("profile", "lessons", "light", "examples", "grants")):
+        try:
+            rows = training_rows(paths)
+        except PrepRefused as exc:
+            raise SynthError(str(exc))
+        split = read_json(paths.split)
+        boundary = consolidated.get("training") or {}
+        if (consolidated.get("version") != 5 or consolidated.get("verification_version") != VERIFICATION_VERSION
+                or boundary.get("split_id") != split.get("split_id")
+                or boundary.get("content_hash") != training_hash(rows)):
+            raise SynthError("consolidated evidence predates the prepared training boundary; run synthesize consolidate")
 
     def _engine_step(step, prompt_name, mapping, schema, out_file, key, check=None, post=None):
         nonlocal archived
@@ -600,11 +843,15 @@ def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None,
             prior = _lessons.strip_section(prior)  # the pipeline rewrites the lessons section itself
         # the lessons section is written after the engine (substep `lessons`): leave room for it
         reserve = len(lessons_section(paths, consolidated, cfg))
-        body_max = max(cfg["synth"]["profile_min_lines"], cfg["synth"]["profile_max_lines"] - reserve)
+        minimum = profile_minimum(cfg, consolidated)
+        body_max = max(minimum, cfg["synth"]["profile_max_lines"] - reserve)
         mapping = dict(base_map, chunk_count=str(consolidated["chunks"]), date_range=consolidated["date_range"],
                        consolidated_json=json.dumps(_prompt_body(consolidated), ensure_ascii=False, indent=0),
                        prior_block=prior, forbidden_rules=forbidden,
-                       synth_min_lines=str(cfg["synth"]["profile_min_lines"]), synth_max_lines=str(body_max))
+                       synth_min_lines=str(minimum), synth_max_lines=str(body_max),
+                       profile_size_rule=("The lower line target is automatic guidance, not a quota: write less when the verified evidence supports less."
+                                          if cfg["synth"].get("profile_min_lines") is None else
+                                          "The lower line target is explicitly configured; preserve it without adding unsupported claims."))
 
         def check_profile(data):
             text = _lessons.strip_section(data["profile_md"])
@@ -643,6 +890,13 @@ def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None,
         profile_text = paths.profile.read_text(encoding="utf-8")
         section = _lessons.section_of(profile_text)
         has_upgrade_lesson = any(l.startswith("- ") and "Outcome: bad" in l for l in section)
+        bad_lesson_ids, current_lesson = set(), None
+        for line in section:
+            match = re.match(r"^### (W\d+)\.", line)
+            if match:
+                current_lesson = match.group(1).lower()
+            elif current_lesson and line.startswith("- ") and "Outcome: bad" in line:
+                bad_lesson_ids.add(current_lesson)
         mapping = dict(base_map, seed_expansions_json=json.dumps(consolidated.get("seed_expansions", []), ensure_ascii=False, indent=0),
                        profile_excerpt=_profile_excerpt(profile_text), forbidden_rules=forbidden,
                        examples_min=str(cfg["synth"]["examples_min"]), examples_max=str(cfg["synth"]["examples_max"]),
@@ -662,6 +916,12 @@ def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None,
                     len(ups), UPGRADES_MIN, UPGRADES_MAX)
             if not has_upgrade_lesson and ups:
                 return "pairs tagged `upgrade` but the profile has no lesson with a bad outcome"
+            for example in ex:
+                tags = example.get("tags") or []
+                if UPGRADE_TAG in tags:
+                    cited = {t for t in tags if re.fullmatch(r"w\d+", t)}
+                    if not cited or not cited.issubset(bad_lesson_ids):
+                        return "upgrade pair references a lesson without a verified bad outcome: %s" % example.get("n")
             missing = [n for n, changed in ups if not changed]
             if missing:
                 return "upgrade pair(s) %s lack the `Changed:` line" % ", ".join(str(n) for n in missing)

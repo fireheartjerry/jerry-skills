@@ -83,6 +83,21 @@ class EvalMathTests(unittest.TestCase):
         self.assertEqual(r["arms"]["none"]["contra"], 1)
         self.assertAlmostEqual(ev.session_rate(r, "none", 0.5), 0.5)
 
+    def test_impossible_judge_counts_flagged_without_repair(self):
+        historic = [{"id": "d01", "n_req": 4, "old": {"full": 1, "partial": 1.5}, "new": {"full": 0, "partial": 2}}]
+        self.assertIn("not a nonnegative integer", ev.count_errors(historic, historical=True)[0])
+        self.assertEqual(historic[0]["old"]["partial"], 1.5)
+        invalid = row("s1", 3, (1, 0, 0), (2, 0, 0))
+        invalid["arms"]["full"]["partial"] = -1
+        with self.assertRaises(ev.EvalRefused):
+            ev.build_report([invalid], ARMS, {"partial_weight": 0.5, "bootstrap_resamples": 20, "bootstrap_seed": 0}, {})
+
+    def test_diagnostic_score_never_establishes_human_acceptance(self):
+        report = ev.build_report(ROWS, ARMS, {"partial_weight": 0.5, "bootstrap_resamples": 20, "bootstrap_seed": 0}, {})
+        self.assertFalse(report["acceptance_eligible"])
+        self.assertEqual(report["judge_calibration"]["status"], "uncalibrated")
+        self.assertIn("cannot establish acceptance", ev.report_markdown(report, ROWS))
+
 
 if __name__ == "__main__":
     unittest.main()

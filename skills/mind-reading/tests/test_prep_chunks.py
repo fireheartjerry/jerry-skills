@@ -43,7 +43,7 @@ class PrepChunkTests(unittest.TestCase):
             self.assertEqual(set(b), {"source", "session", "part", "project", "start", "time_reliable", "first_messages", "messages"})
             for m in b["messages"]:
                 self.assertLessEqual({"time", "origin", "text"}, set(m))
-                self.assertLessEqual(set(m), {"time", "origin", "text", "agent_context"})  # agent context is optional
+                self.assertLessEqual(set(m), {"time", "origin", "text", "agent_context", "key"})  # agent context is optional
         unreliable = [b for b in blocks if not b["time_reliable"]]
         self.assertEqual(sorted(b["session"][-4:] for b in unreliable), ["cx06", "cx12"])
         for b in unreliable:

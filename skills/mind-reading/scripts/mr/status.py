@@ -68,9 +68,10 @@ def eval_guard_present(settings_path, home):
 
 
 def calibration(paths):
+    from .tracking import summarize
     rows = read_jsonl(paths.decisions)
     if not rows:
-        return {"invocations": 0}
+        return {"invocations": 0, "real_use": summarize(paths)}
     n = len(rows)
     s = sum(int(r.get("s") or 0) for r in rows)
     l = sum(int(r.get("l") or 0) for r in rows)
@@ -89,7 +90,8 @@ def calibration(paths):
         except (TypeError, ValueError):
             continue
     return {"invocations": n, "mean_s": round(s / n, 2), "mean_l": round(l / n, 2), "mean_g": round(g / n, 2),
-            "held_rate": round(held / n, 3), "corrections_per_100": round(100.0 * corr / n, 1), "modes": modes,
+            "held_rate": round(held / n, 3), "corrections_per_100": None, "correction_lines_unlinked": corr,
+            "real_use": summarize(paths), "modes": modes,
             "mean_chars": round(sum(int(r.get("chars") or 0) for r in rows) / n),
             "upgrades_per_100": round(100.0 * upgrades / n, 1), "lessons_in_slice_rate": round(sum(1 for r in rows if r.get("lessons")) / n, 3)}
 
@@ -201,8 +203,11 @@ def gather(paths, cfg):
                 st["blocked"].append("always-on block %s in %s: run refresh --always-on --write-to %s" % (s, t, t))
     if paths.eval.exists() and not _dir_mode_ok(paths.eval):
         st["blocked"].append("eval/ is not mode 0700: chmod 700 %s" % paths.eval)
-    guard, note = eval_guard_present(cfg.get("claude_settings_path", "~/.claude/settings.json"), paths.home)
+    guard_applicable = not (split and split.get("no_test"))
+    guard, note = (eval_guard_present(cfg.get("claude_settings_path", "~/.claude/settings.json"), paths.home)
+                   if guard_applicable else (None, "not applicable: this split holds no test data"))
     st["eval_guard"], st["eval_guard_note"] = guard, note
+    st["eval_guard_applicable"] = guard_applicable
     if guard is False:
         st["blocked"].append("no valid permissions.deny guard for %s in %s (see build.md step 4)%s" % (
             paths.eval, cfg.get("claude_settings_path"), (": " + note) if note else ""))
@@ -310,10 +315,15 @@ def format_text(st, est=None):
             cal["upgrades_per_100"], cal["mean_chars"]))
     else:
         out.append("calibration: no runtime decisions recorded yet")
+    real = cal.get("real_use") or {}
+    rate = real.get("corrections_per_100_observed")
+    out.append("real-use corrections: %s; %d human-reviewed observed follow-ups, %d unreviewed or unobserved, %d legacy unlinked invocations" % (
+        ("%.1f per 100" % rate) if rate is not None else "unknown", real.get("human_reviewed_observed", 0),
+        real.get("unreviewed_or_unobserved", 0), real.get("legacy_unlinked", 0)))
     for t, s in st["drift"]:
         out.append("always-on %s: %s" % (t, s))
     if st["eval_guard"] is None:
-        out.append("eval guard: no Claude settings file found (nothing to check)")
+        out.append("eval guard: " + (st.get("eval_guard_note") or "no Claude settings file found (nothing to check)"))
     else:
         out.append("eval guard: %s%s" % ("present" if st["eval_guard"] else "MISSING", (" (" + st["eval_guard_note"] + ")") if st.get("eval_guard_note") else ""))
     if est:

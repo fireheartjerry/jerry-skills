@@ -16,6 +16,18 @@ class SkipPrefixTests(unittest.TestCase):
         self.assertFalse(filters.keep(""))
         self.assertFalse(filters.keep(None))
 
+    def test_exact_harness_restart_wrapper_is_not_user_voice(self):
+        wrapper = ('You were interrupted (killed (kill requested)) at 2026-10-22T12:34:56.123Z. '
+                   'Continue the task. Re-read any file you changed before editing it again, '
+                   'and finish with your final report.')
+        self.assertFalse(filters.keep(wrapper))
+        self.assertFalse(filters.keep(' \n' + wrapper.replace('. Continue', '.\nContinue') + '\n'))
+        self.assertFalse(filters.keep(wrapper.replace('.123Z', '+00:00')))
+        self.assertTrue(filters.keep('The harness said: ' + wrapper))
+        self.assertTrue(filters.keep(wrapper + ' Also fix the parser.'))
+        self.assertTrue(filters.keep(wrapper.replace('2026-10-22T12:34:56.123Z', 'yesterday')))
+        self.assertTrue(filters.keep('Continue the task. Re-read any file you changed before editing it again.'))
+
     def test_unknown_tag_counted_known_not(self):
         self.assertEqual(filters.unknown_tag("<weird-tag>noise</weird-tag> typed"), "weird-tag")
         self.assertIsNone(filters.unknown_tag("<task-notification>x</task-notification>"))

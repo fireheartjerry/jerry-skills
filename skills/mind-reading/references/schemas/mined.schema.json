@@ -105,9 +105,34 @@
           "question_answer",
           "goal_reminder"
          ]
+        },
+        "source": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "key": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "source_id": {
+         "type": "string",
+         "maxLength": 300
         }
        }
       }
+     },
+     "evidence_class": {
+      "type": "string",
+      "enum": [
+       "stated_rule",
+       "correction",
+       "inferred",
+       "endorsed"
+      ]
+     },
+     "hedge": {
+      "type": "string",
+      "maxLength": 200
      }
     }
    }
@@ -184,9 +209,80 @@
         "session": {
          "type": "string",
          "maxLength": 120
+        },
+        "source": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "key": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "source_id": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "first_source": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "first_session": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "first_key": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "first_source_id": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "first_time": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "maxLength": 40
+        },
+        "later_source": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "later_session": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "later_key": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "later_source_id": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "later_time": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "maxLength": 40
         }
        }
       }
+     },
+     "evidence_class": {
+      "type": "string",
+      "enum": [
+       "stated_rule",
+       "correction",
+       "inferred",
+       "endorsed"
+      ]
+     },
+     "hedge": {
+      "type": "string",
+      "maxLength": 200
      }
     }
    }
@@ -225,6 +321,22 @@
        "type": "string",
        "maxLength": 40
       }
+     },
+     "source": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "key": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "source_id": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "session": {
+      "type": "string",
+      "maxLength": 120
      }
     }
    }
@@ -268,6 +380,18 @@
      "session": {
       "type": "string",
       "maxLength": 120
+     },
+     "source": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "key": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "source_id": {
+      "type": "string",
+      "maxLength": 300
      }
     }
    }
@@ -337,6 +461,50 @@
      "session": {
       "type": "string",
       "maxLength": 120
+     },
+     "source": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "key": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "source_id": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "earlier_source": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "earlier_session": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "earlier_key": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "earlier_source_id": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "later_source": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "later_session": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "later_key": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "later_source_id": {
+      "type": "string",
+      "maxLength": 300
      }
     }
    }
@@ -390,6 +558,18 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 200
+     },
+     "source": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "key": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "source_id": {
+      "type": "string",
+      "maxLength": 300
      }
     }
    }
@@ -548,9 +728,34 @@
           "user",
           "agent_context"
          ]
+        },
+        "source": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "key": {
+         "type": "string",
+         "maxLength": 300
+        },
+        "source_id": {
+         "type": "string",
+         "maxLength": 300
         }
        }
       }
+     },
+     "evidence_class": {
+      "type": "string",
+      "enum": [
+       "stated_rule",
+       "correction",
+       "inferred",
+       "endorsed"
+      ]
+     },
+     "hedge": {
+      "type": "string",
+      "maxLength": 200
      }
     }
    }

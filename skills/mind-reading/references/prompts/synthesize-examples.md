@@ -9,6 +9,7 @@ Output: one JSON object `{"examples_md": "..."}` holding the whole examples.md a
 
 # Selection
 
+- Pooled full prompts are reconstructions, not verbatim user instructions or authorizations. Use their verified seed source ids as provenance, and include only additions supported by the profile or later user evidence. Silence and assistant claims add no support. Preserve a hedge or local condition instead of upgrading it into a broad rule.
 - Choose the most varied seeds across kinds of request: resume, status, bug report, UI pass, shipping, handoff to another agent, message to a person, planning, cleanup, research. Prefer the shortest seeds whose later turns revealed the most.
 - Merge near-duplicate seeds into one pair. Keep the seed verbatim, typos kept.
 
@@ -17,7 +18,7 @@ Output: one JSON object `{"examples_md": "..."}` holding the whole examples.md a
 Write it as {name} at their best: first person, direct, complete, in {name}'s priorities and vocabulary, with no typos. Cover, in this order and sized to the seed: goal and why; scope and what not to touch; quality bar; deliverables; follow-through; how to report. 60 to 300 words.
 
 - Replace every moving fact with a role token or a neutral phrase: "the branch we agreed", "the staging host", "<teammate>'s module". No names, numbers, hostnames, budgets, scores or dates that would go stale.
-- Where a message to a person is involved, the prompt drafts it for {name}'s approval before sending.
+- Where a message to a person is involved, express the actual requested action and current authorization from context. Do not insert a redundant approval loop when the example seed already approves a shown draft; an inferred preference never grants a new send.
 - Never write restraint {name} does not hold ("do not push", "work on a fresh branch", "keep every feature") unless a Standing rule in the excerpt says so.
 - {forbidden_rules}
 

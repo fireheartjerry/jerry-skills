@@ -21,6 +21,61 @@ class CorrectionParseTests(unittest.TestCase):
         self.assertEqual(_refresh.unfolded(entries, None), entries)
         self.assertEqual(_refresh.unfolded(entries, "nothing"), entries)
 
+    def test_optional_linked_decision_id(self):
+        entries, bad = _refresh.parse_corrections(GOOD + " | decision_id: decision-123")
+        self.assertFalse(bad)
+        self.assertEqual(entries[0]["decision_id"], "decision-123")
+        self.assertTrue(_refresh.parse_corrections(GOOD + " | decision_id: bad/id")[1])
+
+
+class CandidateTests(unittest.TestCase):
+    def test_candidate_can_advance_training_date_without_changing_live_boundary(self):
+        paths, cfg = helpers.build_home(through="synthesize")
+        before = read_json(paths.split)
+        target = paths.home.with_name(paths.home.name + "-new-date")
+        with helpers.fixture_upgrade_lesson_ids():
+            summary = _refresh.run_refresh(paths, cfg, "fake", candidate_home=target, extend=True, corrections=False,
+                                           train_before="2026-05-01", fake_dir=helpers.FAKE, log=helpers.quiet)
+        self.assertEqual(read_json(paths.split), before)
+        candidate_split = read_json(target / "derived/split.json")
+        self.assertTrue(candidate_split["no_test"])
+        self.assertEqual(candidate_split["train_before"], "2026-05-01T00:00:00Z")
+        self.assertTrue(set(before["test_ids"]) & set(candidate_split["train_ids"]))
+        self.assertIn("recall", summary)
+        self.assertEqual(read_json(target / "model/episodes.json")["split_id"], candidate_split["split_id"])
+        self.assertEqual(read_json(target / "model/MODEL.json")["model_hash"], summary["candidate"]["candidate_model_hash"])
+
+    def test_training_date_requires_extension_and_cannot_mix_with_test_cutoff(self):
+        paths, cfg = helpers.init_home(helpers.tmpdir())
+        for kw in ({"train_before": "2026-05-01"}, {"extend": True, "train_before": "2026-05-01", "new_cutoff": "2026-04-01"}):
+            with self.assertRaises(_refresh.RefreshError):
+                _refresh.run_refresh(paths, cfg, "fake", **kw)
+
+    def test_candidate_snapshot_never_changes_live_and_rejects_overlaps(self):
+        paths, cfg = helpers.build_home(through="synthesize")
+        target = paths.home.with_name(paths.home.name + "-candidate")
+        before = {p.name: p.read_bytes() for p in paths.model.iterdir() if p.is_file()}
+        s = _refresh.run_refresh(paths, cfg, "fake", corrections=False, candidate_home=target, log=helpers.quiet)
+        self.assertEqual(s["candidate"]["status"], "awaiting_human_review")
+        self.assertEqual(before, {p.name: p.read_bytes() for p in paths.model.iterdir() if p.is_file()})
+        self.assertEqual(read_json(target / "config.json")["always_on_targets"], [])
+        with self.assertRaises(_refresh.RefreshError):
+            _refresh.run_refresh(paths, cfg, "fake", candidate_home=target)
+        for overlap in (paths.home, paths.home / "candidate", paths.home.parent):
+            with self.assertRaises(_refresh.RefreshError):
+                _refresh.prepare_candidate(paths, cfg, overlap)
+
+    def test_candidate_failure_recorded_and_no_always_on_target_written(self):
+        from unittest import mock
+        paths, cfg = helpers.build_home(through="synthesize")
+        target = paths.home.with_name(paths.home.name + "-failed")
+        with mock.patch.object(_refresh, "fold_corrections", side_effect=_refresh.RefreshError("failed")):
+            with self.assertRaises(_refresh.RefreshError):
+                _refresh.run_refresh(paths, cfg, "fake", candidate_home=target)
+        self.assertEqual(read_json(target / "CANDIDATE.json")["status"], "failed")
+        with self.assertRaises(_refresh.RefreshError):
+            _refresh.run_refresh(paths, cfg, "fake", candidate_home=target.with_name(target.name + "-other"), always_on_flag=True)
+
 
 class FoldTests(unittest.TestCase):
     def setUp(self):
@@ -83,7 +138,8 @@ class ExtendTests(unittest.TestCase):
         self.assertIn("claude-code:cs91", after["train_ids"])
         self.assertTrue(any("reading transcripts from claude=%s" % claude in l for l in logs), logs)
         self.assertGreaterEqual(len(s["mine"]["ok"]) + len(s["mine"]["skipped"]), 1)
-        s2 = _refresh.run_refresh(paths, cfg, "fake", corrections=False, extend=True, new_cutoff="2026-04-21", fake_dir=helpers.FAKE, log=helpers.quiet)
+        with helpers.fixture_upgrade_lesson_ids():
+            s2 = _refresh.run_refresh(paths, cfg, "fake", corrections=False, extend=True, new_cutoff="2026-04-21", fake_dir=helpers.FAKE, log=helpers.quiet)
         self.assertNotEqual(s2["prep"], first["split_id"])
         self.assertIn("claude-code:cs91", read_json(paths.split)["test_ids"])
 

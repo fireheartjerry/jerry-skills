@@ -63,7 +63,9 @@ DEFAULTS = {
     # reach its prompt (agent-only quotes are still dropped at consolidate).
     "mine": {"lenses": ["core", "defaults", "reactions", "followthrough", "vocabulary", "grants", "lessons"], "endorsed_evidence": True,
              "agent_context_lenses": ["lessons"]},
-    "synth": {"budget_chars": 600000, "profile_min_lines": 250, "profile_max_lines": 600,
+    # None derives a compact target from verified content. A numeric user setting
+    # remains explicit; sparse history must never require invented filler.
+    "synth": {"budget_chars": 600000, "profile_min_lines": None, "profile_max_lines": 600,
               "light_max_lines": 60, "examples_min": 20, "examples_max": 40, "lessons_max": 40},
     "eval": {"partial_weight": 0.5, "bootstrap_resamples": 10000, "bootstrap_seed": 0, "max_sessions": 40,
              "arms": ["none", "light", "full"]},

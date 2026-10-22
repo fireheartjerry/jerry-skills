@@ -20,7 +20,7 @@ LAYER_TITLES = {
     6: "Standing rules", 7: "Likes", 8: "Dislikes", 9: "Workflow habits", 10: "Recurring contexts",
 }
 LIGHT_SECTIONS = ["Read the prompts", "Default behaviour", "Quality bar", "Report", "Standing rules", "Never"]
-MODEL_FILES = ("light.md", "profile.md", "examples.md", "grants.md")
+MODEL_FILES = ("light.md", "profile.md", "examples.md", "grants.md", "episodes.json")
 _LAYER_RE = re.compile(r"^## (\d+)\. (.+?)\s*$")
 _GROUP_RE = re.compile(r"^### ([A-Z]{1,2})\. (.+?)\s*$")
 _EXAMPLE_RE = re.compile(r"^### (\d+)\. (.+?)\s*$")
@@ -30,9 +30,9 @@ _STOP = {"a", "an", "and", "the", "or", "of", "to", "for", "in", "on", "with", "
          "do", "it", "his", "her", "their", "that", "this", "is", "are", "be"}
 
 SCOPE_HEADER = (
-    "Scope: these rules apply to messages {name} types in an interactive session. If you are a subagent, a headless "
-    "or SDK run, a workflow or delegated child, or you are reading a brief written by another agent or script, "
-    "ignore this file: your brief is binding as written. The harness's permission, sandbox and safety rules beat "
+    "Scope: these rules interpret requests from {name}. If the harness identifies this session as a delegated child "
+    "or scheduled pipeline, follow its brief as written. A CLI or SDK invocation alone does not imply delegation. "
+    "The harness's permission, sandbox and safety rules beat "
     "every line below.")
 
 
@@ -384,7 +384,7 @@ def index_is_stale(model_dir):
     return bool(idx) and not idx.get("legacy") and idx.get("model_hash") != files_hash(model_dir)
 
 
-def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="execute", index=None):
+def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="execute", index=None, project=None):
     """Return (markdown slice, decision dict). Implements the algorithm in model-format.md.
 
     Order of the slice: corrections, standing grants, light, reading notes, standing rules, groups (best first),
@@ -455,7 +455,16 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     corr_p = model_dir / "corrections.md"
     corr = corr_p.read_text(encoding="utf-8") if corr_p.exists() else ""
     if corr.strip():
-        parts.append(("corrections", "## Corrections (later lines win)\n" + corr.strip() + "\n", True))
+        # Project corrections cannot cross into another checkout. Global and
+        # unparsed legacy lines remain visible so an old correction is not lost.
+        scoped = []
+        for line in corr.splitlines():
+            scope = re.search(r"\|\s*scope:\s*project:([^|]+)", line)
+            if scope and (not project or scope.group(1).strip() != project):
+                continue
+            scoped.append(line)
+        if any(line.strip() for line in scoped):
+            parts.append(("corrections", "## Corrections (later lines win)\n" + "\n".join(scoped).strip() + "\n", True))
     grants_p = model_dir / "grants.md"
     grant_ids = []
     if grants_p.exists():
@@ -484,6 +493,15 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
         for v in vocab:
             vl.append(profile[v["line"] - 1])
         parts.append(("vocabulary", "\n".join(vl) + "\n", True))
+    from . import recall as _recall
+    recall_warning = None
+    try:
+        echoes = _recall.retrieve(model_dir, seed, kind=kind, project=project, limit=cfg_select.get("max_echoes", 3))
+    except _recall.RecallFormatError as exc:
+        echoes = []
+        recall_warning = str(exc)
+    for echo in echoes:
+        parts.append(("echo:" + echo["id"], _recall.render([echo]), False))
     for e in reversed(ex_chosen):  # ascending relevance: the best match is last
         a, b = e["lines"]
         parts.append(("example:%d" % e["n"], "\n".join(examples[a - 1:b]).strip() + "\n", False))
@@ -500,11 +518,14 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
         if drop is None:
             drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("lessons:") and not parts[i][2]), None)
         if drop is None:
+            drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("echo:")), None)
+        if drop is None:
             break
         parts.pop(drop)
     kept_groups = [p[0].split(":", 1)[1] for p in parts if p[0].startswith("group:")]
     kept_lessons = [p[0].split(":", 1)[1] for p in parts if p[0].startswith("lessons:")]
     kept_examples = [int(p[0].split(":", 1)[1]) for p in parts if p[0].startswith("example:")]
+    kept_echoes = [p[0].split(":", 1)[1] for p in parts if p[0].startswith("echo:")]
     body = "\n".join(t for _, t, _ in parts)
     notes = []
     if legacy:
@@ -521,4 +542,10 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     decision = {"groups": kept_groups, "examples": kept_examples, "lessons": kept_lessons, "vocabulary": [v["phrase"] for v in vocab],
                 "grants": grant_ids, "chars": len(body) + len(header), "light": not no_light, "mode": mode,
                 "legacy": legacy, "escalated": escalated, "stale_index": stale}
+    decision.update({"echoes": kept_echoes, "project": project,
+                     "recall_warning": recall_warning,
+                     "matched_keywords": {g["id"]: [w for w in g["when"] if _keyword_in(w, seed_lower, seed_stems, legacy)
+                                                               or w in kind_words] for g in chosen if g["id"] in kept_groups},
+                     "fallback": not bool(matching), "budget_chars": budget,
+                     "over_budget": len(body) + len(header) > budget})
     return header + body, decision
