@@ -8,19 +8,22 @@ set -u
 here="$(cd "$(dirname "$0")" && pwd -P)"
 skill="$(dirname "$here")"
 status=0
+unit_log="$(mktemp "${TMPDIR:-/tmp}/mind-reading-tests.XXXXXX")"
+trap 'rm -f "$unit_log"' EXIT
 
 echo ">>> unittest (python3 -I -W error::ResourceWarning)"
-if ! python3 -I -W error::ResourceWarning -m unittest discover -s "$here" -p 'test*.py' 2>"$here/.unittest.err"; then
+if ! python3 -I -W error::ResourceWarning -m unittest discover -s "$here" -p 'test*.py' 2>"$unit_log"; then
+  cat "$unit_log"
   status=1
+else
+  tail -3 "$unit_log"
 fi
 # unittest cannot turn a warning raised during garbage collection into a failure, so the log is grepped as well
-if grep -q "ResourceWarning" "$here/.unittest.err"; then
+if grep -q "ResourceWarning" "$unit_log"; then
   echo "ResourceWarning found in the test log:"
-  grep -B1 -A3 "ResourceWarning" "$here/.unittest.err" | head -40
+  grep -B1 -A3 "ResourceWarning" "$unit_log" | head -40
   status=1
 fi
-tail -3 "$here/.unittest.err"
-rm -f "$here/.unittest.err"
 
 echo ">>> fixtures match their generator"
 python3 -I "$here/make_fixtures.py" --check || status=1

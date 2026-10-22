@@ -106,6 +106,34 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(res["ok"]), 1)
         self.assertEqual(len(res["stopped"]), 2)
 
+    def test_new_run_id_does_not_collide_with_copied_mining_outputs(self):
+        from unittest import mock
+        with mock.patch.object(_engine._dt, "datetime") as clock:
+            clock.now.return_value.strftime.return_value = "20260101-120000"
+            (self.paths.mined / "20260101-120000").mkdir()
+            (self.paths.runs / "20260101-120000-1").mkdir()
+            self.assertEqual(_engine.new_run_id(self.paths), "20260101-120000-2")
+
+    def test_parallel_budget_reserves_attempts_before_start(self):
+        write_fake(self.fake, "demo", {"default": {"answer": "ok"}})
+        eng = self.engine(max_calls=1, concurrency=4)
+        original_check = eng._budget_ok
+        # All workers check the ceiling before any backend result is available.
+        # Synchronizing this boundary makes the old race deterministic.
+        barrier = threading.Barrier(4)
+
+        def concurrent_check():
+            allowed = original_check()
+            barrier.wait(timeout=10)
+            return allowed
+
+        eng._budget_ok = concurrent_check
+        result = eng.run(self.units(4))
+        self.assertEqual(result["calls"], 1)
+        self.assertEqual(len(result["ok"]), 1)
+        self.assertEqual(len(result["stopped"]), 3)
+        self.assertEqual(len(_engine.read_calls(eng.run_dir)), 1)
+
     def test_render_strict(self):
         self.assertEqual(_engine.render("hi {name} {\"json\": 1}", {"name": "Alex"}), "hi Alex {\"json\": 1}")
         with self.assertRaises(_engine.RenderError):

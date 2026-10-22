@@ -69,7 +69,9 @@ def new_run_id(paths, runs_dir=None):
     base = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     root = Path(runs_dir) if runs_dir else paths.runs
     rid, k = base, 1
-    while (root / rid).exists():
+    # Candidate snapshots copy mined outputs without copying transient runs.
+    # A new call within the same second still needs a distinct output namespace.
+    while (root / rid).exists() or (paths.mined / rid).exists():
         rid = "%s-%d" % (base, k)
         k += 1
     return rid
@@ -364,11 +366,13 @@ class Engine:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _budget_ok(self):
+        """Atomically reserve an attempt before releasing a worker to the backend."""
         with self.lock:
             if self.max_calls is not None and self.calls >= self.max_calls:
                 return False
             if self.max_cost is not None and self.cost >= self.max_cost:
                 return False
+            self.calls += 1
             return True
 
     def _validate(self, unit, data):
@@ -407,7 +411,6 @@ class Engine:
             res = self.backend.call(unit, prompt, attempts)
             dur = time.time() - t0
             with self.lock:
-                self.calls += 1
                 self.tokens += res.tokens or 0
                 self.cost += res.cost or 0.0
             if res.pending:
