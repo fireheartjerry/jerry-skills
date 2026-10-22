@@ -66,7 +66,9 @@ The [build guide](build.md) gives the commands. Extraction and selection run loc
 mining and evaluation send scrubbed text to your configured model provider. Review
 the source roots and scrubbed records first.
 
-Once you choose the reviewed model, use an invocation such as:
+Once you choose the reviewed model and install its personal always-on block,
+underspecified ordinary requests can use the skill automatically. Clear requests
+stay clear. To explicitly inspect the full reading, use:
 
 > read my mind: add the migration
 
@@ -74,6 +76,13 @@ The agent shows `Reading:` and a brief with stated `[S]`, recurring `[L]` and gu
 `[G]` inferences, then acts within the current session's authorization. Unsupported
 details should stay out. Your latest words override the model, and a correction
 takes effect on the next read without waiting for a rebuild.
+
+The agent can supply a small private context frame to the selector: the active
+goal, recent user turns and verified facts. New models retain the context before
+historical short requests, so "ready" can recall a relevant situation rather than
+match unrelated people who also said "ready". Completed blind choices can be learned
+into a separate candidate with `preferences learn`; the original reason for a
+choice remains unknown unless you gave one.
 
 Your own candidate can also produce a private **intent atlas** with
 `atlas --out '<private atlas.html>'`: a searchable view of what you asked, what you later added,
@@ -87,6 +96,12 @@ without a model. Record wins, ties, losses and the corrections you subsequently
 make, with the total number of reads beside each rate. Inspect wrong assumptions
 and scope expansion directly. Automated judge scores are diagnostic until they
 agree with enough human decisions to establish useful calibration.
+
+For next-step predictions, `foresight record` freezes the prediction before the
+later turn. `foresight observe` records explicit human outcomes; `foresight report`
+keeps unresolved and pending predictions outside its precision denominator.
+Historical replay is available through `foresight replay`, with separate input and
+reveal files. It is useful for development, and is labelled retrospective.
 
 A weekly refresh should build a separate candidate and show the change, checks
 and evidence for review. It never makes a candidate live automatically. A scheduled

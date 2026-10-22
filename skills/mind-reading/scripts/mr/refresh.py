@@ -168,6 +168,8 @@ def render_block(light_text, model_hash, name, date=None, home_label="$MIND_READ
     date = date or now_iso()[:10]
     footer = ("Precedence: the harness's rules, then a repo's AGENTS.md or CLAUDE.md and project memory, then %s's newest "
               "words, then this block. Full expansion on demand: the mind-reading skill (\"read my mind: ...\")." % name)
+    footer += ("\nFor an underspecified request whose goal or standards depend on this history, use the mind-reading skill "
+               "with current context even without an invocation phrase. Clear requests proceed normally.")
     return ("<!-- BEGIN mind-reading (generated %s from %s/model/light.md, model %s; delete this block to remove) -->\n"
             "%s\n\n%s\n%s\n" % (date, home_label, model_hash, _demote(light_text), footer, END_MARK))
 

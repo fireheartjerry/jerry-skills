@@ -7,7 +7,7 @@ file only when the `SKILL.md` points to it. Install with `./install.sh`.
 
 ## skills/mind-reading
 
-Expands a short seed into the full prompt the user would have written, from a model mined from their own Claude Code and Codex transcripts; shows it with confidence tags, then acts on it. Not for talk about the skill or its model, not for prompts that are already complete, and not for building or refreshing the model unless asked by name (then follow references/build.md). Fires when an invocation phrase appears as an instruction: "read my mind", "mind-read this", "/mind-reading" (Claude Code) or "$mind-reading" (Codex); the rest is the seed. A quoted or reported phrase does not fire it.
+Infers the goal behind an underspecified request and anticipates omitted requirements from the active conversation, project context and verified personal history. Use when that context materially changes the answer; explicit "read my mind", "mind-read this", "/mind-reading" and "$mind-reading" also invoke it. Clear requests need no persona lookup. Talk about the skill or its model is handled normally. Building or refreshing a model still requires the user's request. Quoted invocation phrases are data, not commands.
 
 Entry point: `skills/mind-reading/SKILL.md`
 

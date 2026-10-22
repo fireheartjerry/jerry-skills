@@ -13,6 +13,7 @@ The contract between the pipeline (which writes the model) and the runtime (whic
 | `grants.md` | `synthesize grants` (deterministic, no engine; merges into an existing file) | every call: the active, valid blocks only, inside the slice | yes, then `synthesize index` |
 | `evidence.json` | `synthesize consolidate` | inspection and evidence review | no |
 | `episodes.json` | `recall build` | `select`, `recall`, atlas | no |
+| `preference_memory.json` | `preferences learn` in a separate candidate | relevant human-choice contrasts in `select` | no |
 | `index.json` | `synthesize index` | `select` (the agent never reads it directly) | never |
 | `corrections.md` | the runtime (append, through `MR correct`) | every call, whole, inside the slice | yes |
 | `decisions.jsonl` | the runtime (append, through `MR log-decision`) | `status` | no |
@@ -211,7 +212,7 @@ Built by `synthesize index` from the two markdown files. The runtime reads it fi
  "grants": {"path": "grants.md", "count": 1, "active": 1}}
 ```
 
-`lessons` is present only when the profile has the section. `corrections.lines` is the line count at build time; the runtime always reads the current file. `model_hash` is `sha256(light.md + profile.md + examples.md + grants.md + episodes.json)[:16]` (the bytes in that order, a missing file contributing nothing) and changes whenever one of them changes; `index.json` is derived from them and is not hashed. `grants` is present only when `grants.md` exists. `select` compares `model_hash` with the files on every call: when they differ (a file was edited after `synthesize index`), the index is rebuilt in memory for that call (never written), the header carries `index.json stale, rebuilt in memory: run \`synthesize index\``, the decision carries `stale_index: true`, and `status` warns. If the edited files no longer parse, the legacy fallback below is used instead.
+`lessons` is present only when the profile has the section. `corrections.lines` is the line count at build time; the runtime always reads the current file. `model_hash` is `sha256(light.md + profile.md + examples.md + grants.md + episodes.json + preference_memory.json)[:16]` (the bytes in that order, a missing file contributing nothing) and changes whenever one of them changes; `index.json` is derived from them and is not hashed. `grants` is present only when `grants.md` exists. `select` compares `model_hash` with the files on every call: when they differ (a file was edited after `synthesize index`), the index is rebuilt in memory for that call (never written), the header carries `index.json stale, rebuilt in memory: run \`synthesize index\``, the decision carries `stale_index: true`, and `status` warns. If the edited files no longer parse, the legacy fallback below is used instead.
 
 Selection, as implemented by `mind_reading.py select` and followed by hand when the scripts are unavailable (the seed goes in through `--seed-file -` on stdin, so shell metacharacters in it stay literal):
 1. Always, in this order: `corrections.md` (all lines), `grants.md` (its preamble plus the blocks that are active and pass every rule in section 3a, nothing else), `light.md` unless `--no-light` (the runtime passes it when the always-on block is already in context), the reading notes, the Standing rules.
@@ -313,7 +314,7 @@ across lenses or chunk boundaries is one observation. A recurring claim is not
 a stated rule merely because it has strong support. Preserve tentative wording.
 No evidence row is an authorization; grant verification remains separate.
 
-`MR recall build` creates `episodes.json` version 1 from typed training rows.
+`MR recall build` creates `episodes.json` version 2 from typed training rows (version 1 remains readable).
 Each episode has an id, short seed, later substantive addition, signals, request
 kinds, project, time, session id and the two source ids. Copied episodes count
 once. Up to 600 recent episodes are retained by default; this is a storage cap,
@@ -359,3 +360,80 @@ private home and runs there, with always-on writes disabled. Weekly runners
 use exclusive locking, finite per-stage call budgets and one candidate per
 calendar week, refuse an unresolved prior review, and verify a candidate marker
 after command success. They never change the live model or its symlink.
+
+## 12. Context-conditioned intent and human choices
+
+`select --context-file <private.json>` accepts a version-1 invocation frame:
+
+```json
+{"version":1,"goal":"repair the invoice download","recent_user_turns":["the CSV is empty"],"verified_facts":["the downloaded file has zero rows"],"phase":"repair","project":"billing"}
+```
+
+All fields are optional. An empty frame preserves the exact ordinary selector
+result. `goal` allows 2,000 characters; up to eight ordered recent user turns
+allow 2,000 characters each; up to eight verified-fact strings allow 500 each;
+`phase` allows 80 and `project` 1,000. The normalized object is at most 16,000
+characters. Oversized or unknown fields, duplicate JSON keys and simultaneous
+seed/context stdin are refused. Later user turns never belong in this input.
+The host resolves the active goal; this helper does not invent one from regexes.
+
+Explicit seed and decoded-kind routing take priority. Context supplies routing
+only when those have no match, helps example relevance, and conditions echo and
+human-choice retrieval. A project in the frame must agree with `--project`.
+Current context is mandatory within the slice; optional history is trimmed to
+fit. `context_hash`, `context_fields`, `context_routed` and `context_keywords`
+explain its use without copying the frame into decision telemetry.
+
+Episode version 2 adds `before`: up to three preceding typed user turns with
+`text` and `source_id`. The builder uses only prepared training rows; no later
+addition contributes to retrieval features. With invocation context, matching
+uses the historical seed and its preceding context, and generic words alone
+cannot import an unrelated task. Version-1 episodes still load. Rebuilding
+episodes is an archived, model-hashed revision.
+
+`preferences learn --pairs <frozen-pairs.json> --key <private-key.json>
+--answers <human-answers.json>` compiles a completed comparison into a separate
+still-building candidate selected by `--home`. Activated and frozen candidates
+are refused. The pairs and preceding human context must match every frozen
+content hash exactly. All case IDs and labels must be present. Reasons are
+unknown unless the human supplied a note; a choice does not endorse each clause.
+
+`preference_memory.json` version 1 holds `reviews` (review id, total, reviewed)
+and `pairs` (id, review id, seed, preceding string context, both briefs, outcome,
+note and content hash). Ties and neither are preserved. Optional retrieval uses
+only human seed/context words, never words occurring only in an assistant brief.
+It emits at most two decisive contrasts by default, with provenance and a clear
+non-authority label. Whole contrasts are trimmed; the finish line is not clipped
+off an approved brief. Malformed optional memory produces a warning and ordinary
+selection continues. `preference_pairs` and `preference_warning` explain the use.
+The artifact participates in model hashing, archival and the manifest. It is
+private and may contain the original sensitive context from the review.
+
+## 13. Prospective foresight and retrospective replay
+
+`foresight record` accepts JSON with `seed`, `source_ref`, and `predictions`;
+an optional `decision_id` links the ordinary read. Each prediction has `text`,
+optional source `support` and S/L/G `confidence`. It records the current UTC
+time, seed hash, model hash, runtime hash, prediction IDs and a payload hash in
+private `telemetry/forecasts.jsonl`. It accepts no caller timestamp or future
+turn fields. An empty list records abstention. Registration is not a success.
+
+`foresight observe` needs the forecast id, explicit `reviewer: human`, actual
+later `source_ref`, timezone-aware `observed_at`, and labels per prediction
+(`wanted`, `unwanted`, `unresolved`). The observed event must be after the
+registration and no later than now. Altered forecasts cannot be scored. Labels
+append to `forecast-outcomes.jsonl`; the newest explicit label wins.
+`foresight report` measures wanted predictions over wanted plus unwanted labels.
+Pending and unresolved remain unknown. It does not estimate recall or infer
+acceptance from silence.
+
+`foresight replay --after <UTC timestamp> --out <private-directory>` freezes
+retrospective inputs and reveals in separate files. Training sessions are
+excluded when a split exists; `--exclude-sessions` adds a JSON list, such as
+consumed review sessions. Long exact prompt copies exclude mirrored threads
+with different source IDs. `inputs.json` contains only the seed and preceding
+typed turns; `reveals.json` holds actual later substantive user turns. Source
+references, timestamps and byte hashes bind both packets. Conflicting source
+identities or overwriting a different frozen packet are refused. A small corpus
+produces a small reported count, never padding. Replay is not prospective proof,
+and a later request is not automatically something already intended earlier.

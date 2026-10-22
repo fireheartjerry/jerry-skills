@@ -10,7 +10,7 @@ a `SKILL.md`.
 
 | Skill | What it does |
 |---|---|
-| [`mind-reading`](skills/mind-reading) | Builds a model of you from your own Claude Code and Codex transcripts, then expands a few typed words into the full brief you meant, tags each inference by evidence, and acts on it. |
+| [`mind-reading`](skills/mind-reading) | Infers the goal behind a short request, retrieves relevant personal history and actual human choices, anticipates missing requirements, and follows through. |
 | [`high-agency`](skills/high-agency) | Carries a task from intent to a verified result: infers what done means, proceeds on reversible assumptions, keeps consent boundaries, and closes the loop on long-running work. |
 | [`iterative-improvement`](skills/iterative-improvement) | Turns "make this better" into weighted criteria, then runs hostile review, triage, fixes and isolated scoring until the score stops moving. |
 | [`agent-sessions`](skills/agent-sessions) | Runs Claude, Codex or Gemini child sessions with results on disk: parallel fan-out, verify gates, budgets, cross-engine judging, best-of-N, worktrees, resume after reboot. |
@@ -55,11 +55,19 @@ Requirements by skill: `python3` (3.8 or newer) for the scripts; `tmux` plus the
 
 You type **"add the migration"**. Your agent remembers that you care about a rollback
 path, existing rows and offline use, because you have actually said so before.
-`mind-reading` turns that short request into a reviewable brief, shows where each
-inference came from, then acts within the authorization it already has.
+`mind-reading` connects the request to the current goal, anticipates what you
+would otherwise have to add, and acts within the authorization it already has.
 
 The useful part is what you did not type again: your constraints, scope, quality bar
-and expected follow-through. It is personal evidence, not a generic longer prompt.
+and expected follow-through. Current context makes a terse "ready" meaningful;
+chosen-versus-rejected briefs teach the agent how you actually chose. Explicit
+invocations show a reviewable brief. With the personal always-on block installed,
+underspecified ordinary requests can use the same reasoning without a magic phrase.
+
+The runtime asks what should be true when you return and what you would object
+to first. Optional timestamped forecasts let you compare those predictions with
+later human feedback. Replay keeps later messages separate from generation input;
+missing outcomes remain unknown.
 
 **Try it without importing anything:** follow the
 [quickstart](skills/mind-reading/references/quickstart.md) for an offline fictional

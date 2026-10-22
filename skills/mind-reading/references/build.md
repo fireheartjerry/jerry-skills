@@ -197,6 +197,27 @@ limitations before extrapolating to live use.
 
 ## 5. Activate deliberately, then track corrections
 
+### Learn completed human choices in a candidate
+
+Keep the exact `--pairs` JSON used to build the blind page. After the human
+finishes the review, a separate still-building candidate can learn the actual
+chosen-versus-other briefs:
+
+```bash
+MR --home ~/.local/share/mind-reading-candidate preferences learn \
+  --pairs '<frozen-pairs.json>' --key '<private preference-key.json>' \
+  --answers '<human answers.json>'
+```
+
+This validates every content hash and label, archives the previous model and
+updates its index and manifest. It refuses an activated or frozen model. Ties and
+neither stay distinct; the reason for a choice is not invented. The runtime
+retrieves relevant contrasts as historical examples, not per-clause approval or
+new authority. The completed review becomes development feedback for the next
+candidate, so it cannot also prove that candidate is better.
+
+### Activate the reviewed version
+
 A candidate does not activate itself. After reviewing it, explicitly choose the
 model home in the agent environment. For example, to use the reviewed candidate:
 
