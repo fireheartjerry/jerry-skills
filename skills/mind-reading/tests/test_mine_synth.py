@@ -48,8 +48,10 @@ class MineSynthTests(unittest.TestCase):
         c = consolidate(self.paths, self.run_id, log=helpers.quiet)
         self.assertEqual(c["chunks"], 2)  # distinct chunks, not lens files
         self.assertEqual(c["session_stats"]["sessions_read"], 6 + 6)  # once per chunk, not once per lens (both chunks are the canned chunk-00)
-        # 2 per chunk (one trait, one unsaid default): the copies the followthrough lens reported are merged in
-        self.assertEqual(len(c["project_facts"]), 4)
+        # 2 per chunk (one trait, one unsaid default): the copies the followthrough lens reported are merged in; plus one
+        # project-scoped lesson, merged across the two chunks
+        self.assertEqual(len(c["project_facts"]), 5)
+        self.assertEqual(sum(1 for f in c["project_facts"] if f.get("kind") == "lesson"), 1)
         self.assertTrue(all(t["scope"] == "project" for t in c["project_facts"]))
         for layer, traits in c["traits"].items():
             for t in traits:
@@ -89,7 +91,8 @@ class MineSynthTests(unittest.TestCase):
         self.assertEqual(m["split_id"], read_json(paths.split)["split_id"])
         idx = read_json(paths.index)
         self.assertEqual(len(idx["groups"]), 8)
-        self.assertEqual(len(idx["examples"]), 20)
+        self.assertEqual(len(idx["examples"]), 22)  # 20 plus the two upgrade pairs
+        self.assertEqual([g["id"] for g in idx["lessons"]], ["W1", "W2", "W3"])
         light = paths.light.read_text(encoding="utf-8")
         self.assertTrue(light.startswith("# Alex: how to read Alex's prompts"))
         self.assertIn("Scope:", light)

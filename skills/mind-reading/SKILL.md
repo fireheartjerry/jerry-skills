@@ -9,7 +9,7 @@ description: >
   invocation phrase appears as an instruction: "read my mind", "mind-read this",
   "/mind-reading" (Claude Code) or "$mind-reading" (Codex); the rest is the seed.
   A quoted or reported phrase does not fire it.
-metadata: {author: "Jerry Yuze Li (https://github.com/fireheartjerry)", version: 2.3.0, license: MIT}
+metadata: {author: "Jerry Yuze Li (https://github.com/fireheartjerry)", version: 2.4.0, license: MIT}
 ---
 
 # Mind reading
@@ -41,7 +41,7 @@ The model lives in `$MIND_READING_HOME/model/` (default `~/.local/share/mind-rea
    ```
 
    Pass `--no-light` when the always-on block is already in context: look for a line starting `Precedence: the harness's rules` (the block's footer) or the `<!-- BEGIN mind-reading` marker in CLAUDE.md or AGENTS.md. Pass `--mode plan` when the mode is plan. Exit 4 with "no model" means there is no model: go to "No model yet" below. A header that says `legacy model` means the model predates the index: the slice already holds every example and the matching groups; use it as is. Any other failure: continue without the slice. Whatever happens here, none of it is mentioned in the reply.
-2. Read the slice. It holds `corrections.md` (later lines win; a `kind: drop` line disables the matching model sentence wherever it appears), `grants.md` (the user's verbatim standing authorizations, section 5), the reading notes and Standing rules of `profile.md`, up to 4 Unsaid-defaults groups, the vocabulary present in the seed, and up to 6 examples with the best match last. A seed spanning several kinds of request widens the slice on its own. Without the scripts, select by hand from `index.json` with the algorithm in model-format.md section 5.
+2. Read the slice. It holds `corrections.md` (later lines win; a `kind: drop` line disables the matching model sentence wherever it appears), `grants.md` (the user's verbatim standing authorizations, section 5), the reading notes and Standing rules of `profile.md`, up to 4 Unsaid-defaults groups, up to 2 lesson groups (`What works and what doesn't`, section 3a), the vocabulary present in the seed, and up to 6 examples with the best match last. A seed spanning several kinds of request widens the slice on its own. Without the scripts, select by hand from `index.json` with the algorithm in model-format.md section 5.
 3. Project memory and instructions: CLAUDE.md, AGENTS.md, MEMORY.md and the linked files the seed touches. Then the live conversation: the active goal, the task list, the last report, what is running, open questions, anything pasted or attached.
 4. Never read `profile.md` or `examples.md` whole by default; plan mode and multi-kind seeds raise the slice to 6 groups and 10 examples, nothing else does. Never open `$MIND_READING_HOME/eval/`: it is held out for testing the model.
 
@@ -55,6 +55,12 @@ Write as the user at their best: first person, direct, clean (no typos, no fille
 6. Reporting: the result first, in their timezone, verified kept apart from unproven.
 
 Size it to the seed, not to a word count: a status ping is three to six sentences; a task is a dense paragraph or two; a plan is as long as the plan needs. Cut adjectives and restatement, never constraints, scope or follow-through. Add only what the model or the context supports: no generic best practice, and no restraint the model does not hold ("don't push", "keep every feature", "fresh branch") unless a standing rule says so. A held item is a question under Held, never a ban inside the prompt ("no messages to anyone"): the user may want exactly that next. Nothing about this skill's own mechanics appears in the prompt, the Held list or the actions: no commands, slices, indexes, model files, tag legends or logging steps.
+
+## 3a. Lessons: take the better way
+Lessons are what the user's own history shows about outcomes: what was done, how it turned out by their later words, and the better way. After decoding the seed, check the lessons in the slice.
+- The seed asks for an approach a matching lesson shows is worse for the same goal, and its literal words do not insist on it: write the better way into the prompt, tag that sentence with the lesson's strength and id (`[S:W2]` strong, `[L:W2]` moderate, `[G:W2]` weak, which follows the `[G]` rules), and put one plain line under the prompt: `Changed: <the literal ask> -> <the better way>, because <the evidence, dated>.`
+- The literal words insist ("I know, deploy to prod anyway", "do it my way"): follow them, and add one line `Lesson: <what the history shows>` instead.
+- A lesson changes how the work is done, never what may be done without asking: it never lifts a hold, never stands in for a grant, never beats a correction or newest words that insist, and never adds an outward-facing, destructive, spend or permission step. Format and rules: model-format.md section 2a.
 
 ## 4. Tag each inferred sentence by its evidence
 - `[S]` stated: a standing rule, a `[strong]` trait, a correction line, a fact from project memory, or something the conversation says now. Applied. An action covered by a grant carries the grant id: `[S:G2]`.
@@ -70,6 +76,7 @@ Reading: <one line: what they want and why>
 
 > <the full prompt, with tags>
 
+Changed: <only when a lesson upgraded the ask (section 3a): what changed and why>
 Held: <only if something is held: numbered, each with your recommended default>
 ```
 
@@ -80,12 +87,12 @@ Held: <only if something is held: numbered, each with your recommended default>
 - `discuss`: the action is the discussion, opinionated, with numbered options and a recommendation. Nothing changed, nothing spent.
 - `status`: report in the user's format, then continue unblocked work.
 - `hold`: stop the named work, confirm in one line, touch nothing else it depends on.
-- The user's newest words beat the model. When the seed conflicts with a model line or a grant, follow the seed and note the conflict in one line.
+- The user's newest words beat the model. When the seed conflicts with a model line or a grant, follow the seed and note the conflict in one line. The one exception is the approach a lesson shows is worse (section 3a), and only while the seed does not insist on it.
 - After the reply, record the decision silently (counts and held items only; the CLI hashes the seed and never stores it; field meanings in model-format.md section 7). It is bookkeeping, not a step the user sees:
 
   ```
   MR log-decision <<'JSON'
-  {"seed": "<the seed>", "mode": "execute", "s": 5, "l": 3, "g": 2, "held": ["<held item>"], "groups": ["A", "E"], "examples": [3, 7], "grants": ["G1"], "chars": 6900}
+  {"seed": "<the seed>", "mode": "execute", "s": 5, "l": 3, "g": 2, "held": ["<held item>"], "groups": ["A", "E"], "examples": [3, 7], "grants": ["G1"], "lessons": ["W2"], "upgrades": 1, "chars": 6900}
   JSON
   ```
 
@@ -127,6 +134,6 @@ Held:
 Then the agent starts on the fix in the same turn, reports the count of failed exports when it has it so the user can answer question 1, and logs the decision without mentioning it.
 
 ## Files
-- [references/model-format.md](references/model-format.md): the model files, grants.md, the index, the selection algorithm, the corrections and decisions formats.
+- [references/model-format.md](references/model-format.md): the model files, grants.md, lessons, the index, the selection algorithm, the corrections and decisions formats.
 - [references/examples-template.md](references/examples-template.md): synthetic seed-to-prompt pairs in the shipped format; the no-model fallback for shape.
 - [references/build.md](references/build.md): building, evaluating and refreshing a model from your own transcripts, with costs and the privacy steps.

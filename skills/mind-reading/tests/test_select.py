@@ -161,10 +161,10 @@ class SelectTests(unittest.TestCase):
         _, d2 = _select.select_slice(legacy, "deploying the release", self.sel)
         self.assertIn("F", d2["groups"])  # "Shipping: git, releases, deploys" matched through releases/release and deploys/deploying
         text, d3 = _select.select_slice(legacy, "fix the export button", dict(self.sel, initiative_budget_chars=9000))
-        self.assertLess(len(d3["examples"]), 20)
-        self.assertRegex(text.splitlines()[0], r"legacy model, no index: \d+ of 20 examples loaded, the budget trimmed the rest")
+        self.assertLess(len(d3["examples"]), 22)
+        self.assertRegex(text.splitlines()[0], r"legacy model, no index: \d+ of 22 examples loaded, the budget trimmed the rest")
         text4, d4 = _select.select_slice(legacy, "fix the export button", self.sel)
-        self.assertEqual(len(d4["examples"]), 20)
+        self.assertEqual(len(d4["examples"]), 22)
         self.assertIn("every example loaded", text4.splitlines()[0])
 
     def test_legacy_model_without_index_reads_every_example(self):
@@ -182,7 +182,7 @@ class SelectTests(unittest.TestCase):
         text, d = _select.select_slice(legacy, "fix the export button", self.sel)
         self.assertTrue(d["legacy"])
         self.assertTrue(text.startswith("<!-- mind-reading slice (legacy model, no index: every example loaded)"))
-        self.assertEqual(len(d["examples"]), 20)
+        self.assertEqual(len(d["examples"]), 22)
         self.assertEqual(d["examples"][-1], 5)  # the export example still scores highest by seed overlap
         self.assertEqual(d["groups"], ["A"])  # no When: lines: the title words stand in, and "fix" hits group A's title
         _, d2 = _select.select_slice(legacy, "there is a bug in the reports", self.sel)

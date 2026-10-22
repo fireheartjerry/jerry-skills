@@ -394,6 +394,167 @@
     }
    }
   },
+  "lessons": {
+   "type": "array",
+   "maxItems": 30,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "request_kind",
+     "situation",
+     "pattern",
+     "outcome",
+     "outcome_detail",
+     "better_alternative",
+     "signals",
+     "cost",
+     "scope",
+     "strength",
+     "count",
+     "adopted",
+     "evidence"
+    ],
+    "properties": {
+     "request_kind": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+     },
+     "situation": {
+      "type": "string",
+      "maxLength": 200
+     },
+     "pattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+     },
+     "outcome": {
+      "type": "string",
+      "enum": [
+       "bad",
+       "good"
+      ]
+     },
+     "outcome_detail": {
+      "type": "string",
+      "maxLength": 240
+     },
+     "better_alternative": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+     },
+     "signals": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+       "type": "string",
+       "enum": [
+        "rework",
+        "repeated_failure",
+        "correction",
+        "wasted_time",
+        "wasted_money",
+        "reverted",
+        "frustration",
+        "praise",
+        "reuse"
+       ]
+      }
+     },
+     "cost": {
+      "type": "string",
+      "enum": [
+       "low",
+       "medium",
+       "high"
+      ]
+     },
+     "scope": {
+      "type": "string",
+      "enum": [
+       "person",
+       "project"
+      ]
+     },
+     "strength": {
+      "type": "string",
+      "enum": [
+       "strong",
+       "moderate",
+       "weak"
+      ]
+     },
+     "count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+     },
+     "adopted": {
+      "type": "string",
+      "enum": [
+       "yes",
+       "no",
+       "unclear"
+      ]
+     },
+     "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "quote",
+        "time",
+        "session",
+        "origin",
+        "role"
+       ],
+       "properties": {
+        "quote": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 200
+        },
+        "time": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "maxLength": 40
+        },
+        "session": {
+         "type": "string",
+         "maxLength": 120
+        },
+        "origin": {
+         "type": "string",
+         "enum": [
+          "typed",
+          "drafted",
+          "pasted",
+          "question_answer",
+          "goal_reminder",
+          "agent_context"
+         ]
+        },
+        "role": {
+         "type": "string",
+         "enum": [
+          "user",
+          "agent_context"
+         ]
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "session_stats": {
    "type": "object",
    "additionalProperties": false,

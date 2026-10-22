@@ -224,7 +224,8 @@ def lint_corrections(text, path="corrections.md"):
 
 
 def lint_model(paths, cfg):
-    """{'forbidden': [...], 'other': [...]} over light.md, profile.md, examples.md, grants.md and corrections.md."""
+    """{'forbidden': [...], 'other': [...]} over light.md, profile.md (its lessons included), examples.md, grants.md and
+    corrections.md."""
     out = {"forbidden": [], "other": []}
     people = _scrub.compile_people(cfg.get("people") or {})
     folded_drops = _folded_drops(paths)
@@ -237,8 +238,18 @@ def lint_model(paths, cfg):
         if not p.exists():
             continue
         text = p.read_text(encoding="utf-8")
-        if name != "grants.md":
-            out["forbidden"] += forbidden_hits(text, name, evidence_quotes_exempt=(name == "profile.md"))
+        if name == "profile.md":
+            # lessons: what went wrong in a bad lesson is a negative example, not an instruction; the rest of every
+            # lesson is checked here and again for anything that reads as an authorization
+            from . import lessons as _lessons
+            out["forbidden"] += forbidden_hits(_lessons.lint_view(text), name, evidence_quotes_exempt=True)
+            out["forbidden"] += _lessons.lesson_hits(text, name)
+        elif name != "grants.md":
+            out["forbidden"] += forbidden_hits(text, name)
+        if name == "examples.md":
+            # an upgrade pair takes a lesson's better way: it can never authorize an action either
+            from . import lessons as _lessons
+            out["forbidden"] += _lessons.upgrade_hits(text, name)
         counts = {}
         for kind, snippet in _scrub.detect(text, people):
             counts[kind] = counts.get(kind, 0) + 1

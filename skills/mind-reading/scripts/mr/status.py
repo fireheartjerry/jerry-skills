@@ -8,7 +8,7 @@ from pathlib import Path
 from . import refresh as _refresh
 from .config import expand, read_json, read_jsonl
 from .corpus import load_corpus, sources_gone
-from .mine import DEFAULT_LENSES, latest_mined_run, mined_chunks, resolve_lenses
+from .mine import DEFAULT_LENSES, context_lenses, latest_mined_run, mined_chunks, resolve_lenses
 from .prep import chunk_files
 
 UNKNOWN_TAG_BLOCK_FRACTION = 0.01
@@ -82,9 +82,16 @@ def calibration(paths):
     modes = {}
     for r in rows:
         modes[r.get("mode", "?")] = modes.get(r.get("mode", "?"), 0) + 1
+    upgrades = 0
+    for r in rows:
+        try:
+            upgrades += int(r.get("upgrades") or 0)
+        except (TypeError, ValueError):
+            continue
     return {"invocations": n, "mean_s": round(s / n, 2), "mean_l": round(l / n, 2), "mean_g": round(g / n, 2),
             "held_rate": round(held / n, 3), "corrections_per_100": round(100.0 * corr / n, 1), "modes": modes,
-            "mean_chars": round(sum(int(r.get("chars") or 0) for r in rows) / n)}
+            "mean_chars": round(sum(int(r.get("chars") or 0) for r in rows) / n),
+            "upgrades_per_100": round(100.0 * upgrades / n, 1), "lessons_in_slice_rate": round(sum(1 for r in rows if r.get("lessons")) / n, 3)}
 
 
 def gather(paths, cfg):
@@ -152,6 +159,10 @@ def gather(paths, cfg):
         if index_is_stale(paths.model):
             st["warnings"].append("index.json is stale (a model file changed after `synthesize index`): select rebuilds it in "
                                   "memory on every call; run `synthesize index manifest`")
+    st["lessons"] = {"groups": 0, "lessons": 0}
+    idx = read_json(paths.index) if st["model"] and paths.index.exists() else None
+    if isinstance(idx, dict):
+        st["lessons"] = {"groups": len(idx.get("lessons") or []), "lessons": sum(int(g.get("count") or 0) for g in idx.get("lessons") or [])}
     st["grants"] = {"total": 0, "active": 0, "invalid": 0, "revoked": 0, "errors": []}
     if paths.grants.exists():
         from . import grants as _grants
@@ -214,15 +225,20 @@ def _lenses(cfg):
 
 def estimate(paths, cfg, st):
     """Token estimates derived from what the prompts carry: chunk characters divided by CHARS_PER_TOKEN plus the prompt
-    text and the model's output. Mining makes one call per chunk per lens (six by default, one with --single-pass),
+    text and the model's output. Mining makes one call per chunk per lens (seven by default, one with --single-pass),
     and every lens rereads the whole chunk, so the mine figures scale with the lens count. They are estimates; the
     run's calls.jsonl records what was spent."""
     prep_report = read_json(paths.prep_report, {}) or {}
     chunk_chars = prep_report.get("chunk_chars") or []
     chunks = st["chunks"] or max(1, st["corpus"]["records"] // 400)
     total_chunk_chars = sum(chunk_chars) if chunk_chars else chunks * cfg["prep"]["chunk_chars"]
-    n_lenses = len(_lenses(cfg))
-    mine_in = (total_chunk_chars // CHARS_PER_TOKEN + chunks * 2500) * n_lenses  # chunk, prompt and schema summary, per lens
+    user_chars = sum(prep_report.get("chunk_user_chars") or []) or total_chunk_chars
+    ctx_chars = max(0, total_chunk_chars - user_chars)
+    lenses = _lenses(cfg)
+    n_lenses = len(lenses)
+    n_ctx = len([l for l in lenses if l in set(context_lenses(cfg))])
+    # chunk, prompt and schema summary, per lens; only the agent-context lenses read the agent context
+    mine_in = (user_chars // CHARS_PER_TOKEN + chunks * 2500) * n_lenses + (ctx_chars // CHARS_PER_TOKEN) * n_ctx
     mine_out = chunks * 6000 * n_lenses
     synth_budget = cfg["synth"]["budget_chars"] // CHARS_PER_TOKEN
     synth = [synth_budget // 3 + 40000, synth_budget + 80000]  # consolidated JSON plus the three outputs
@@ -272,6 +288,10 @@ def format_text(st, est=None):
             out.append("model %s built %s, corrections folded %d" % (m["model_hash"], m["built"], m["corrections_folded"]))
             for n, f in m["files"].items():
                 out.append("  %s: %d bytes (~%d tokens)" % (n, f["bytes"], f["tokens_est"]))
+    if st["model"] and not st["model"].get("legacy"):
+        ls = st.get("lessons") or {}
+        out.append("lessons: %d in %d group(s)%s" % (ls.get("lessons", 0), ls.get("groups", 0),
+                                                     "" if ls.get("lessons") else " (none yet: mine with the lessons lens, then synthesize)"))
     g = st.get("grants") or {}
     out.append("grants: %d total, %d active%s%s" % (g.get("total", 0), g.get("active", 0),
                                                     (", %d revoked" % g["revoked"]) if g.get("revoked") else "",
@@ -285,8 +305,9 @@ def format_text(st, est=None):
         out.append("  unparseable line %d: %s" % (b["line"], b["text"][:80]))
     cal = st["calibration"]
     if cal["invocations"]:
-        out.append("calibration: %d invocations, mean S/L/G %s/%s/%s, held rate %s, corrections per 100: %s, mean chars %s" % (
-            cal["invocations"], cal["mean_s"], cal["mean_l"], cal["mean_g"], cal["held_rate"], cal["corrections_per_100"], cal["mean_chars"]))
+        out.append("calibration: %d invocations, mean S/L/G %s/%s/%s, held rate %s, corrections per 100: %s, upgrades per 100: %s, mean chars %s" % (
+            cal["invocations"], cal["mean_s"], cal["mean_l"], cal["mean_g"], cal["held_rate"], cal["corrections_per_100"],
+            cal["upgrades_per_100"], cal["mean_chars"]))
     else:
         out.append("calibration: no runtime decisions recorded yet")
     for t, s in st["drift"]:

@@ -118,7 +118,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertRegex(r.stdout, r"mind_reading\.py mine --run \S+ --engine print --collect")
         r = helpers.run_cli(home, "mine", "--engine", "print", "--collect", "--run", "latest")
         self.assertEqual(r.returncode, 0)
-        self.assertIn("pending 12", r.stdout)  # 2 chunks x 6 lenses
+        self.assertIn("pending 14", r.stdout)  # 2 chunks x 7 lenses
 
     def test_budget_stop_is_visible_and_exits_3(self):
         home = helpers.tmpdir() / "home-budget"
@@ -126,13 +126,13 @@ class CliSmokeTests(unittest.TestCase):
         r = helpers.run_cli(home, "mine", "--engine", "fake", "--fake-dir", helpers.FAKE, "--max-calls", "1", "--concurrency", "1")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("ok 1,", r.stdout)
-        self.assertIn("stopped 11", r.stdout)  # 2 chunks x 6 lenses, one call allowed
-        self.assertIn("budget stop: 11 unit(s) not attempted", r.stdout)
+        self.assertIn("stopped 13", r.stdout)  # 2 chunks x 7 lenses, one call allowed
+        self.assertIn("budget stop: 13 unit(s) not attempted", r.stdout)
         self.assertRegex(r.stdout, r"resume with: mind_reading\.py mine --run \S+")
         r = helpers.run_cli(home, "mine", "--engine", "fake", "--fake-dir", helpers.FAKE, "--run", "latest")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("skipped 1,", r.stdout)
-        self.assertIn("ok 11,", r.stdout)
+        self.assertIn("ok 13,", r.stdout)
 
     def test_select_seed_file_and_no_model_exit(self):
         home = helpers.tmpdir() / "home-select"
@@ -157,7 +157,7 @@ class CliSmokeTests(unittest.TestCase):
         d = json.loads(r.stdout)
         self.assertTrue(d["decision"]["legacy"])
         self.assertIn("legacy model", d["slice"].splitlines()[0])
-        self.assertEqual(len(d["decision"]["examples"]), 20)
+        self.assertEqual(len(d["decision"]["examples"]), 22)
 
     def test_log_decision_and_correct_via_stdin(self):
         home = helpers.tmpdir() / "home-log"

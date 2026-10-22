@@ -25,7 +25,7 @@ class EvalFlowTests(unittest.TestCase):
         self.assertEqual(report["sessions"], n)
         self.assertEqual(report["requirements"], n * 3)
         self.assertEqual(report["arms"], ["none", "light", "full"])
-        self.assertEqual(report["rubric_version"], 3)
+        self.assertEqual(report["rubric_version"], 4)
         self.assertTrue((self.results / "report.md").exists())
         self.assertIn("No arm saw project memory", report["limitation"])
 

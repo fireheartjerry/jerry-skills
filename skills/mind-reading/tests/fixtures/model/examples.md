@@ -117,3 +117,17 @@ Tags: add, build, ui
 Situation: a module with weak tests.
 Tags: build, fix
 > Refactor the cart module for clarity without behaviour changes, keep the tests green, add tests where coverage is thin, and report what moved and why.
+
+## Upgrades
+
+### 21. rewrite the checkout module
+Situation: a drafted mandate asks for a large change (lesson W1).
+Tags: upgrade, w1, implement a mandate
+> Implement the mandate in small steps: start with the smallest piece, write its tests first, keep the suite green after each step, and report what landed and what is next.
+Changed: rewrite the module in one pass -> start with the smallest piece and tests first, because the one-pass rewrite failed and was redone in steps (01-30) (W1).
+
+### 22. deploy it to prod
+Situation: a release is ready (lesson W3).
+Tags: upgrade, w3, deploy
+> Deploy to staging first, smoke-test the main flows there and report the URL. Production only after I have looked.
+Changed: straight to production -> staging first, then production after a look, because the last direct production deploy was rolled back (01-05) (W3).

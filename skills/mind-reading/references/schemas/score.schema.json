@@ -5,7 +5,9 @@
  "additionalProperties": false,
  "required": [
   "items",
-  "contradictions"
+  "contradictions",
+  "upgrades",
+  "wrong_upgrades"
  ],
  "properties": {
   "items": {
@@ -34,6 +36,54 @@
    }
   },
   "contradictions": {
+   "type": "array",
+   "maxItems": 10,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "text",
+     "requirement_id"
+    ],
+    "properties": {
+     "text": {
+      "type": "string",
+      "maxLength": 200
+     },
+     "requirement_id": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     }
+    }
+   }
+  },
+  "upgrades": {
+   "type": "array",
+   "maxItems": 10,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "text",
+     "requirement_id"
+    ],
+    "properties": {
+     "text": {
+      "type": "string",
+      "maxLength": 200
+     },
+     "requirement_id": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     }
+    }
+   }
+  },
+  "wrong_upgrades": {
    "type": "array",
    "maxItems": 10,
    "items": {

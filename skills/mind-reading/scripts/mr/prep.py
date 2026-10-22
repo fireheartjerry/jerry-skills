@@ -1,19 +1,32 @@
 """prep: normalize, dedup, twin detection, temporal split, leak removal, chunks, seeds and truth.
 
-Deterministic on the corpus and config. Writes derived/ and eval/<split_id>/ (0700)."""
+Deterministic on the corpus and config. Writes derived/ and eval/<split_id>/ (0700).
+
+Agent context (a message's `agent_context` field) rides with its message: twins, dedup and leaks act on the user's
+text only, a dropped message takes its context with it, and a context that quotes a held-out message is stripped
+(remove_leaks). In chunks it is compact, capped per message and per session part, and never counted toward the chunk
+size, so it cannot crowd out the user's own text. Seeds and truth never carry it."""
 import datetime as _dt
 import hashlib
 import json
 import math
 import os
+import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
 
+from . import agent_context as _ac
 from .config import read_json, write_json, write_jsonl
 from .corpus import load_corpus, normalize, now_iso
 
 TWIN_MIN_NORM_CHARS = 20
+# a held-out message counts as quoted in an agent context when any run of this many of its words appears there
+CONTEXT_LEAK_WORDS = 6
+# user text that reacts to the agent's last turn: its context is kept first when the per-part budget is tight
+REACTION_CUE = re.compile(
+    r"(?i)(\bwhy\b|\bagain\b|\bbroke|\bbroken\b|\bwrong\b|\brevert|\bundo\b|\bstill\b|\bwtf\b|\bugh\b|\bnot that\b|"
+    r"\bwasted?\b|\bstop\b|\bgood\b|\bgreat\b|\bnice\b|\bperfect\b|\bworks\b|\blove\b|\bthx\b|\bthanks\b|^no\b)")
 
 
 class PrepRefused(Exception):
@@ -247,6 +260,29 @@ def _split_frozen(sessions, p, frozen):
             "frozen": True}
 
 
+def _shingles(norm, k=CONTEXT_LEAK_WORDS):
+    words = norm.split()
+    return {" ".join(words[i:i + k]) for i in range(len(words) - k + 1)}
+
+
+def strip_context_leaks(sessions, banned_norms):
+    """Drop the agent context of a message when it quotes any held-out message (a run of CONTEXT_LEAK_WORDS of its
+    words). Returns the number stripped."""
+    banned = set()
+    for n in banned_norms:
+        banned |= _shingles(n)
+    if not banned:
+        return 0
+    stripped = 0
+    for s in sessions:
+        for m in s["messages"]:
+            ctx = m.get("agent_context")
+            if isinstance(ctx, dict) and ctx.get("head") and _shingles(normalize(ctx["head"])) & banned:
+                m["agent_context"] = None
+                stripped += 1
+    return stripped
+
+
 def remove_leaks(split, p):
     min_chars = p["leak_min_chars"]
 
@@ -272,15 +308,20 @@ def remove_leaks(split, p):
         exempt += sum(1 for m in kept if m["text_norm"] in test_short)
         s["dropped_leak"] = len(s["messages"]) - len(kept)
         s["messages"] = kept
+    ctx_stripped = strip_context_leaks(split["dev"], test_long) + strip_context_leaks(split["train"], banned)
     return {"leak_removed_train": removed_train, "leak_removed_dev": removed_dev, "leak_exempt_short": exempt,
-            "leak_min_chars": min_chars,
+            "leak_min_chars": min_chars, "agent_context_leak_stripped": ctx_stripped,
             "leak_exemption": "texts under leak_min_chars normalized characters may appear in every split (generic seeds)"}
 
 
 def _msg_out(m):
-    """A message as stored in derived/sessions.jsonl: full text, real time, per-message reliability."""
-    return {"time": m.get("time"), "origin": m.get("origin", "typed"), "text": m.get("text", ""),
-            "time_reliable": bool(m.get("time_reliable", True))}
+    """A message as stored in derived/sessions.jsonl: full text, real time, per-message reliability, and the agent
+    context when there is one."""
+    out = {"time": m.get("time"), "origin": m.get("origin", "typed"), "text": m.get("text", ""),
+           "time_reliable": bool(m.get("time_reliable", True))}
+    if m.get("agent_context"):
+        out["agent_context"] = m["agent_context"]
+    return out
 
 
 NONTYPED_ORIGINS = ("drafted", "pasted", "goal_reminder")
@@ -303,14 +344,88 @@ def chunk_msg(m, p, omitted=None):
     return {"time": m.get("time") if m.get("time_reliable", True) else None, "origin": origin, "text": text}
 
 
-def _block(s, part, n_parts, msgs, first_messages, p, omitted=None):
-    b = {"source": s["source"], "session": s["session"], "part": "%d/%d" % (part, n_parts), "project": s["project"],
-         "start": s["start_iso"] if s["time_reliable"] else None, "time_reliable": s["time_reliable"],
-         "first_messages": first_messages if part > 1 else [], "messages": [chunk_msg(m, p, omitted) for m in msgs]}
+def chunk_context(m, p):
+    """A message's agent context as the miner sees it: {"head", "markers"} with the head cut to
+    `chunk_agent_context_chars`, or None (no context, or the cap is 0)."""
+    ctx = m.get("agent_context")
+    cap = int(p.get("chunk_agent_context_chars", 300) or 0)
+    if not isinstance(ctx, dict) or cap <= 0:
+        return None
+    h = _ac.head(ctx.get("head") or "", cap)
+    markers = [x for x in _ac.MARKERS if x in (ctx.get("markers") or [])]
+    if not h and not markers:
+        return None
+    out = {}
+    if h:
+        out["head"] = h
+    if markers:
+        out["markers"] = markers
+    return out
+
+
+def fit_context(msgs_out, ctxs, p, stats=None):
+    """Attach agent contexts to one session part within its budget: the heads together stay under
+    `chunk_agent_context_ratio` times the user's text (never less than one shortened head). Heads beside a marker come first, then heads beside a reaction
+    in the user's text, then the rest in order; over budget, the last-priority heads are shortened to
+    `chunk_agent_context_min_chars`, then dropped. Markers are always kept. Mutates msgs_out."""
+    ratio = float(p.get("chunk_agent_context_ratio", 0.5))
+    min_chars = int(p.get("chunk_agent_context_min_chars", 120))
+    # at least one short head per part, so the context beside a failure survives even next to a terse reply
+    budget = max(int(sum(len(m.get("text") or "") for m in msgs_out) * ratio), min_chars + 4)
+    order = sorted((i for i, c in enumerate(ctxs) if c), key=lambda i: (
+        0 if ctxs[i].get("markers") else 1 if REACTION_CUE.search(msgs_out[i].get("text") or "") else 2, i))
+    heads = {i: ctxs[i].get("head") or "" for i in order}
+    total = sum(len(h) for h in heads.values())
+    for i in reversed(order):
+        if total <= budget:
+            break
+        if len(heads[i]) > min_chars:
+            short = _ac.head(heads[i], min_chars)
+            total -= len(heads[i]) - len(short)
+            heads[i] = short
+    for i in reversed(order):
+        if total <= budget:
+            break
+        if heads[i]:
+            total -= len(heads[i])
+            heads[i] = ""
+            if stats is not None:
+                stats["heads_dropped"] = stats.get("heads_dropped", 0) + 1
+    for i in order:
+        c = {}
+        if heads[i]:
+            c["head"] = heads[i]
+        if ctxs[i].get("markers"):
+            c["markers"] = ctxs[i]["markers"]
+        if c:
+            msgs_out[i]["agent_context"] = c
+            if stats is not None:
+                stats["messages"] = stats.get("messages", 0) + 1
+                stats["chars"] = stats.get("chars", 0) + len(c.get("head", ""))
+                if c.get("markers"):
+                    stats["with_markers"] = stats.get("with_markers", 0) + 1
+    return msgs_out
+
+
+def without_context(block):
+    """A chunk block with every agent context removed (the user's text only)."""
+    b = dict(block)
+    b["messages"] = [{k: v for k, v in m.items() if k != "agent_context"} for m in block.get("messages", [])]
     return b
 
 
-def session_blocks(s, p, omitted=None):
+def _block(s, part, n_parts, msgs, first_messages, p, omitted=None, ctx_stats=None):
+    out = [chunk_msg(m, p, omitted) for m in msgs]
+    ctxs = [chunk_context(m, p) for m in msgs]
+    if any(ctxs):
+        fit_context(out, ctxs, p, ctx_stats)
+    b = {"source": s["source"], "session": s["session"], "part": "%d/%d" % (part, n_parts), "project": s["project"],
+         "start": s["start_iso"] if s["time_reliable"] else None, "time_reliable": s["time_reliable"],
+         "first_messages": first_messages if part > 1 else [], "messages": out}
+    return b
+
+
+def session_blocks(s, p, omitted=None, ctx_stats=None):
     msgs = s["messages"]
     if not msgs:
         return []
@@ -328,19 +443,62 @@ def session_blocks(s, p, omitted=None):
         size += k
     if cur:
         parts.append(cur)
-    return [_block(s, i + 1, len(parts), part, first_messages, p, omitted) for i, part in enumerate(parts)]
+    return [_block(s, i + 1, len(parts), part, first_messages, p, omitted, ctx_stats) for i, part in enumerate(parts)]
 
 
-def build_chunks(train, p, omitted=None):
-    chunks, cur, size = [], [], 0
+def context_chars(block):
+    """What a block's agent context adds to its JSON: heads, markers, keys and escaping."""
+    return len(json.dumps(block, ensure_ascii=False)) - len(json.dumps(without_context(block), ensure_ascii=False))
+
+
+def chunk_context_cap(p):
+    """The most agent context (counted with its JSON overhead) one chunk may carry: `chunk_agent_context_max_chars`,
+    by default `chunk_chars` x `chunk_agent_context_ratio`."""
+    cap = p.get("chunk_agent_context_max_chars")
+    if cap is None:
+        cap = int(p["chunk_chars"] * float(p.get("chunk_agent_context_ratio", 0.5)))
+    return max(0, int(cap))
+
+
+def cap_block_context(block, cap, stats=None):
+    """Drop heads from the end of one block (markers stay) until its agent context fits `cap`; then markers too, if
+    they alone pass it. Mutates and returns the block."""
+    msgs = block.get("messages", [])
+    for key in ("head", "markers"):
+        for m in reversed(msgs):
+            if context_chars(block) <= cap:
+                return block
+            ctx = m.get("agent_context")
+            if not isinstance(ctx, dict) or key not in ctx:
+                continue
+            ctx = {k: v for k, v in ctx.items() if k != key}
+            if ctx:
+                m["agent_context"] = ctx
+            else:
+                del m["agent_context"]
+            if stats is not None and key == "head":
+                stats["heads_dropped_chunk_cap"] = stats.get("heads_dropped_chunk_cap", 0) + 1
+    return block
+
+
+def build_chunks(train, p, omitted=None, ctx_stats=None):
+    """Chunks of session blocks, sized by the user's text only (agent context excluded from the count), with the agent
+    context of each chunk under chunk_context_cap: a block whose context would pass it starts a new chunk, and a block
+    that passes it alone loses its last heads. A context lens's prompt stays under chunk_chars plus that cap."""
+    cap = chunk_context_cap(p)
+    chunks, cur, size, ctx_size = [], [], 0, 0
     for s in train:
-        for b in session_blocks(s, p, omitted):
-            n = len(json.dumps(b, ensure_ascii=False)) + 1
-            if cur and size + n > p["chunk_chars"]:
+        for b in session_blocks(s, p, omitted, ctx_stats):
+            if context_chars(b) > cap:
+                cap_block_context(b, cap, ctx_stats)
+            n = len(json.dumps(without_context(b), ensure_ascii=False)) + 1
+            c = context_chars(b)
+            if cur and (size + n > p["chunk_chars"] or ctx_size + c > cap):
                 chunks.append(cur)
-                cur, size = [], 0
+                cur, size, ctx_size = [], 0, 0
             cur.append(b)
             size += n
+            ctx_size += c
     if cur:
         chunks.append(cur)
     return chunks
@@ -508,8 +666,8 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
         for sub in ("seeds", truth_name, "seeds-context", ctx_truth_name):
             if (split_dir / sub).exists():
                 shutil.rmtree(split_dir / sub)
-    omitted = {}
-    chunks = build_chunks(split["train"], p, omitted)
+    omitted, ctx_stats = {}, {}
+    chunks = build_chunks(split["train"], p, omitted, ctx_stats)
     for k, c in enumerate(chunks):
         with open(paths.chunks / ("chunk-%02d.jsonl" % k), "w", encoding="utf-8") as fh:
             for b in c:
@@ -581,6 +739,12 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
         "context_seed_rules": {"max_words": p.get("context_seed_max_words", 60), "per_session": p.get("context_seeds_per_session", 2),
                                "context_messages": p.get("context_messages", 6)},
         "chunks": len(chunks), "chunk_chars": [sum(len(json.dumps(b, ensure_ascii=False)) + 1 for b in c) for c in chunks],
+        "chunk_user_chars": [sum(len(json.dumps(without_context(b), ensure_ascii=False)) + 1 for b in c) for c in chunks],
+        "chunk_agent_context": {"messages": ctx_stats.get("messages", 0), "with_markers": ctx_stats.get("with_markers", 0),
+                                "heads_dropped_for_budget": ctx_stats.get("heads_dropped", 0),
+                                "heads_dropped_for_chunk_cap": ctx_stats.get("heads_dropped_chunk_cap", 0),
+                                "chunk_cap": chunk_context_cap(p), "head_chars": ctx_stats.get("chars", 0),
+                                "ratio": p.get("chunk_agent_context_ratio", 0.5), "head_cap": p.get("chunk_agent_context_chars", 300)},
         "chunk_chars_omitted": omitted, "chunk_caps": {"message_max_chars": p.get("chunk_message_max_chars"),
                                                        "nontyped_head_chars": p.get("chunk_nontyped_head_chars")},
         "no_twins": no_twins,

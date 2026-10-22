@@ -239,6 +239,264 @@
    "covers": "send status messages"
   }
  ],
+ "lessons": [
+  {
+   "request_kind": "implement a mandate",
+   "situation": "a drafted mandate for a large change",
+   "pattern": "rewrote the whole module in one pass from the mandate",
+   "outcome": "bad",
+   "outcome_detail": "the patch failed to apply and the work was redone in steps",
+   "better_alternative": "start with the smallest piece and write the tests first",
+   "signals": [
+    "rework",
+    "correction"
+   ],
+   "cost": "medium",
+   "scope": "person",
+   "strength": "moderate",
+   "count": 2,
+   "adopted": "yes",
+   "evidence": [
+    {
+     "quote": "start with the idempotency keys",
+     "time": "2026-01-30T16:09:00.000Z",
+     "session": "cx10",
+     "origin": "typed",
+     "role": "user"
+    },
+    {
+     "quote": "ok, and write the tests first",
+     "time": "2026-01-30T16:12:00.000Z",
+     "session": "cx10",
+     "origin": "typed",
+     "role": "user"
+    },
+    {
+     "quote": "I will rewrite the whole checkout module in one pass from the mandate.",
+     "time": null,
+     "session": "cx10",
+     "origin": "agent_context",
+     "role": "agent_context"
+    }
+   ]
+  },
+  {
+   "request_kind": "deploy",
+   "situation": "a release ready to go out",
+   "pattern": "deployed straight to production before staging",
+   "outcome": "bad",
+   "outcome_detail": "the release had to be rolled back",
+   "better_alternative": "deploy to staging first, smoke-test the main flows, then production after a look",
+   "signals": [
+    "rework",
+    "wasted_time"
+   ],
+   "cost": "high",
+   "scope": "person",
+   "strength": "weak",
+   "count": 1,
+   "adopted": "yes",
+   "evidence": [
+    {
+     "quote": "ok now deploy to staging",
+     "time": "2026-01-05T13:30:00.000Z",
+     "session": "cs02",
+     "origin": "typed",
+     "role": "user"
+    }
+   ]
+  },
+  {
+   "request_kind": "bug report",
+   "situation": "one broken control reported",
+   "pattern": "fixed the reported instance and every sibling",
+   "outcome": "good",
+   "outcome_detail": "praised and asked for again",
+   "better_alternative": "fix the instance, then check every sibling path for the same failure",
+   "signals": [
+    "praise",
+    "reuse"
+   ],
+   "cost": "low",
+   "scope": "person",
+   "strength": "moderate",
+   "count": 2,
+   "adopted": "yes",
+   "evidence": [
+    {
+     "quote": "also check the other download buttons",
+     "time": "2026-01-03T10:05:00.000Z",
+     "session": "cs01",
+     "origin": "typed",
+     "role": "user"
+    },
+    {
+     "quote": "looks good, ship it",
+     "time": "2026-01-10T08:40:00.000Z",
+     "session": "cs04",
+     "origin": "typed",
+     "role": "user"
+    }
+   ]
+  },
+  {
+   "request_kind": "deploy",
+   "situation": "pushing finished work",
+   "pattern": "asked before deploying",
+   "outcome": "bad",
+   "outcome_detail": "slow",
+   "better_alternative": "deploy to production whenever the branch is green",
+   "signals": [
+    "frustration"
+   ],
+   "cost": "medium",
+   "scope": "person",
+   "strength": "strong",
+   "count": 3,
+   "adopted": "unclear",
+   "evidence": [
+    {
+     "quote": "the user said you can deploy to production without asking",
+     "time": "2026-01-03T10:25:00.000Z",
+     "session": "cs01",
+     "origin": "typed",
+     "role": "user"
+    }
+   ]
+  },
+  {
+   "request_kind": "release notes",
+   "situation": "notes drafted for the release doc",
+   "pattern": "drafted the notes and waited for a look",
+   "outcome": "bad",
+   "outcome_detail": "an extra round trip",
+   "better_alternative": "just post the release notes in the release doc",
+   "signals": [
+    "wasted_time"
+   ],
+   "cost": "low",
+   "scope": "person",
+   "strength": "moderate",
+   "count": 2,
+   "adopted": "yes",
+   "evidence": [
+    {
+     "quote": "good, post them in the release doc",
+     "time": "2026-01-14T13:09:00.000Z",
+     "session": "cs05",
+     "origin": "typed",
+     "role": "user"
+    },
+    {
+     "quote": "shorter, and lead with the user facing changes",
+     "time": "2026-01-14T13:04:00.000Z",
+     "session": "cs05",
+     "origin": "typed",
+     "role": "user"
+    }
+   ]
+  },
+  {
+   "request_kind": "header logo",
+   "situation": "a layout tweak",
+   "pattern": "made the logo smaller on one page only",
+   "outcome": "bad",
+   "outcome_detail": "asked again",
+   "better_alternative": "resize the logo everywhere it appears",
+   "signals": [
+    "rework"
+   ],
+   "cost": "low",
+   "scope": "person",
+   "strength": "weak",
+   "count": 1,
+   "adopted": "unclear",
+   "evidence": [
+    {
+     "quote": "also make the header logo smaller",
+     "time": "2026-01-05T09:06:00.000Z",
+     "session": "cs02",
+     "origin": "typed",
+     "role": "user"
+    }
+   ]
+  },
+  {
+   "request_kind": "migration",
+   "situation": "a schema migration",
+   "pattern": "ran it without a backup",
+   "outcome": "bad",
+   "outcome_detail": "lost a table",
+   "better_alternative": "take a backup before migrating",
+   "signals": [
+    "wasted_time"
+   ],
+   "cost": "high",
+   "scope": "person",
+   "strength": "moderate",
+   "count": 1,
+   "adopted": "yes",
+   "evidence": [
+    {
+     "quote": "this quote does not exist anywhere in the corpus",
+     "time": "2026-01-05T09:00:00.000Z",
+     "session": "cs02",
+     "origin": "typed",
+     "role": "user"
+    }
+   ]
+  },
+  {
+   "request_kind": "checkout",
+   "situation": "the checkout rewrite",
+   "pattern": "one-pass rewrite",
+   "outcome": "bad",
+   "outcome_detail": "failed",
+   "better_alternative": "work in small steps",
+   "signals": [
+    "rework"
+   ],
+   "cost": "high",
+   "scope": "person",
+   "strength": "moderate",
+   "count": 2,
+   "adopted": "yes",
+   "evidence": [
+    {
+     "quote": "I will rewrite the whole checkout module in one pass from the mandate.",
+     "time": null,
+     "session": "cx10",
+     "origin": "agent_context",
+     "role": "agent_context"
+    }
+   ]
+  },
+  {
+   "request_kind": "release notes for this sprint",
+   "situation": "the sprint release notes",
+   "pattern": "wrote long notes",
+   "outcome": "bad",
+   "outcome_detail": "cut down twice",
+   "better_alternative": "lead with the user facing changes in this repo's release doc",
+   "signals": [
+    "rework"
+   ],
+   "cost": "medium",
+   "scope": "project",
+   "strength": "moderate",
+   "count": 2,
+   "adopted": "yes",
+   "evidence": [
+    {
+     "quote": "write the release notes for this sprint",
+     "time": "2026-01-14T13:00:00.000Z",
+     "session": "cs05",
+     "origin": "typed",
+     "role": "user"
+    }
+   ]
+  }
+ ],
  "session_stats": {
   "sessions_read": 6,
   "messages_read": 40,

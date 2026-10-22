@@ -254,6 +254,52 @@
      "type": "integer"
     }
    }
+  },
+  "lessons": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "title",
+     "when",
+     "lines",
+     "chars",
+     "count"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "pattern": "^W\\d+$"
+     },
+     "title": {
+      "type": "string"
+     },
+     "when": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "lines": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+       "type": "integer",
+       "minimum": 1
+      }
+     },
+     "chars": {
+      "type": "integer"
+     },
+     "count": {
+      "type": "integer",
+      "minimum": 0
+     }
+    }
+   }
   }
  }
 }

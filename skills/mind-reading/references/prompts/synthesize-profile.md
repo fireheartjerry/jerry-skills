@@ -58,7 +58,7 @@ When: keyword, keyword, keyword
 ```
 
 Rules for the structure:
-- Exactly the headings above: numbered layers 1 to 10, then `## Unsaid defaults`, then `## Vocabulary`. No other `## ` headings.
+- Exactly the headings above: numbered layers 1 to 10, then `## Unsaid defaults`, then `## Vocabulary`. No other `## ` headings. The pipeline adds a `## What works and what doesn't` section itself from verified lessons; do not write one.
 - Every `###` group under Unsaid defaults has a `When:` line with 3 to 12 lowercase keywords or short phrases, comma separated, that a seed would contain. Good keywords are the words {name} actually types for that kind of request: "keep going", "fix", "status", "push", "design", "ugly", "deploy", "message". Bad keywords are abstract nouns a seed never contains.
 - Group A is the generic build-or-fix group and comes first. Order the rest by how often the kind of request appears.
 - Bullets start with `- `. Each layer item ends with its strength tag before the quotes. No line over 600 characters. Between {synth_min_lines} and {synth_max_lines} lines in total.

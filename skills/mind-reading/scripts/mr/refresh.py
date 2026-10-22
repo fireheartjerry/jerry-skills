@@ -114,8 +114,18 @@ def fold_corrections(paths, cfg, kind, run_id=None, collect=False, fake_dir=None
             raise RefreshError("refresh call stopped: %s" % res.get("budget_note", "budget reached"))
         data = read_json(unit.out_path)
         from .synthesize import archive_previous
+        from . import lessons as _lessons
+        old_section = _lessons.section_of(paths.profile.read_text(encoding="utf-8"))
+        new_profile = _nl(data["profile_md"])
+        if old_section and not _lessons.section_of(new_profile):
+            # the engine dropped the whole lessons section: keep the one that was there (a `drop` correction removes
+            # single lessons, never the section)
+            drops = [e["meant"].lower() for e in global_lines if e["kind"] == "drop" and e.get("meant")]
+            old_section = [l for l in old_section if not (l.startswith("- ") and any(d in l.lower() for d in drops))]
+            new_profile = _lessons.insert_section(new_profile, old_section)
+            log("refresh: kept the lessons section the engine left out")
         archive_previous(paths, log)
-        paths.profile.write_text(_nl(data["profile_md"]), encoding="utf-8")
+        paths.profile.write_text(new_profile, encoding="utf-8")
         paths.light.write_text(_select.ensure_light_header(data["light_md"], cfg["name"]), encoding="utf-8")
         paths.examples.write_text(_nl(data["examples_md"]), encoding="utf-8")
         summary["notes"] = data.get("notes", [])

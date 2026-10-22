@@ -8,12 +8,16 @@ Record-level rules (each has a fixture):
 - Text parts: message.content string, or list items with type == "text". tool_result items are scanned only for
   the legacy mid-turn wrapper, and only when the whole result is exactly that wrapper (prefix first, suffix last), so
   a fetched page or command output quoting the sentence never enters the corpus as the user's words.
-Subagent transcripts live under <session>/subagents/ and are never globbed."""
+Subagent transcripts live under <session>/subagents/ and are never globbed.
+
+Agent context (agent_context.py): assistant text blocks, tool_use commands and tool_result errors are read only to
+build the short context slice that rides beside the next kept user message; none of it is ever yielded as text."""
 import glob
 import json
 import os
 from pathlib import Path
 
+from . import agent_context as _ac
 from . import filters
 
 
@@ -81,12 +85,59 @@ def _attachment_record(r):
     return [prompt], a.get("timestamp") or r.get("timestamp")
 
 
-def iter_records(claude_dir):
-    """Yield raw records: source, session, record_id, project, time, ordinal, text, origin_hint, meta, path."""
+def _kept(text):
+    return filters.keep(filters.clean(text)[0])
+
+
+def _scan_assistant(r, turn, tool_names):
+    """Record the assistant's text and its commands for the agent-context slice."""
+    content = (r.get("message") or {}).get("content")
+    if isinstance(content, str):
+        turn.assistant_text(content)
+        return
+    for item in content or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            turn.assistant_text(item.get("text"))
+        elif item.get("type") == "tool_use":
+            name = item.get("name") or ""
+            if item.get("id"):
+                tool_names[item["id"]] = name
+            inp = item.get("input") if isinstance(item.get("input"), dict) else {}
+            if _ac.is_shell(name):
+                turn.command(inp.get("command"))
+
+
+def _scan_tool_results(r, turn, tool_names):
+    """Failed, rejected or interrupted tool results in a user-typed record (the harness files them as type user)."""
+    tur = r.get("toolUseResult")
+    if isinstance(tur, dict) and tur.get("interrupted"):
+        turn.interrupted()
+    content = (r.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "tool_result":
+            continue
+        body = item.get("content")
+        if not isinstance(body, str):
+            body = " ".join(x.get("text", "") for x in (body or []) if isinstance(x, dict))
+        if _ac.REJECTED_TOOL in (body or ""):
+            turn.interrupted()
+            turn.tool_result(False, False)
+            continue
+        turn.tool_result(bool(item.get("is_error")), _ac.is_shell(tool_names.get(item.get("tool_use_id"))))
+
+
+def iter_records(claude_dir, context_chars=_ac.DEFAULT_CHARS):
+    """Yield raw records: source, session, record_id, project, time, ordinal, text, origin_hint, meta, path, and
+    agent_context ({"head", "markers"} or None; always None when context_chars is 0)."""
     claude_dir = os.path.expanduser(str(claude_dir))
     for path in sorted(glob.glob(os.path.join(claude_dir, "*", "*.jsonl"))):
         project, session = Path(path).parent.name, Path(path).stem
         ordinal = 0
+        turn, tool_names = _ac.Turn(), {}
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 ordinal += 1
@@ -97,8 +148,14 @@ def iter_records(claude_dir):
                 if not isinstance(r, dict):
                     continue
                 rtype = r.get("type")
+                if rtype == "assistant":
+                    if not r.get("isSidechain"):
+                        _scan_assistant(r, turn, tool_names)
+                    continue
                 texts, time = None, r.get("timestamp")
                 if rtype == "user":
+                    if not r.get("isSidechain"):
+                        _scan_tool_results(r, turn, tool_names)
                     texts = _user_record(r)
                 elif rtype == "attachment":
                     got = _attachment_record(r)
@@ -108,11 +165,18 @@ def iter_records(claude_dir):
                     continue
                 rid = r.get("uuid") or "%s:%d" % (time, ordinal)
                 for k, text in enumerate(texts):
+                    ctx = None
+                    if context_chars > 0:
+                        if _ac.is_interrupt(text):
+                            turn.interrupted()
+                        elif _kept(text):
+                            ctx = turn.take(context_chars)
                     yield {
                         "source": "claude-code", "session": session, "path": path,
                         "record_id": rid if k == 0 else "%s#%d" % (rid, k),
                         "project": _project_from_cwd(r.get("cwd")) or project,
                         "time": time, "ordinal": ordinal, "text": text, "origin_hint": None, "meta": {},
+                        "agent_context": ctx,
                     }
 
 

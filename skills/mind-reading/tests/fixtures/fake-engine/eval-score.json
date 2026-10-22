@@ -19,6 +19,13 @@
     "text": "The expansion asks to wait for approval before pushing",
     "requirement_id": null
    }
-  ]
+  ],
+  "upgrades": [
+   {
+    "text": "Checks every download path, which the user asked for next",
+    "requirement_id": 1
+   }
+  ],
+  "wrong_upgrades": []
  }
 }

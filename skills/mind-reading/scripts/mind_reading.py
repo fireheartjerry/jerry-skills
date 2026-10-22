@@ -318,7 +318,8 @@ def seed_hash(seed):
 
 def cmd_log_decision(args, paths, cfg, log):
     """stdin: {"seed": "...", "mode": "execute", "s": 5, "l": 3, "g": 2, "held": [...], "groups": [...],
-    "examples": [...], "chars": 6900}. The seed is hashed and never stored."""
+    "examples": [...], "grants": [...], "lessons": [...], "upgrades": 0, "chars": 6900}. The seed is hashed and never
+    stored."""
     data = _stdin_json(log)
     if data is None:
         return EXIT_USAGE
@@ -336,6 +337,12 @@ def cmd_log_decision(args, paths, cfg, log):
     row["groups"] = [str(g) for g in (data.get("groups") or [])]
     row["examples"] = [int(e) for e in (data.get("examples") or []) if str(e).isdigit()]
     row["grants"] = [str(g)[:8] for g in (data.get("grants") or []) if str(g).strip()]  # grant ids applied (G1, G2)
+    row["lessons"] = [str(x)[:8] for x in (data.get("lessons") or []) if str(x).strip()]  # lesson groups in the slice (W1)
+    try:
+        row["upgrades"] = int(data.get("upgrades") or 0)  # expansions that took a lesson's better way over the literal ask
+    except (TypeError, ValueError):
+        log("field 'upgrades' must be an integer")
+        return EXIT_USAGE
     if row["mode"] not in ("execute", "discuss", "status", "hold", "plan"):
         log("mode must be one of execute, discuss, status, hold, plan")
         return EXIT_USAGE
@@ -469,13 +476,13 @@ def build_parser():
     p.set_defaults(func=cmd_prep)
 
     p = sub.add_parser("mine", help="mine each chunk through the engine, one call per chunk per lens")
-    p.add_argument("--lens", action="append", help="restrict to these lenses (repeatable): core defaults reactions followthrough vocabulary grants")
+    p.add_argument("--lens", action="append", help="restrict to these lenses (repeatable): core defaults reactions followthrough vocabulary grants lessons")
     p.add_argument("--single-pass", action="store_true", help="one call per chunk with the combined prompt instead of the lenses")
     engine_opts(p)
     p.set_defaults(func=cmd_mine)
 
     p = sub.add_parser("synthesize", help="profile, light, examples, grants, index, lint, manifest")
-    p.add_argument("substeps", nargs="*", help="subset of: consolidate profile light examples grants index lint manifest")
+    p.add_argument("substeps", nargs="*", help="subset of: consolidate profile lessons light examples grants index lint manifest")
     p.add_argument("--mined-run")
     p.add_argument("--update", action="store_true", help="give the profile prompt the previous profile as prior")
     p.add_argument("--no-strict", action="store_true", help="forbidden-rule lint hits warn instead of failing")

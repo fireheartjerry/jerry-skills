@@ -11,7 +11,7 @@ from .config import read_json, write_json
 from .corpus import now_iso
 from .mine import privacy_line
 
-RUBRIC_VERSION = 3
+RUBRIC_VERSION = 4
 EXPAND_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["prompt"],
                  "properties": {"prompt": {"type": "string", "minLength": 20}}}
 CONTROL_PERSONA = "a demanding, experienced user of coding agents"
@@ -50,6 +50,10 @@ def session_row(sid, requirements, judgments_by_arm):
         row["arms"][arm] = {"full": counts["full"], "partial": counts["partial"], "none": counts["none"],
                             "contra": len(j.get("contradictions", [])),
                             "contra_texts": [c.get("text", "") for c in j.get("contradictions", [])],
+                            "upgrades": len(j.get("upgrades") or []),
+                            "wrong_upgrades": len(j.get("wrong_upgrades") or []),
+                            "upgrade_texts": [c.get("text", "") for c in j.get("upgrades") or []],
+                            "wrong_upgrade_texts": [c.get("text", "") for c in j.get("wrong_upgrades") or []],
                             "by_kind": by_kind}
     return row
 
@@ -110,6 +114,17 @@ def contradiction_rate(rows, arm):
     return (num / den if den else 0.0), num
 
 
+def upgrade_counts(rows, arm):
+    """{upgrades, wrong_upgrades, net, sessions_with_upgrade, sessions_with_wrong_upgrade} for one arm. An upgrade is
+    a better path the user later moved to; a wrong upgrade overrode something the user wanted (rubric v4; a v3
+    judgment counts as none)."""
+    up = sum(r["arms"][arm].get("upgrades", 0) for r in rows if arm in r["arms"])
+    wrong = sum(r["arms"][arm].get("wrong_upgrades", 0) for r in rows if arm in r["arms"])
+    return {"upgrades": up, "wrong_upgrades": wrong, "net": up - wrong,
+            "sessions_with_upgrade": sum(1 for r in rows if arm in r["arms"] and r["arms"][arm].get("upgrades", 0)),
+            "sessions_with_wrong_upgrade": sum(1 for r in rows if arm in r["arms"] and r["arms"][arm].get("wrong_upgrades", 0))}
+
+
 def _percentiles(values, lo=2.5, hi=97.5):
     if not values:
         return (0.0, 0.0)
@@ -149,7 +164,8 @@ def build_report(rows, arms, cfg_eval, meta):
     pooled = {a: {"hit_rate": pooled_rate(rows, a, w), "hit_rate_full_only": pooled_rate(rows, a, 0.0),
                   "contradiction_rate": contradiction_rate(rows, a)[0], "contradictions": contradiction_rate(rows, a)[1],
                   "full": sum(r["arms"][a]["full"] for r in rows if a in r["arms"]),
-                  "partial": sum(r["arms"][a]["partial"] for r in rows if a in r["arms"])} for a in arms}
+                  "partial": sum(r["arms"][a]["partial"] for r in rows if a in r["arms"]),
+                  **upgrade_counts(rows, a)} for a in arms}
     pairs = {}
     for i, a in enumerate(arms):
         for b in arms[i + 1:]:
@@ -166,7 +182,7 @@ def build_report(rows, arms, cfg_eval, meta):
               "requirements": sum(r["n"] for r in rows), "partial_weight": w, "pooled": pooled, "pairs": pairs,
               "kinds": {k: sum((r.get("kinds") or {}).get(k, 0) for r in rows) for k in kinds_present},
               "by_kind": {a: pooled_by_kind(rows, a, w) for a in arms},
-              "per_session": [{"sid": r["sid"], "n": r["n"], **{a: {k: v for k, v in r["arms"][a].items() if k != "contra_texts"} for a in r["arms"]}} for r in rows],
+              "per_session": [{"sid": r["sid"], "n": r["n"], **{a: {k: v for k, v in r["arms"][a].items() if not k.endswith("_texts")} for a in r["arms"]}} for r in rows],
               "limitation": LIMITATIONS.get(mode, LIMITATIONS["first"])}
     report.update(meta)
     return report
@@ -197,6 +213,15 @@ def report_markdown(report, rows):
         wtl = v["win_tie_loss"]
         lines.append("- %s: diff %+.3f (CI %+.3f to %+.3f), sessions win/tie/loss %d/%d/%d" % (
             k, v["diff"], v["ci95"][0], v["ci95"][1], wtl["win"], wtl["tie"], wtl["loss"]))
+    if report["arms"]:
+        lines += ["", "## Upgrades", "",
+                  "An upgrade is a different approach than the seed literally asked for that the user later moved to; a wrong "
+                  "upgrade overrode something the user wanted. Higher net is better.", "",
+                  "| arm | upgrades | wrong upgrades | net | sessions with an upgrade |", "|---|---|---|---|---|"]
+        for a in report["arms"]:
+            p = report["pooled"][a]
+            lines.append("| %s | %d | %d | %+d | %d |" % (a, p.get("upgrades", 0), p.get("wrong_upgrades", 0), p.get("net", 0),
+                                                       p.get("sessions_with_upgrade", 0)))
     by_kind = report.get("by_kind") or {}
     if by_kind and report["arms"]:
         kinds = [k for k in REPORTED_KINDS] + sorted(k for k in (report.get("kinds") or {}) if k not in REPORTED_KINDS)
@@ -216,9 +241,10 @@ def report_markdown(report, rows):
         lines += ["", "## Largest losses of the best arm (%s)" % best, ""]
         for r in worst:
             a = r["arms"][best]
-            lines.append("- %s: %d/%d requirements hit (full %d, partial %d), contradictions: %s" % (
+            lines.append("- %s: %d/%d requirements hit (full %d, partial %d), contradictions: %s%s" % (
                 r["sid"], a["full"] + a["partial"], r["n"], a["full"], a["partial"],
-                "; ".join(a["contra_texts"]) or "none"))
+                "; ".join(a["contra_texts"]) or "none",
+                ("; wrong upgrades: " + "; ".join(a.get("wrong_upgrade_texts") or [])) if a.get("wrong_upgrade_texts") else ""))
     lines += ["", "Limitation: " + report["limitation"], ""]
     lines.append("Engines: %s" % json.dumps(report.get("engines", {})))
     return "\n".join(lines) + "\n"
@@ -270,18 +296,24 @@ REQUIREMENT_SCOPE = {
 }
 
 
+LESSONS_NOTE = ("\n\nLessons: where a lesson above shows that the approach the prompt asks for is worse for the same goal, "
+                "write the full prompt with the better way instead, unless the prompt insists on its approach in so many words. "
+                "A lesson never adds an outward-facing, destructive, spending or permission-changing step.")
+
+
 def arm_context(arm, paths, cfg, seed, name):
     if arm == "none":
         return CONTROL_PERSONA, "that user", ""
     if arm == "light":
         return name, name, "Use these always-on reading rules for %s:\n\n%s" % (name, paths.light.read_text(encoding="utf-8"))
     if arm == "full":
-        slice_md, _ = _select.select_slice(paths.model, seed, cfg["select"], no_light=False)
-        return name, name, "Use this slice of %s's model:\n\n%s" % (name, slice_md)
+        slice_md, decision = _select.select_slice(paths.model, seed, cfg["select"], no_light=False)
+        return name, name, "Use this slice of %s's model:\n\n%s%s" % (name, slice_md, LESSONS_NOTE if decision.get("lessons") else "")
     if arm == "full-all":
-        return name, name, "Use %s's full model:\n\n%s\n\n%s\n\n%s" % (
-            name, paths.light.read_text(encoding="utf-8"), paths.profile.read_text(encoding="utf-8"),
-            paths.examples.read_text(encoding="utf-8"))
+        profile = paths.profile.read_text(encoding="utf-8")
+        return name, name, "Use %s's full model:\n\n%s\n\n%s\n\n%s%s" % (
+            name, paths.light.read_text(encoding="utf-8"), profile, paths.examples.read_text(encoding="utf-8"),
+            LESSONS_NOTE if "\n## What works and what doesn't" in profile else "")
     raise EvalRefused("unknown arm %r" % arm)
 
 
@@ -401,7 +433,8 @@ def run_eval(paths, cfg, kind, dev=False, arms=None, judge_kind=None, force=Fals
                 continue
             expansion = (read_json(ep) or {}).get("prompt", "")
             mapping = dict(base_map, requirements_json=json.dumps(reqs, ensure_ascii=False, indent=0),
-                           later_json=json.dumps(td["later"], ensure_ascii=False, indent=0), expansion=expansion)
+                           later_json=json.dumps(td["later"], ensure_ascii=False, indent=0), expansion=expansion,
+                           seed=sd["seed"])
             units.append(_engine.Unit("%s:%s" % (sid, arm), _engine.render(score_tpl, mapping), score_schema,
                                       results / "judgments" / ("%s-%s.json" % (sid, arm)), check=_ids_check(ids)))
     s3 = eng_score.run(units, force=False, collect=collect)
@@ -444,9 +477,10 @@ def run_eval(paths, cfg, kind, dev=False, arms=None, judge_kind=None, force=Fals
             summary["budget_note"] = stage_summary["budget_note"]
             log("eval: " + stage_summary["budget_note"])
     for a in report["arms"]:
-        log("eval %s: hit %.3f (full-only %.3f), contradictions %d, CI %.3f..%.3f" % (
+        log("eval %s: hit %.3f (full-only %.3f), contradictions %d, upgrades %d, wrong upgrades %d, CI %.3f..%.3f" % (
             a, report["pooled"][a]["hit_rate"], report["pooled"][a]["hit_rate_full_only"],
-            report["pooled"][a]["contradictions"], report["pooled"][a]["ci95"][0], report["pooled"][a]["ci95"][1]))
+            report["pooled"][a]["contradictions"], report["pooled"][a]["upgrades"], report["pooled"][a]["wrong_upgrades"],
+            report["pooled"][a]["ci95"][0], report["pooled"][a]["ci95"][1]))
     return summary
 
 

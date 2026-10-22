@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from . import grants as _grants
+from . import lessons as _lessons
 from . import lint as _lint
 from . import schema as _schema
 from .config import read_json, write_json
@@ -52,7 +53,8 @@ def _range_chars(lines, a, b):
 
 
 def parse_profile(lines, path="profile.md"):
-    """Return dict with reading_notes, layers, groups, vocabulary (1-based inclusive line ranges) or raise."""
+    """Return dict with reading_notes, layers, groups, lessons, vocabulary (1-based inclusive line ranges) or raise.
+    The `## What works and what doesn't` section is optional (a model built before lessons has none)."""
     errors = []
     if not lines or not lines[0].startswith("# "):
         raise ModelFormatError("%s:1: first line must be the `# {name}: the full model` title" % path)
@@ -64,7 +66,7 @@ def parse_profile(lines, path="profile.md"):
     reading_notes = [notes_start, max(notes_start, first_h2 - 1)]
     if not any("Reading notes" in line for line in lines[:first_h2]):
         errors.append("%s:%d: no `Reading notes` block before the first `## ` heading" % (path, first_h2))
-    layers, groups, vocab = [], [], []
+    layers, groups, vocab, lessons = [], [], [], []
     unsaid_line = vocab_line = None
     for k, (ln, line) in enumerate(h2):
         end = (h2[k + 1][0] - 1) if k + 1 < len(h2) else len(lines)
@@ -74,6 +76,8 @@ def parse_profile(lines, path="profile.md"):
         elif line.strip() == "## Unsaid defaults":
             unsaid_line = ln
             groups = _parse_groups(lines, ln, end, path, errors)
+        elif line.strip() == _lessons.HEADING:
+            lessons = _lessons.parse_groups(lines, ln, end, path, errors)
         elif line.strip() == "## Vocabulary":
             vocab_line = ln
             for i in range(ln, end):
@@ -81,7 +85,8 @@ def parse_profile(lines, path="profile.md"):
                 if vm:
                     vocab.append({"phrase": vm.group(1).strip(), "line": i + 1})
         else:
-            errors.append("%s:%d: unexpected `## ` heading %r (allowed: numbered layers 1-10, Unsaid defaults, Vocabulary)" % (path, ln, line))
+            errors.append("%s:%d: unexpected `## ` heading %r (allowed: numbered layers 1-10, Unsaid defaults, %s, Vocabulary)" % (
+                path, ln, line, _lessons.HEADING[3:]))
     have = {l["n"] for l in layers}
     for n in range(1, 11):
         if n not in have:
@@ -99,7 +104,7 @@ def parse_profile(lines, path="profile.md"):
         raise ModelFormatError("\n".join(errors))
     standing = next((l for l in layers if l["n"] == 6), None)
     return {"reading_notes": reading_notes, "layers": layers, "groups": groups, "vocabulary": vocab,
-            "standing_rules": standing["lines"]}
+            "standing_rules": standing["lines"], "lessons": lessons}
 
 
 def _parse_groups(lines, start, end, path, errors, lenient=False):
@@ -234,6 +239,8 @@ def build_index(model_dir, built=None, write=True):
         "corrections": {"path": "corrections.md",
                         "lines": len(corr_p.read_text(encoding="utf-8").splitlines()) if corr_p.exists() else 0},
     }
+    if pf["lessons"]:
+        idx["lessons"] = pf["lessons"]
     warnings = []
     if grants_p.exists():
         gs, gerrs = _grants.parse_grants(grants_p.read_text(encoding="utf-8"))
@@ -242,7 +249,9 @@ def build_index(model_dir, built=None, write=True):
     errs = _schema.validate(idx, load_schema("index"))
     if errs:
         raise ModelFormatError("index.json failed its schema: " + "; ".join(errs[:5]))
-    when_vocab = {w for g in pf["groups"] for w in g["when"]} | {g["id"].lower() for g in pf["groups"]}
+    when_vocab = {w for g in pf["groups"] + pf["lessons"] for w in g["when"]} | {g["id"].lower() for g in pf["groups"] + pf["lessons"]}
+    if pf["lessons"]:
+        when_vocab.add("upgrade")
     for e in ex:
         for t in e["tags"]:
             if t not in when_vocab:
@@ -420,8 +429,15 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     chosen = matching[:max_groups]
     if not chosen and idx["groups"]:
         chosen = [idx["groups"][0]]
-    chosen_ids = {g["id"].lower() for g in chosen}
-    chosen_when = {w for g in chosen for w in g["when"]}
+    # lessons: the What-works groups whose When: words the seed (or the kind) contains; none when nothing matches
+    max_lessons = cfg_select.get("initiative_max_lessons", 3) if wide else cfg_select.get("max_lessons", 2)
+    ls_scored = []
+    for lg in idx.get("lessons") or []:
+        sc = sum(1 for w in lg["when"] if _keyword_in(w, seed_lower, seed_stems, False)) + 0.5 * sum(1 for w in lg["when"] if w in kind_words)
+        ls_scored.append((sc, lg))
+    chosen_lessons = [lg for sc, lg in sorted(ls_scored, key=lambda t: (-t[0], t[1]["id"])) if sc > 0][:max_lessons]
+    chosen_ids = {g["id"].lower() for g in chosen + chosen_lessons}
+    chosen_when = {w for g in chosen + chosen_lessons for w in g["when"]}
     ex_scored = []
     for e in idx["examples"]:
         tag_score = sum(1 for t in e["tags"] if t in chosen_ids or t in chosen_when)
@@ -459,6 +475,10 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     for k, g in enumerate(chosen):
         a, b = g["lines"]
         parts.append(("group:" + g["id"], "\n".join(profile[a - 1:b]).strip() + "\n", k == 0))
+    for k, lg in enumerate(chosen_lessons):
+        a, b = lg["lines"]
+        head = (_lessons.HEADING + " (lessons for this kind of request)\n") if k == 0 else ""
+        parts.append(("lessons:" + lg["id"], head + "\n".join(profile[a - 1:b]).strip() + "\n", k == 0))
     if vocab:
         vl = ["## Vocabulary (present in the seed)"]
         for v in vocab:
@@ -471,16 +491,19 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     def total():
         return sum(len(t) for _, t, _ in parts)
 
-    # trim: the least relevant example first (they sit in ascending order), then groups beyond the first;
-    # never corrections, grants, standing rules or vocabulary
+    # trim: the least relevant example first (they sit in ascending order), then groups beyond the first, then lesson
+    # groups beyond the first; never corrections, grants, standing rules or vocabulary
     while total() > budget:
         drop = next((i for i in range(len(parts)) if parts[i][0].startswith("example:")), None)
         if drop is None:
             drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("group:") and not parts[i][2]), None)
         if drop is None:
+            drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("lessons:") and not parts[i][2]), None)
+        if drop is None:
             break
         parts.pop(drop)
     kept_groups = [p[0].split(":", 1)[1] for p in parts if p[0].startswith("group:")]
+    kept_lessons = [p[0].split(":", 1)[1] for p in parts if p[0].startswith("lessons:")]
     kept_examples = [int(p[0].split(":", 1)[1]) for p in parts if p[0].startswith("example:")]
     body = "\n".join(t for _, t, _ in parts)
     notes = []
@@ -491,10 +514,11 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
             notes.append("legacy model, no index: %d of %d examples loaded, the budget trimmed the rest" % (len(kept_examples), len(idx["examples"])))
     if stale:
         notes.append("index.json stale, rebuilt in memory: run `synthesize index`")
-    header = "<!-- mind-reading slice%s: groups %s; examples %s; %d chars -->\n" % (
+    header = "<!-- mind-reading slice%s: groups %s; %sexamples %s; %d chars -->\n" % (
         (" (" + "; ".join(notes) + ")") if notes else "",
-        ",".join(kept_groups) or "-", ",".join(str(n) for n in kept_examples) or "-", len(body))
-    decision = {"groups": kept_groups, "examples": kept_examples, "vocabulary": [v["phrase"] for v in vocab],
+        ",".join(kept_groups) or "-", ("lessons %s; " % ",".join(kept_lessons)) if kept_lessons else "",
+        ",".join(str(n) for n in kept_examples) or "-", len(body))
+    decision = {"groups": kept_groups, "examples": kept_examples, "lessons": kept_lessons, "vocabulary": [v["phrase"] for v in vocab],
                 "grants": grant_ids, "chars": len(body) + len(header), "light": not no_light, "mode": mode,
                 "legacy": legacy, "escalated": escalated, "stale_index": stale}
     return header + body, decision

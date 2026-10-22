@@ -1,4 +1,6 @@
-"""synthesize: consolidate -> profile -> light -> examples -> index -> lint -> manifest. Each substep resumable."""
+"""synthesize: consolidate -> profile -> lessons -> light -> examples -> grants -> index -> lint -> manifest. Each
+substep resumable. `lessons` writes the profile's `## What works and what doesn't` section deterministically from the
+consolidated lessons (lessons.py); no engine call."""
 import json
 import re
 import shutil
@@ -6,6 +8,7 @@ from pathlib import Path
 
 from . import engine as _engine
 from . import grants as _grants
+from . import lessons as _lessons
 from . import lint as _lint
 from . import select as _select
 from .config import read_json, write_json
@@ -13,7 +16,9 @@ from .corpus import corpus_hash, load_corpus, now_iso
 from .mine import LENSES, latest_mined_run, mined_chunks, mined_files, privacy_line
 from .prep import NONTYPED_ORIGINS
 
-SUBSTEPS = ["consolidate", "profile", "light", "examples", "grants", "index", "lint", "manifest"]
+SUBSTEPS = ["consolidate", "profile", "lessons", "light", "examples", "grants", "index", "lint", "manifest"]
+UPGRADE_TAG = "upgrade"
+UPGRADES_MIN, UPGRADES_MAX = 2, 4
 LAYERS = ["thinking", "quality_bar", "building", "design_taste", "communication", "standing_rules", "likes",
           "dislikes", "workflow", "context"]
 ENDORSED_ORIGINS = set(NONTYPED_ORIGINS) | {"question_answer", "goal_reminder"}
@@ -34,6 +39,16 @@ EXAMPLES_SCHEMA = {"type": "object", "additionalProperties": False, "required": 
 
 class SynthError(Exception):
     pass
+
+
+UPGRADES_RULE = (
+    "Write %d to %d upgrade pairs under `## Upgrades`, from the lessons with `Outcome: bad` above: a seed that asks for the "
+    "approach the lesson shows is worse (the user's own words where a seed exists, else a plausible short seed), a full "
+    "prompt that takes the lesson's better way for the same goal, `Tags:` that include `upgrade` and the lesson group's id "
+    "in lower case (`w1`), and after the blockquote one plain line `Changed: <the literal ask> -> <the better way>, "
+    "because <the evidence, with its date> (W1).` Never upgrade toward anything outward-facing, destructive, spending or "
+    "permission-changing; such a step stays a question for the user.")
+NO_UPGRADES_RULE = "There are no lessons with a bad outcome: write no upgrade pairs and use no `upgrade` tag."
 
 
 def _content_set(text):
@@ -130,10 +145,11 @@ def merge_items(items, kind):
     return out
 
 
-def _typed_index(paths):
+def _typed_index(paths, rows=None):
     """(normalized typed text joined by newlines, True when the corpus had typed records). Seeds and vocabulary must
-    come from what the user typed, never from drafted, pasted, answered or goal-reminder text."""
-    rows = load_corpus(paths)
+    come from what the user typed, never from drafted, pasted, answered or goal-reminder text, and never from the
+    agent context stored beside a message (it is not in `text`)."""
+    rows = load_corpus(paths) if rows is None else rows
     typed = [_norm_text(r.get("text")) for r in rows if (r.get("origin") or "typed") == "typed" and r.get("text")]
     return "\n".join(typed), bool(typed)
 
@@ -161,18 +177,28 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
     Within one chunk the lenses reread the same messages, so a trait the core and followthrough lenses both report is
     one item (merge_items). Items from different chunks stay separate; the profile prompt weighs them by chunk count.
     Seeds and vocabulary are kept only when they occur in typed corpus text, and a trait whose evidence is all
-    endorsed (drafted, pasted, answered, goal reminder) is capped at weak and marked `endorsed`."""
+    endorsed (drafted, pasted, answered, goal reminder) is capped at weak and marked `endorsed`. A trait, default,
+    reaction or preference-change quote that occurs only in stored agent context (never in a corpus message) is
+    dropped whatever lens reported it, and a trait or default left without evidence goes with it: agent context
+    reaches the profile prompt only through verified lessons, never as a trait, reaction or rule."""
     by_chunk = mined_chunks(paths, mined_run)
     if not by_chunk:
         raise SynthError("no mined chunks in mined/%s" % mined_run)
     lens_order = {name: i for i, name in enumerate(_LENS_ORDER)}
     traits = {layer: [] for layer in LAYERS}
     project_facts, unsaid, seeds, reactions, changes, grant_candidates = [], [], [], [], [], []
+    lesson_items = []
     vocab = {}
     stats = {"chunks": 0, "sessions_read": 0, "messages_read": 0, "time_reliable_sessions": 0}
     times = []
-    blob, have_typed = _typed_index(paths)
-    dropped = {"seeds": 0, "vocabulary": 0, "endorsed_capped": 0}
+    rows = load_corpus(paths)
+    blob, have_typed = _typed_index(paths, rows)
+    idx = _lessons.corpus_index(rows)
+    dropped = {"seeds": 0, "vocabulary": 0, "endorsed_capped": 0, "agent_only": 0}
+
+    def from_agent(*quotes):
+        """True when a quote occurs only in stored agent context: never the user's voice, whatever lens reported it."""
+        return any(_lessons.agent_only(q, idx) for q in quotes if q)
     for cid in sorted(by_chunk):
         lens_files = sorted(by_chunk[cid].items(), key=lambda kv: (lens_order.get(kv[0], 99), kv[0]))
         chunk_traits, chunk_unsaid, chunk_stats = [], [], {}
@@ -189,10 +215,22 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
             for t in data.get("traits") or []:
                 t = dict(t)
                 t["lenses"] = [lens]
+                ev = [e for e in t.get("evidence") or [] if not from_agent(e.get("quote"))]
+                if len(ev) < len(t.get("evidence") or []):
+                    dropped["agent_only"] += len(t.get("evidence") or []) - len(ev)
+                    if not ev:
+                        continue
+                    t["evidence"] = ev
                 chunk_traits.append(t)
             for u in data.get("unsaid_defaults") or []:
                 u = dict(u)
                 u["lenses"] = [lens]
+                ev = [e for e in u.get("evidence") or [] if not from_agent(e.get("first"), e.get("later"))]
+                if len(ev) < len(u.get("evidence") or []):
+                    dropped["agent_only"] += len(u.get("evidence") or []) - len(ev)
+                    if not ev:
+                        continue
+                    u["evidence"] = ev
                 chunk_unsaid.append(u)
             for s_ in data.get("seed_expansions") or []:
                 s_ = dict(s_)
@@ -202,6 +240,9 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
                     continue
                 seeds.append(s_)
             for r in data.get("reactions") or []:
+                if from_agent(r.get("quote")):
+                    dropped["agent_only"] += 1
+                    continue
                 key = (r.get("kind"), _norm_text(r.get("quote")))
                 if key not in chunk_reactions:
                     chunk_reactions[key] = dict(r, chunk=cid)
@@ -218,6 +259,9 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
                 if cid not in entry["chunks"]:
                     entry["chunks"].append(cid)
             for c in data.get("preference_changes") or []:
+                if from_agent(c.get("earlier"), c.get("later")):
+                    dropped["agent_only"] += 1
+                    continue
                 key = (_norm_text(c.get("earlier")), _norm_text(c.get("later")))
                 if key not in chunk_changes:
                     chunk_changes[key] = dict(c, chunk=cid)
@@ -225,6 +269,8 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
                 g = dict(g)
                 g["chunk"] = cid
                 grant_candidates.append(g)
+            for l in data.get("lessons") or []:
+                lesson_items.append((cid, lens, l))
         if not read_any:
             continue
         stats["chunks"] += 1
@@ -254,10 +300,13 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
         changes += list(chunk_changes.values())
     if not stats["chunks"]:
         raise SynthError("no readable mined chunks in mined/%s" % mined_run)
+    lessons, project_lessons, lesson_report = _lessons.consolidate(lesson_items, rows, log=log, idx=idx)
+    project_facts += [dict(l, kind="lesson") for l in project_lessons]
     out = {"chunks": stats["chunks"], "session_stats": stats, "date_range": _date_range(times),
            "traits": traits, "unsaid_defaults": unsaid, "vocabulary": sorted(vocab.values(), key=lambda v: v["phrase"].lower()),
            "preference_changes": changes, "reactions": reactions, "seed_expansions": seeds,
            "project_facts": project_facts, "grant_candidates": grant_candidates, "trimmed": [],
+           "lessons": lessons, "lesson_report": lesson_report,
            "origin_filter": dict(dropped, verified=have_typed)}
     if not have_typed:
         out["trimmed"].append("seed and vocabulary origin not verified: no typed corpus records")
@@ -277,15 +326,19 @@ def consolidate(paths, mined_run, budget_chars=600000, log=print):
     out["prompt_chars"] = len(json.dumps(_prompt_body(out), ensure_ascii=False))
     write_json(paths.mined / mined_run / "consolidated.json", out)
     log("consolidate: %d chunks, %d traits, %d project facts set aside, %d unsaid defaults, %d seeds, %d vocabulary; "
-        "dropped %d seed(s) and %d vocabulary phrase(s) absent from typed text, capped %d endorsed-only trait(s) at weak" % (
+        "dropped %d seed(s) and %d vocabulary phrase(s) absent from typed text, %d agent-only quote(s), capped %d "
+        "endorsed-only trait(s) at weak; "
+        "lessons: %d mined, %d kept, %d dropped unverified or authorizing, %d single episode(s) dropped" % (
             stats["chunks"], sum(len(v) for v in out["traits"].values()), len(project_facts), len(unsaid), len(seeds), len(vocab),
-            dropped["seeds"], dropped["vocabulary"], dropped["endorsed_capped"]))
+            dropped["seeds"], dropped["vocabulary"], dropped["agent_only"], dropped["endorsed_capped"], lesson_report["mined"], len(lessons),
+            len(lesson_report["dropped"]), lesson_report["single_dropped"]))
     return out
 
 
 def _prompt_body(c):
-    """What the profile prompt sees: never project_facts, seed_expansions or grant candidates (grants.md is built
-    deterministically from verified quotes; the profile records preferences, never authorizations)."""
+    """What the profile prompt sees: never project_facts, seed_expansions, grant candidates or lessons (grants.md is
+    built deterministically from verified quotes and the lessons section deterministically from verified lessons; the
+    profile records preferences, never authorizations, and never agent context)."""
     return {k: c[k] for k in ("chunks", "session_stats", "date_range", "traits", "unsaid_defaults", "vocabulary",
                               "preference_changes", "reactions") if k in c}
 
@@ -362,6 +415,47 @@ def build_grants(paths, cfg, consolidated, force=False, log=print):
     valid_active = [g for g in gs if g.get("active") and not g.get("errors")]
     return {"candidates": len(candidates), "kept": len(kept), "dropped": len(dropped), "added": added, "revoked": [r[0] for r in revoked],
             "tombstones": len(tombstones), "total": len(gs), "active": len(valid_active), "errors": errors}
+
+
+def lessons_section(paths, consolidated, cfg):
+    """The What-works section lines for the consolidated lessons, minus sentences dropped by folded corrections."""
+    manifest = read_json(paths.model_json, {}) or {}
+    drops = [d for d in manifest.get("folded_drops", []) if isinstance(d, str)]
+    return _lessons.render_section((consolidated or {}).get("lessons") or [], cfg["synth"].get("lessons_max", 40), drops)
+
+
+def write_lessons(paths, cfg, consolidated, log=print):
+    """Insert (or replace) the section in profile.md, trimming the weakest lessons until the profile fits its line
+    limit. Returns the number of lessons written."""
+    text = paths.profile.read_text(encoding="utf-8")
+    lessons = list((consolidated or {}).get("lessons") or [])[:cfg["synth"].get("lessons_max", 40)]
+    max_lines = cfg["synth"]["profile_max_lines"]
+    while True:
+        section = lessons_section(paths, {"lessons": lessons}, cfg)
+        new = _lessons.insert_section(text, section)
+        if len(new.splitlines()) <= max_lines or not lessons:
+            break
+        lessons = lessons[:-1]
+    if new != text:
+        paths.profile.write_text(new, encoding="utf-8")
+    n = sum(1 for l in section if l.startswith("- "))
+    log("lessons: %d lesson(s) in %d group(s) written to profile.md" % (n, sum(1 for l in section if l.startswith("### "))))
+    return n
+
+
+def upgrade_pairs(examples_text):
+    """[(n, has Changed line)] for the examples tagged `upgrade`."""
+    out, cur = [], None
+    for line in examples_text.splitlines():
+        m = re.match(r"^### (\d+)\. ", line)
+        if m:
+            cur = {"n": int(m.group(1)), "upgrade": False, "changed": False}
+            out.append(cur)
+        elif cur is not None and line.startswith("Tags:"):
+            cur["upgrade"] = UPGRADE_TAG in [t.strip().lower() for t in line[5:].split(",")]
+        elif cur is not None and line.startswith("Changed:"):
+            cur["changed"] = True
+    return [(e["n"], e["changed"]) for e in out if e["upgrade"]]
 
 
 def _date_range(times):
@@ -502,22 +596,34 @@ def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None,
         if update and paths.profile.exists():
             prior = ("Prior profile (update, do not rewrite; keep dated changes; add only what the new evidence supports):\n\n"
                      + paths.profile.read_text(encoding="utf-8"))
+        if prior:
+            prior = _lessons.strip_section(prior)  # the pipeline rewrites the lessons section itself
+        # the lessons section is written after the engine (substep `lessons`): leave room for it
+        reserve = len(lessons_section(paths, consolidated, cfg))
+        body_max = max(cfg["synth"]["profile_min_lines"], cfg["synth"]["profile_max_lines"] - reserve)
         mapping = dict(base_map, chunk_count=str(consolidated["chunks"]), date_range=consolidated["date_range"],
                        consolidated_json=json.dumps(_prompt_body(consolidated), ensure_ascii=False, indent=0),
                        prior_block=prior, forbidden_rules=forbidden,
-                       synth_min_lines=str(cfg["synth"]["profile_min_lines"]), synth_max_lines=str(cfg["synth"]["profile_max_lines"]))
+                       synth_min_lines=str(cfg["synth"]["profile_min_lines"]), synth_max_lines=str(body_max))
 
         def check_profile(data):
+            text = _lessons.strip_section(data["profile_md"])
             try:
-                _select.parse_profile(data["profile_md"].splitlines())
+                _select.parse_profile(text.splitlines())
             except _select.ModelFormatError as exc:
                 return str(exc)
-            n = len(data["profile_md"].splitlines())
-            if n > cfg["synth"]["profile_max_lines"]:
-                return "profile has %d lines, maximum %d" % (n, cfg["synth"]["profile_max_lines"])
+            n = len(text.splitlines())
+            if n > body_max:
+                return "profile has %d lines, maximum %d (the rest is reserved for the lessons section)" % (n, body_max)
             return None
-        if not _engine_step("profile", "synthesize-profile", mapping, PROFILE_SCHEMA, paths.profile, "profile_md", check_profile):
+        if not _engine_step("profile", "synthesize-profile", mapping, PROFILE_SCHEMA, paths.profile, "profile_md", check_profile,
+                            post=_lessons.strip_section):
             return summary
+    if "lessons" in substeps:
+        if consolidated is None or not paths.profile.exists():
+            raise SynthError("consolidated.json or profile.md missing")
+        n = write_lessons(paths, cfg, consolidated, log)
+        summary["substeps"]["lessons"] = "%d lesson(s) in profile.md" % n
     if "light" in substeps:
         if not paths.profile.exists():
             raise SynthError("profile.md missing")
@@ -534,9 +640,14 @@ def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None,
     if "examples" in substeps:
         if consolidated is None or not paths.profile.exists():
             raise SynthError("consolidated.json or profile.md missing")
+        profile_text = paths.profile.read_text(encoding="utf-8")
+        section = _lessons.section_of(profile_text)
+        has_upgrade_lesson = any(l.startswith("- ") and "Outcome: bad" in l for l in section)
         mapping = dict(base_map, seed_expansions_json=json.dumps(consolidated.get("seed_expansions", []), ensure_ascii=False, indent=0),
-                       profile_excerpt=_profile_excerpt(paths.profile.read_text(encoding="utf-8")), forbidden_rules=forbidden,
-                       examples_min=str(cfg["synth"]["examples_min"]), examples_max=str(cfg["synth"]["examples_max"]))
+                       profile_excerpt=_profile_excerpt(profile_text), forbidden_rules=forbidden,
+                       examples_min=str(cfg["synth"]["examples_min"]), examples_max=str(cfg["synth"]["examples_max"]),
+                       lessons_md=_lessons.compact_for_prompt(section) or "(no lessons: write no upgrade pairs)",
+                       upgrades_rule=(UPGRADES_RULE % (UPGRADES_MIN, UPGRADES_MAX)) if has_upgrade_lesson else NO_UPGRADES_RULE)
 
         def check_examples(data):
             try:
@@ -545,6 +656,18 @@ def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None,
                 return str(exc)
             if not cfg["synth"]["examples_min"] <= len(ex) <= cfg["synth"]["examples_max"]:
                 return "%d examples, need %d to %d" % (len(ex), cfg["synth"]["examples_min"], cfg["synth"]["examples_max"])
+            ups = upgrade_pairs(data["examples_md"])
+            if has_upgrade_lesson and not UPGRADES_MIN <= len(ups) <= UPGRADES_MAX:
+                return "%d pair(s) tagged `upgrade`, need %d to %d (the profile has lessons with a bad outcome)" % (
+                    len(ups), UPGRADES_MIN, UPGRADES_MAX)
+            if not has_upgrade_lesson and ups:
+                return "pairs tagged `upgrade` but the profile has no lesson with a bad outcome"
+            missing = [n for n, changed in ups if not changed]
+            if missing:
+                return "upgrade pair(s) %s lack the `Changed:` line" % ", ".join(str(n) for n in missing)
+            hits = _lessons.upgrade_hits(data["examples_md"])
+            if hits:
+                return "\n".join(hits)
             return None
         if not _engine_step("examples", "synthesize-examples", mapping, EXAMPLES_SCHEMA, paths.examples, "examples_md", check_examples):
             return summary

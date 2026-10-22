@@ -35,6 +35,9 @@ DEFAULTS = {
     "engine_timeout_seconds": 900,
     "codex_usd_per_million_tokens": 0.0,
     "claude_settings_path": "~/.claude/settings.json",
+    # agent context: the head of the agent's last reply before each user message plus how that turn ended (a failed
+    # command, a tool error, an interruption, a revert). Stored beside the message, never as the user's voice; 0 = off.
+    "extract": {"agent_context_chars": 400},
     "prep": {
         "chunk_chars": 200000, "part_chars": 180000, "test_frac": 0.2, "dev_frac": 0.1,
         "min_session_messages": 3, "leak_min_chars": 40, "truth_max_messages": 40, "truth_max_chars": 2500,
@@ -45,19 +48,29 @@ DEFAULTS = {
         # eval --mode context: a mid-session typed message of at most this many words is a seed, with the previous
         # context_messages user messages as its context and the next messages as its truth
         "context_seed_max_words": 60, "context_seeds_per_session": 2, "context_messages": 6, "context_max_chars": 1200,
+        # agent context in chunks: each head cut to chunk_agent_context_chars; per session part the heads together stay
+        # under chunk_agent_context_ratio x the user's own text (heads beside failures and reactions kept first, then
+        # shortened to chunk_agent_context_min_chars, then dropped; markers always kept). Chunk sizes count user text only.
+        "chunk_agent_context_chars": 300, "chunk_agent_context_ratio": 0.5, "chunk_agent_context_min_chars": 120,
+        # hard cap on one chunk's agent context, JSON overhead included (None: chunk_chars x chunk_agent_context_ratio)
+        "chunk_agent_context_max_chars": None,
     },
     # mine: one engine call per chunk per lens; "all" is the single-pass prompt (mine --single-pass).
     # endorsed_evidence: drafted, pasted and answered text reaches the miner as weak [endorsed] evidence of what the
     # user accepts, never as the user's voice; false removes it from the chunks the miner sees.
-    "mine": {"lenses": ["core", "defaults", "reactions", "followthrough", "vocabulary", "grants"], "endorsed_evidence": True},
+    # agent_context_lenses: the lenses whose chunk keeps the agent context; every other lens sees the user's text only.
+    # Lessons only by default: every lesson is verified against typed text; adding a lens here lets the agent's words
+    # reach its prompt (agent-only quotes are still dropped at consolidate).
+    "mine": {"lenses": ["core", "defaults", "reactions", "followthrough", "vocabulary", "grants", "lessons"], "endorsed_evidence": True,
+             "agent_context_lenses": ["lessons"]},
     "synth": {"budget_chars": 600000, "profile_min_lines": 250, "profile_max_lines": 600,
-              "light_max_lines": 60, "examples_min": 20, "examples_max": 40},
+              "light_max_lines": 60, "examples_min": 20, "examples_max": 40, "lessons_max": 40},
     "eval": {"partial_weight": 0.5, "bootstrap_resamples": 10000, "bootstrap_seed": 0, "max_sessions": 40,
              "arms": ["none", "light", "full"]},
     # about 7k tokens per slice: the research's 4k to 7k band, and the point where the first backtest's recall
     # loss (3 groups, 4 examples, 18k chars) is recovered without reading the whole model
     "select": {"budget_chars": 28000, "max_groups": 4, "max_examples": 6, "initiative_budget_chars": 48000,
-               "initiative_max_groups": 6, "initiative_max_examples": 10},
+               "initiative_max_groups": 6, "initiative_max_examples": 10, "max_lessons": 2, "initiative_max_lessons": 3},
     "always_on_targets": [],
 }
 

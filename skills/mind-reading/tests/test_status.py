@@ -19,7 +19,7 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(st["corpus"]["by_source"], {"claude-code": 149, "codex": 80})
         self.assertEqual(st["unknown_tags"], {"weird-tag": 2})
         self.assertEqual(st["chunks"], 2)
-        self.assertEqual((st["mined"]["done"], st["mined"]["started"], len(st["mined"]["lenses"])), (2, 2, 6))  # chunks, not lens files
+        self.assertEqual((st["mined"]["done"], st["mined"]["started"], len(st["mined"]["lenses"])), (2, 2, 7))  # chunks, not lens files
         self.assertEqual(len(st["ledger"]), 1)
         self.assertIsNotNone(st["model"])
         self.assertIsNone(st["eval_guard"])  # no settings file configured in tests
@@ -28,7 +28,7 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(st["spool_pending"], 0)
         text = format_text(st)
         self.assertIn("corpus: 229 records", text)
-        self.assertIn("mined: 2 of 2 chunk(s) x 6 lens(es)", text)
+        self.assertIn("mined: 2 of 2 chunk(s) x 7 lens(es)", text)
         self.assertIn("eval look: model", text)
         self.assertIn("grants: 1 total, 1 active", text)
 
@@ -158,7 +158,7 @@ class StatusTests(unittest.TestCase):
         st = gather(self.paths, self.cfg)
         est = estimate(self.paths, self.cfg, st)
         self.assertEqual(est["chunks"], 2)
-        self.assertEqual((est["lenses"], est["mine_calls"]), (6, 12))  # one call per chunk per default lens
+        self.assertEqual((est["lenses"], est["mine_calls"]), (7, 14))  # one call per chunk per default lens
         self.assertEqual(est["eval_calls"], est["eval_sessions"] * 7)
         total_chars = sum(read_json(self.paths.prep_report)["chunk_chars"])
         lo, hi = (t // est["lenses"] for t in est["mine_tokens"])  # per lens: every lens rereads the whole chunk
