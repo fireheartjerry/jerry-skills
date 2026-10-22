@@ -211,7 +211,7 @@ def ensure_light_header(body, name):
 
 
 def files_hash(model_dir):
-    """sha256 over light.md, profile.md, examples.md and grants.md (bytes, in that order), first 16 hex characters."""
+    """SHA256 of MODEL_FILES in order, with absent optional files contributing no bytes."""
     h = hashlib.sha256()
     for name in MODEL_FILES:
         p = Path(model_dir) / name
@@ -389,7 +389,7 @@ def index_is_stale(model_dir):
     return bool(idx) and not idx.get("legacy") and idx.get("model_hash") != files_hash(model_dir)
 
 
-def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="execute", index=None, project=None):
+def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="execute", index=None, project=None, context=None):
     """Return (markdown slice, decision dict). Implements the algorithm in model-format.md.
 
     Order of the slice: corrections, standing grants, light, reading notes, standing rules, groups (best first),
@@ -413,6 +413,15 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
         legacy = True
     if not idx:
         raise ModelFormatError("index.json missing: run `synthesize index`")
+    from . import intent_context as _intent
+    frame = _intent.normalize(context)
+    if project and frame.get("project") and project != frame["project"]:
+        raise _intent.ContextFormatError("--project and intent-context project disagree")
+    project = project or frame.get("project")
+    context_text = _intent.retrieval_text(frame)
+    context_lower = context_text.lower()
+    context_words = _words(context_text)
+    context_stems = {_stem(w) for w in context_words}
     initiative = mode in ("initiative", "plan")
     seed_lower = (seed or "").lower()
     seed_words = _words(seed)
@@ -429,7 +438,12 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
             s += 0.5
         scored.append((s, g))
     matching = [g for s, g in sorted(scored, key=lambda t: (-t[0], t[1]["id"])) if s > 0]
-    escalated = (not initiative) and len(matching) > cfg_select["max_groups"]  # a seed spanning kinds reads more
+    context_routed = False
+    if not matching and context_text:
+        contextual = [(sum(1 for w in g["when"] if _keyword_in(w, context_lower, context_stems, legacy)), g) for g in idx["groups"]]
+        matching = [g for s, g in sorted(contextual, key=lambda t: (-t[0], t[1]["id"])) if s > 0]
+        context_routed = bool(matching)
+    escalated = (not initiative and not context_routed) and len(matching) > cfg_select["max_groups"]  # current seed spanning kinds reads more
     wide = initiative or escalated
     budget = cfg_select["initiative_budget_chars"] if wide or legacy else cfg_select["budget_chars"]
     max_groups = cfg_select.get("initiative_max_groups", 6) if wide else cfg_select["max_groups"]
@@ -446,12 +460,18 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
             sc += 0.5
         ls_scored.append((sc, lg))
     chosen_lessons = [lg for sc, lg in sorted(ls_scored, key=lambda t: (-t[0], t[1]["id"])) if sc > 0][:max_lessons]
+    if not chosen_lessons and context_text:
+        contextual_lessons = [(sum(1 for w in lg["when"] if _keyword_in(w, context_lower, context_stems, False)), lg)
+                              for lg in idx.get("lessons") or []]
+        chosen_lessons = [lg for sc, lg in sorted(contextual_lessons, key=lambda t: (-t[0], t[1]["id"])) if sc > 0][:max_lessons]
     chosen_ids = {g["id"].lower() for g in chosen + chosen_lessons}
     chosen_when = {w for g in chosen + chosen_lessons for w in g["when"]}
     ex_scored = []
     for e in idx["examples"]:
         tag_score = sum(1 for t in e["tags"] if t in chosen_ids or t in chosen_when)
         overlap = len((_words(e["seed"]) | _words(e.get("situation"))) & (seed_words | kind_words))
+        if context_text:
+            overlap += 0.5 * len((_words(e["seed"]) | _words(e.get("situation"))) & context_words)
         when_hits = sum(1 for w in chosen_when if _phrase_in(w, e["seed"].lower()))
         ex_scored.append((tag_score + when_hits, overlap, e))
     ranked = sorted(ex_scored, key=lambda t: (-t[0], -t[1], t[2]["n"]))
@@ -491,6 +511,8 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     sr = idx.get("standing_rules")
     if sr and profile:
         parts.append(("standing_rules", "\n".join(profile[sr["lines"][0] - 1:sr["lines"][1]]).strip() + "\n", True))
+    if frame:
+        parts.append(("intent_context", _intent.render(frame), True))
     for k, g in enumerate(chosen):
         a, b = g["lines"]
         parts.append(("group:" + g["id"], "\n".join(profile[a - 1:b]).strip() + "\n", k == 0))
@@ -506,7 +528,7 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     from . import recall as _recall
     recall_warning = None
     try:
-        echoes = _recall.retrieve(model_dir, seed, kind=kind, project=project, limit=cfg_select.get("max_echoes", 3))
+        echoes = _recall.retrieve(model_dir, seed, kind=kind, project=project, limit=cfg_select.get("max_echoes", 3), context_text=context_text)
     except _recall.RecallFormatError as exc:
         echoes = []
         recall_warning = str(exc)
@@ -558,4 +580,8 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
                                                                or _kind_keyword_in(w, kind_words)] for g in chosen if g["id"] in kept_groups},
                      "fallback": not bool(matching), "budget_chars": budget,
                      "over_budget": len(body) + len(header) > budget})
+    if frame:
+        decision.update(context_fields=sorted(frame), context_hash=_intent.fingerprint(frame), context_routed=context_routed,
+                        context_keywords={g["id"]: [w for w in g["when"] if _keyword_in(w, context_lower, context_stems, legacy)]
+                                          for g in chosen if g["id"] in kept_groups})
     return header + body, decision

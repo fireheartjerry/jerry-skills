@@ -100,6 +100,54 @@ class RecallTests(unittest.TestCase):
             self.assertEqual(decision["echoes"], [])
             self.assertTrue(decision["recall_warning"])
 
+    def test_contextual_episode_only_contains_preceding_typed_turns(self):
+        self.prepare()
+        sessions = [json.loads(s) for s in self.paths.sessions.read_text().splitlines()]
+        for session in sessions:
+            session["messages"].insert(0, {"key": session["session"] + "prefix", "ordinal": 0,
+                "time": "2025-12-31T10:00:00Z", "origin": "typed", "text": "the invoice CSV download is empty"})
+            session["messages"][1]["text"] = "keep going"
+        write_jsonl(self.paths.sessions, sessions)
+        build_episodes(self.paths)
+        found = retrieve(self.paths.model, "ready", context_text="repair the invoice CSV download")
+        self.assertTrue(found)
+        episode = next(e for e in found if e["seed"] == "keep going")
+        self.assertEqual(episode["before"][0]["text"], "the invoice CSV download is empty")
+        self.assertNotIn(episode["addition"], " ".join(v["text"] for v in episode["before"]))
+        self.assertNotIn("codex:held", json.dumps(found))
+        self.assertIn("Earlier user context:", render([episode]))
+
+    def test_context_does_not_match_words_only_in_the_future_addition(self):
+        self.prepare()
+        build_episodes(self.paths)
+        self.assertEqual(retrieve(self.paths.model, "ready", context_text="sibling download"), [])
+
+    def test_generic_exact_seed_needs_contextual_relevance_when_context_given(self):
+        self.prepare()
+        sessions = [json.loads(s) for s in self.paths.sessions.read_text().splitlines()]
+        for session in sessions:
+            session["messages"][0]["text"] = "keep going"
+        write_jsonl(self.paths.sessions, sessions)
+        build_episodes(self.paths)
+        self.assertEqual(retrieve(self.paths.model, "keep going", context_text="battery chemistry"), [])
+
+    def test_v1_store_remains_readable(self):
+        write_json(self.paths.model / "episodes.json", {"version": 1, "episodes": [{
+            "id": "a", "seed": "fix invoice export", "addition": "also verify every downloaded file",
+            "session_id": "old", "source_ids": ["s1", "s2"], "signals": ["quality"],
+            "kinds": ["fix"], "time": "2026-01-01"}]})
+        self.assertTrue(retrieve(self.paths.model, "invoice export"))
+
+    def test_context_match_explanations_belong_to_the_selected_episode(self):
+        episodes = []
+        for word in ("alpha", "beta"):
+            episodes.append({"id": word, "seed": "keep going", "addition": "also verify the actual result",
+                "session_id": word, "source_ids": [word + "s", word + "a"], "signals": ["quality"],
+                "kinds": ["resume"], "time": "2026-01-01", "before": [{"text": word, "source_id": word + "p"}]})
+        write_json(self.paths.model / "episodes.json", {"version": 2, "episodes": episodes})
+        found = retrieve(self.paths.model, "keep going", context_text="alpha beta")
+        self.assertEqual({e["id"]: e["context_matches"] for e in found}, {"alpha": ["alpha"], "beta": ["beta"]})
+
 
 class ProjectCorrectionTests(unittest.TestCase):
     def test_project_corrections_are_only_loaded_for_the_named_project(self):

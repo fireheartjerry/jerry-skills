@@ -226,6 +226,32 @@ def cmd_select(args, paths, cfg, log):
     """The slice for a seed. Exit 4 with "no model" only when neither index.json nor any model file exists; a model
     built before the index format is read through the legacy fallback (every example, matching groups)."""
     from mr.select import ModelFormatError, select_slice
+    from mr.intent_context import ContextFormatError, normalize
+    context = None
+    context_file = getattr(args, "context_file", None)
+    if context_file:
+        if context_file == "-" and args.seed_file == "-":
+            log("seed and intent context cannot both read stdin")
+            return EXIT_USAGE
+        try:
+            if context_file == "-":
+                raw_context = sys.stdin.read(65537)
+            else:
+                with open(context_file, encoding="utf-8") as fh:
+                    raw_context = fh.read(65537)
+            if len(raw_context) > 65536:
+                raise ContextFormatError("intent context file exceeds 65536 characters")
+            def unique_context(items):
+                result = {}
+                for key, value in items:
+                    if key in result:
+                        raise ContextFormatError("duplicate intent-context key: %s" % key)
+                    result[key] = value
+                return result
+            context = normalize(json.loads(raw_context, object_pairs_hook=unique_context))
+        except (OSError, ValueError) as exc:
+            log("select: invalid intent context: %s" % exc)
+            return EXIT_USAGE
     seed = _read_seed(args, log)
     if seed is None:
         return EXIT_USAGE
@@ -235,8 +261,8 @@ def cmd_select(args, paths, cfg, log):
         return EXIT_INVALID
     try:
         text, decision = select_slice(paths.model, seed, cfg["select"], kind=args.kind, no_light=args.no_light, mode=args.mode,
-                                      project=args.project)
-    except (ModelFormatError, FileNotFoundError) as exc:
+                                      project=args.project, context=context)
+    except (ModelFormatError, FileNotFoundError, ContextFormatError) as exc:
         log("select: %s" % exc)
         return EXIT_INVALID
     if args.json:
@@ -703,6 +729,7 @@ def build_parser():
     p.add_argument("--kind", help="resolved request kind (group id or words)")
     p.add_argument("--project", help="exact project id for scoped corrections and relevant historical episodes")
     p.add_argument("--no-light", action="store_true", help="omit light.md (the always-on block is already in context)")
+    p.add_argument("--context-file", help="bounded JSON intent frame from preceding conversation; '-' reads stdin")
     p.add_argument("--mode", default="execute", choices=["execute", "discuss", "status", "hold", "plan", "initiative"])
     p.set_defaults(func=cmd_select)
 
