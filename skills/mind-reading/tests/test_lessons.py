@@ -469,3 +469,14 @@ class RuntimeDocTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenderLineCapTests(unittest.TestCase):
+    def test_truncated_lesson_line_never_exceeds_line_max(self):
+        from mr.lessons import render_lesson, LINE_MAX
+        lesson = {"strength": "strong", "outcome": "bad", "pattern": "p " * 200, "outcome_detail": "o " * 200,
+                  "better_alternative": "b " * 200, "request_kind": "ui work",
+                  "evidence": [{"role": "user", "quote": "q" * 900, "time": "2026-10-01T00:00:00Z"}]}
+        line = render_lesson(lesson)
+        self.assertIsNotNone(line)
+        self.assertLessEqual(len(line), LINE_MAX)

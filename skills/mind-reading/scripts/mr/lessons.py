@@ -637,7 +637,7 @@ def render_lesson(lesson, drops=()):
         quotes.pop(0)
         line = body + " " + "; ".join(quotes)
     if len(line) > LINE_MAX:
-        line = line[:LINE_MAX - 4].rstrip() + ' ..."'
+        line = line[:LINE_MAX - len(' ..."')].rstrip() + ' ..."'
     if any(d and d.lower() in line.lower() for d in drops):
         return None
     return line
