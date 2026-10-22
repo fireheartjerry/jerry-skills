@@ -37,6 +37,7 @@ def init_home(home, name="Alex", engine="fake", people=None, prep_overrides=None
     cfg["engine"] = engine
     cfg["people"] = PEOPLE if people is None else people
     cfg["claude_settings_path"] = str(Path(home) / "no-settings.json")
+    cfg["track"]["include_default_dirs"] = False  # a test never scans the machine's real transcripts
     if prep_overrides:
         cfg["prep"].update(prep_overrides)
     if cfg_overrides:

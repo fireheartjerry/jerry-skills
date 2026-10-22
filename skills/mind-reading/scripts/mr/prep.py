@@ -425,12 +425,19 @@ def _block(s, part, n_parts, msgs, first_messages, p, omitted=None, ctx_stats=No
     return b
 
 
-def session_blocks(s, p, omitted=None, ctx_stats=None):
+def first_messages_of(msgs, p):
+    """The session's first two typed messages as a later part shows them."""
+    typed = [m for m in msgs if m.get("origin", "typed") == "typed"]
+    return [{"time": cm["time"], "text": cm["text"]} for cm in (chunk_msg(m, p) for m in typed[:2])]
+
+
+def session_parts(s, p, first_messages=None):
+    """(parts, first_messages): the session's messages cut into parts of at most part_chars."""
     msgs = s["messages"]
     if not msgs:
-        return []
-    typed = [m for m in msgs if m.get("origin", "typed") == "typed"]
-    first_messages = [{"time": cm["time"], "text": cm["text"]} for cm in (chunk_msg(m, p) for m in typed[:2])]
+        return [], []
+    if first_messages is None:
+        first_messages = first_messages_of(msgs, p)
     overhead = len(json.dumps(_block(s, 2, 2, [], first_messages, p), ensure_ascii=False)) + 16
     budget = max(p["part_chars"] - overhead, p["part_chars"] // 2)
     parts, cur, size = [], [], 0
@@ -443,6 +450,11 @@ def session_blocks(s, p, omitted=None, ctx_stats=None):
         size += k
     if cur:
         parts.append(cur)
+    return parts, first_messages
+
+
+def session_blocks(s, p, omitted=None, ctx_stats=None):
+    parts, first_messages = session_parts(s, p)
     return [_block(s, i + 1, len(parts), part, first_messages, p, omitted, ctx_stats) for i, part in enumerate(parts)]
 
 
@@ -485,23 +497,33 @@ def build_chunks(train, p, omitted=None, ctx_stats=None):
     """Chunks of session blocks, sized by the user's text only (agent context excluded from the count), with the agent
     context of each chunk under chunk_context_cap: a block whose context would pass it starts a new chunk, and a block
     that passes it alone loses its last heads. A context lens's prompt stays under chunk_chars plus that cap."""
+    return pack_blocks((b for s in train for b in session_blocks(s, p, omitted, ctx_stats)), p, ctx_stats)
+
+
+def pack_blocks(blocks, p, ctx_stats=None, chunk_chars=None, keys=None):
+    """Pack blocks in order into chunks of at most chunk_chars of the user's text, each chunk's agent context under
+    chunk_context_cap. With `keys` (a list parallel to blocks), returns (chunks, key lists per chunk)."""
     cap = chunk_context_cap(p)
+    limit = chunk_chars or p["chunk_chars"]
     chunks, cur, size, ctx_size = [], [], 0, 0
-    for s in train:
-        for b in session_blocks(s, p, omitted, ctx_stats):
-            if context_chars(b) > cap:
-                cap_block_context(b, cap, ctx_stats)
-            n = len(json.dumps(without_context(b), ensure_ascii=False)) + 1
-            c = context_chars(b)
-            if cur and (size + n > p["chunk_chars"] or ctx_size + c > cap):
-                chunks.append(cur)
-                cur, size, ctx_size = [], 0, 0
-            cur.append(b)
-            size += n
-            ctx_size += c
+    kchunks, kcur = [], []
+    for i, b in enumerate(blocks):
+        if context_chars(b) > cap:
+            cap_block_context(b, cap, ctx_stats)
+        n = len(json.dumps(without_context(b), ensure_ascii=False)) + 1
+        c = context_chars(b)
+        if cur and (size + n > limit or ctx_size + c > cap):
+            chunks.append(cur)
+            kchunks.append(kcur)
+            cur, size, ctx_size, kcur = [], 0, 0, []
+        cur.append(b)
+        kcur.append(keys[i] if keys is not None else None)
+        size += n
+        ctx_size += c
     if cur:
         chunks.append(cur)
-    return chunks
+        kchunks.append(kcur)
+    return (chunks, kchunks) if keys is not None else chunks
 
 
 def no_test_split(sessions, p, train_before):
@@ -621,7 +643,11 @@ def _clear_dir(d):
     d.mkdir(parents=True, exist_ok=True)
 
 
-def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=False, log=print, no_test=False, train_before=None):
+def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=False, log=print, no_test=False, train_before=None,
+             pin=False, min_new_chars=0, delta_chunk_chars=None):
+    """pin: incremental chunks (incremental.py). Chunks a previous run pinned keep their messages and their bytes; only
+    material no chunk holds goes into new delta chunks (of at most delta_chunk_chars, and only once it reaches
+    min_new_chars). Without pin every chunk is rebuilt and the pins are discarded."""
     p = cfg["prep"]
     rows = load_corpus(paths)
     if not rows:
@@ -659,7 +685,6 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
             shutil.move(str(split_dir), str(archive))
             log("archived eval/%s to %s" % (split["split_id"], archive))
     paths.ensure_tree()
-    _clear_dir(paths.chunks)
     _clear_dir(paths.dev)
     truth_name, ctx_truth_name = "truth-" + split["truth_suffix"], "truth-context-" + split["truth_suffix"]
     if split_dir.exists() and not frozen and not no_test:
@@ -667,11 +692,22 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
             if (split_dir / sub).exists():
                 shutil.rmtree(split_dir / sub)
     omitted, ctx_stats = {}, {}
-    chunks = build_chunks(split["train"], p, omitted, ctx_stats)
-    for k, c in enumerate(chunks):
-        with open(paths.chunks / ("chunk-%02d.jsonl" % k), "w", encoding="utf-8") as fh:
+    pin_info = None
+    if pin:
+        from . import incremental as _inc
+        prior = {f.stem: f.read_bytes() for f in chunk_files(paths)}
+        named, pin_info = _inc.pinned_chunks(paths, split["train"], p, prior, omitted, ctx_stats, min_new_chars=min_new_chars,
+                                             delta_chunk_chars=delta_chunk_chars, log=log)
+    else:
+        named = [("chunk-%02d" % k, c) for k, c in enumerate(build_chunks(split["train"], p, omitted, ctx_stats))]
+        if paths.chunk_pins.exists():
+            paths.chunk_pins.unlink()  # a full rebuild regroups every chunk: the pins describe chunks that no longer exist
+    _clear_dir(paths.chunks)
+    for cid, c in named:
+        with open(paths.chunks / (cid + ".jsonl"), "w", encoding="utf-8") as fh:
             for b in c:
                 fh.write(json.dumps(b, ensure_ascii=False) + "\n")
+    chunks = [c for _, c in named]
     test_ctx_written, test_ctx_skipped, dev_ctx_written, dev_ctx_skipped = 0, [], 0, []
     if no_test:
         test_written, test_skipped, dev_written, dev_skipped = 0, [], 0, []
@@ -747,7 +783,7 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
                                 "ratio": p.get("chunk_agent_context_ratio", 0.5), "head_cap": p.get("chunk_agent_context_chars", 300)},
         "chunk_chars_omitted": omitted, "chunk_caps": {"message_max_chars": p.get("chunk_message_max_chars"),
                                                        "nontyped_head_chars": p.get("chunk_nontyped_head_chars")},
-        "no_twins": no_twins,
+        "no_twins": no_twins, "chunk_ids": [cid for cid, _ in named], "incremental": pin_info,
     }
     report.update(leaks)
     write_json(paths.prep_report, report)
@@ -766,4 +802,8 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
 
 
 def chunk_files(paths):
-    return sorted(Path(paths.chunks).glob("chunk-*.jsonl"))
+    """Chunk files in numeric order (chunk-99 before chunk-100)."""
+    def key(p):
+        m = re.match(r"chunk-(\d+)$", p.stem)
+        return (int(m.group(1)) if m else 10 ** 9, p.stem)
+    return sorted(Path(paths.chunks).glob("chunk-*.jsonl"), key=key)

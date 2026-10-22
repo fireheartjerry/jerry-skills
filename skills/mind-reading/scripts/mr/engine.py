@@ -320,7 +320,7 @@ class Engine:
 
     def __init__(self, paths, cfg, kind, stage, run_id=None, model=None, concurrency=4, max_calls=None,
                  max_cost_usd=None, backoff=None, timeout=None, fake_dir=None, log=print, backend=None, hook=None,
-                 runs_dir=None, resume=None, private=False):
+                 runs_dir=None, resume=None, private=False, cost_estimate=None):
         self.paths, self.cfg, self.kind, self.stage, self.log = paths, cfg, kind, stage, log
         self.runs_dir = Path(runs_dir) if runs_dir else paths.runs
         self.run_id = run_id or new_run_id(paths, self.runs_dir)
@@ -340,8 +340,16 @@ class Engine:
         self.backoff = list(backoff) if backoff is not None else ([0, 0] if kind in ("fake", "print") else [10, 60])
         self.lock = threading.Lock()
         self.calls = 0
+        self._inflight = 0
         self.cost = 0.0
         self.tokens = 0
+        # cost_estimate(unit) -> USD: with --max-cost-usd, a call starts only when the spend so far plus the estimates
+        # of the calls in flight plus its own estimate stay under the cap, so a capped run does not overshoot by a
+        # whole round of concurrent calls. Without it the cap is checked against the spend so far only.
+        self.cost_estimate = cost_estimate
+        self.reserved = 0.0
+        self._paid_chars = 0  # prompt characters of calls that reported a cost: the run learns its own price
+        self._paid_cost = 0.0
         if backend is not None:
             self.backend = backend
         elif kind == "fake":
@@ -363,13 +371,46 @@ class Engine:
             with open(self.run_dir / "calls.jsonl", "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    def _budget_ok(self):
+    def _budget_ok(self, reserve=0.0):
+        """True when one more call fits; reserves `reserve` USD for it (released by _release)."""
         with self.lock:
-            if self.max_calls is not None and self.calls >= self.max_calls:
+            if self.max_calls is not None and self.calls + self._inflight >= self.max_calls:
                 return False
-            if self.max_cost is not None and self.cost >= self.max_cost:
-                return False
+            if self.max_cost is not None:
+                if self.cost >= self.max_cost:
+                    return False
+                if reserve and self.cost + self.reserved + reserve > self.max_cost:
+                    return False
+            self.reserved += reserve
+            self._inflight += 1
             return True
+
+    def _release(self, reserve):
+        with self.lock:
+            self.reserved = max(0.0, self.reserved - reserve)
+            self._inflight = max(0, self._inflight - 1)
+
+    def _estimate(self, unit, prompt):
+        if self.cost_estimate is None or self.max_cost is None:
+            return 0.0
+        try:
+            est = max(0.0, float(self.cost_estimate(unit, prompt)))
+        except Exception:  # an estimator bug must not stop a run; the cap still applies to the spend so far
+            est = 0.0
+        with self.lock:
+            if self._paid_chars:
+                est = max(est, 1.2 * self._paid_cost / self._paid_chars * len(prompt or ""))
+        return est
+
+    def _call_cost(self, res):
+        """The engine's reported cost; for codex, which reports tokens only, tokens times codex_usd_per_million_tokens
+        when that rate is set (0 by default: the cap then binds through --max-calls only)."""
+        if res.cost is not None:
+            return res.cost
+        rate = float(self.cfg.get("codex_usd_per_million_tokens") or 0.0) if self.kind == "codex" else 0.0
+        if rate and res.tokens:
+            return round(res.tokens * rate / 1e6, 6)
+        return None
 
     def _validate(self, unit, data):
         errs = _schema.validate(data, unit.schema)
@@ -400,26 +441,35 @@ class Engine:
         attempts, failures, validation_retried = 0, 0, False
         t_start = time.time()
         while True:
-            if not self._budget_ok():
+            reserve = self._estimate(unit, prompt)
+            if not self._budget_ok(reserve):
                 return ("stopped", unit.id, "budget reached before call")
             attempts += 1
             t0 = time.time()
-            res = self.backend.call(unit, prompt, attempts)
+            try:
+                res = self.backend.call(unit, prompt, attempts)
+            finally:
+                self._release(reserve)
             dur = time.time() - t0
+            cost = self._call_cost(res)
             with self.lock:
                 self.calls += 1
                 self.tokens += res.tokens or 0
-                self.cost += res.cost or 0.0
+                self.cost += cost or 0.0
+                if cost:
+                    self._paid_cost += cost
+                    self._paid_chars += len(prompt or "")
             if res.pending:
                 self._record({"unit": unit.id, "attempt": attempts, "status": "pending", "time": _now()})
                 return ("pending", unit.id, None)
             err = None if not res.ok else self._validate(unit, res.data)
             status = "ok" if res.ok and err is None else ("invalid" if res.ok else "error")
             self._record({"unit": unit.id, "attempt": attempts, "status": status, "exit_code": res.exit_code,
-                          "duration_s": round(dur, 1), "tokens": res.tokens, "cost_usd": res.cost, "usage": res.usage,
+                          "duration_s": round(dur, 1), "tokens": res.tokens, "cost_usd": cost, "usage": res.usage,
+                          "prompt_chars": len(prompt), "reserved_usd": round(reserve, 4) if reserve else None,
                           "error": (err or res.error or "")[:500], "time": _now()})
             if status == "ok":
-                self._write(unit, res.data, attempts, res.tokens, res.cost, time.time() - t_start)
+                self._write(unit, res.data, attempts, res.tokens, cost, time.time() - t_start)
                 return ("ok", unit.id, None)
             if status == "invalid":
                 if validation_retried:

@@ -13,8 +13,11 @@ The contract between the pipeline (which writes the model) and the runtime (whic
 | `grants.md` | `synthesize grants` (deterministic, no engine; merges into an existing file) | every call: the active, valid blocks only, inside the slice | yes, then `synthesize index` |
 | `index.json` | `synthesize index` | `select` (the agent never reads it directly) | never |
 | `corrections.md` | the runtime (append, through `MR correct`) | every call, whole, inside the slice | yes |
-| `decisions.jsonl` | the runtime (append, through `MR log-decision`) | `status` | no |
-| `archive/<model_hash>/` | `synthesize`, `refresh` | never | no |
+| `decisions.jsonl` | the runtime (append, through `MR log-decision`) | `status`, `track` | no |
+| `history.jsonl` | `synthesize`, `refresh` (any change of the live model hash), `refresh --auto`, `refresh --rollback` | `track`, `refresh --rollback` | no |
+| `archive/<model_hash>/` | `synthesize`, `refresh`, `refresh --auto`, `refresh --rollback` | never | no |
+
+Outside `model/`, the measurement and upkeep files (section 10): `track/` (the correction tracker), `prefer/` (blind pages and their keys), `auto/` (refresh --auto: lock, last run, run log, staging), `logs/`, and `derived/chunk-pins.json`.
 
 `corrections.md` and `decisions.jsonl` are never archived or overwritten. `refresh --corrections` and `refresh --always-on` never touch `grants.md`; `refresh --extend` runs `synthesize grants`, which only appends and applies typed revocations. The runtime never opens `$MIND_READING_HOME/eval/`. Every directory under the data home is mode 0700 and every file the CLI writes is 0600 (`init`, `extract` and `prep` tighten an older tree; `status` warns about anything looser).
 
@@ -239,6 +242,14 @@ One line per correction, appended by the runtime through `MR correct` (JSON on s
 - `scope`: `global` (about the person) or `project:<name>` (a project fact; `refresh` keeps it out of the model and lists it in `MODEL.json.project_notes` for the user to move into that project's memory).
 - `kind`: `fix` (change a sentence), `add` (add one), `drop` (remove one).
 
+Lines starting with `#` are comments: `refresh`, `status` and `lint` skip them, and `select` leaves them out of the slice. The correction tracker writes its drafts this way, as `# pending <id> | ` followed by a normal line:
+
+```
+# pending d3f1a2b | 2026-03-24 | seed: "the export is broken again" | wrong: n/a | meant: the PDF export on the invoices page | scope: global | kind: fix
+```
+
+A draft applies only once reviewed: deleting the `# pending <id> | ` prefix leaves a normal line (accepted); deleting the line rejects it, and the tracker never drafts that invocation again. When the same correction is pending `track.promote_after` times (default 3; same meaning by word overlap), the tracker appends it once as a normal line dated that day. Drafts are written only when the user's message states what was meant, and never when the line would carry a forbidden rule or a grant phrase.
+
 A line that does not parse is kept and reported by `status`, never deleted. The runtime reads the whole file every call; `status` warns past 200 lines and suggests `refresh --corrections`. `MR correct` exits 4 and records nothing when `meant` or `wrong` of a `fix` or `add` carries a forbidden rule (section 9) or a grant phrase: a correction changes what the expansion says, never what may be done without asking. `lint --model` applies the same check to every line already in the file (a `drop` names the sentence to remove, so its `meant` is exempt).
 
 ## 7. decisions.jsonl
@@ -256,6 +267,7 @@ One JSON line per runtime invocation, appended by the runtime through `MR log-de
 - `groups`, `examples`, `chars`: the slice that was loaded, from the slice header.
 - `grants`: the ids of the grants the expansion relied on (`[S:G1]` tags), empty when none.
 - `lessons`: the lesson groups in the slice (`W1`), from the slice header; `upgrades`: how many sentences took a lesson's better way over the literal ask (`Changed:` lines).
+- `model_hash`: the live model's hash, added by `log-decision` from `MODEL.json` (absent before any model exists), so the correction tracker attributes the expansion to the exact model.
 
 `status` turns the file into calibration counts: invocations, mean S/L/G, held rate, corrections per 100 invocations, upgrades per 100 invocations.
 
@@ -273,7 +285,7 @@ When the data home is not writable (Codex's workspace-write sandbox, a read-only
  "files": {"light.md": 5800, "profile.md": 61000, "examples.md": 24000, "grants.md": 840, "index.json": 7000}}
 ```
 
-`parents` holds the previous `model_hash` after a refresh. `always_on_targets` is set by the first `refresh --always-on --write-to` and used by `status` for the drift check. `folded_drops` lists the sentences removed by `kind: drop` corrections. `grants_added` (`[{"id", "source", "quote"}]`) lists the grants the pipeline added to `grants.md`, and `grant_tombstones` (`[{"id", "source", "quote", "reason": "revoked" | "deleted", "date"}]`) the grants the user revoked or deleted, which `synthesize grants` never re-adds. `synthesize grants` may create the file with only those two keys before the manifest step runs; `status` treats a manifest without `model_hash` as no model yet.
+`parents` holds the previous `model_hash` after a refresh. `mined_run` names the mined run the model was synthesized from; `refresh --auto` builds a new model only when a newer complete mined run exists or reviewed corrections wait. After a rollback, `rolled_back_from` and `rolled_back_to` name the two versions. `always_on_targets` is set by the first `refresh --always-on --write-to` and used by `status` for the drift check. `folded_drops` lists the sentences removed by `kind: drop` corrections. `grants_added` (`[{"id", "source", "quote"}]`) lists the grants the pipeline added to `grants.md`, and `grant_tombstones` (`[{"id", "source", "quote", "reason": "revoked" | "deleted", "date"}]`) the grants the user revoked or deleted, which `synthesize grants` never re-adds. `synthesize grants` may create the file with only those two keys before the manifest step runs; `status` treats a manifest without `model_hash` as no model yet.
 
 ## 9. Forbidden rules
 
@@ -293,3 +305,33 @@ permanent(ly)? .* (config|settings?)      (change|edit|modify|loosen|relax) .* (
 ```
 
 Lessons (section 2a) get one more check on top: nothing in a lesson may authorize an outward-facing, destructive, spend or permission action (`lessons.lesson_hits`), and the `Did:` and `Outcome:` part of a bad lesson, which describes what went wrong, is the one place a description such as "pushed without running the tests" is not read as an instruction. The exempt lines are the fixed rewording template and the `- Quote:` lines of `grants.md` (section 3a), which carry the user's verbatim words and are admitted only with an explicit grant phrase, a verified source and a grantable Covers. When the mining shows the user said such things without granting anything, the profile records the preference, not the instruction, under `## 5. How {name} communicates` or `## 8. Dislikes`, in exactly this form: "gets frustrated by repeated permission prompts; expects the agent to batch questions and work on unblocked items meanwhile". "Prefers that you skip permissions" is an instruction and fails the lint. The substance of a grant never enters `profile.md` or `light.md` in any wording; it lives in `grants.md` only. The runtime's held list (SKILL.md section 5) applies whatever the model says; only an active grant in `grants.md` lifts a category, and never permission, sandbox, security or credential changes, and never messages to people the grant does not name.
+
+## 10. Measurement and upkeep files
+
+`model/history.jsonl`: one line each time the live model hash changes: `{"time", "event": "build" | "auto" | "rollback" | "auto-rollback", "model_hash", "previous", "archived"}`. `archived` names the version moved to `archive/<hash>/` by that event. `refresh --rollback` restores the version before the current one (`--to` any archived one); the auto refresh prunes the archives it made beyond `auto.keep_versions`. A rollback restores `light.md`, `profile.md` and `examples.md`, rebuilds the index, keeps `grants.md` as it is, and resets `corrections_folded_through` to the restored version's.
+
+`track/invocations.jsonl` (rewritten each run, mode 0600), one object per invocation and never any seed or message text:
+
+```json
+{"id": "b514362946d424d8", "source": "claude-code", "session": "<session id>", "record_id": "<record uuid>", "time": "2026-03-02T10:00:01Z", "time_reliable": true, "next_time": "2026-03-02T10:00:30Z", "gap_min": 0.5, "markers": ["phrase", "skill_tool"], "interrupted": false, "seed_hash": "1a2b3c4d", "seed_key": "0f1e2d3c4b", "class_scan": "correction", "rule_scan": "C-meant", "class": "correction", "rule": "C-meant", "rules_version": 1, "model_hash": "0123456789abcdef", "model_hash_from": "history"}
+```
+
+- `markers`: how the invocation was seen: `phrase`, `slash`, `skill_tool`, `skill_mention` (Claude Code), `codex_skill` (Codex).
+- `class_scan` and `rule_scan`: the transcript verdict (a rule from `RULES` in `scripts/mr/track.py`, or `engine:<model>` for a message no rule matched, with `base_rule: U-default`). `class` and `rule`: the final verdict after the runtime logs are joined (`L-logged-correct` when a `correct` line names this invocation). Classes: `correction`, `refinement`, `approval`, `unrelated`; `no_reply` and `unknown` are counted as invocations and left out of the rates.
+- `id`: a hash of the source and the record id, so a resumed or forked session that replays the record counts it once (the copy that saw the reply wins). `time_reliable: false` when the reply is stamped under two seconds after the trigger: an import re-stamped the session, so the class stands but the time places nothing.
+- `seed_hash`: sha256 of the seed, first 8 hex characters (the hash `log-decision` stores). `seed_key`: a hash of the seed's normalized first 60 characters, which joins corrections.md lines.
+- Rows from `decisions.jsonl` with no transcript match have `source: decisions.jsonl` and class `unknown`; `correct` lines with no match have `source: corrections.md` and class `correction`.
+
+`track/summary.json`: `invocations`, `classified`, `counts`, `rules` (counts per rule), `unreliable_times`, `correction_rate` and `refinement_rate` as `{"k", "n", "rate", "lo", "hi"}` (Wilson 95% interval), the same under `by_week` (ISO weeks in `config.timezone`) and `by_model`, `current` for the live model, the scanned roots, and the draft counts. `track/state.json` holds file sizes and mtimes for incremental scans, engine labels, and draft ids and line hashes (no text).
+
+`eval/ledger.json` also holds the human preference results, as entries with `"kind": "prefer"` (the one-look rule ignores them):
+
+```json
+{"kind": "prefer", "primary": true, "date": "2026-03-30T18:00:00Z", "build_id": "ca4d66885ebd", "arms": {"a": {"label": "home", "spec": "<home>", "model_hash": "0123456789abcdef", "skill_version": "2.5.0"}, "b": {"label": "no model", "spec": "none"}}, "pairs": 24, "answered": 24, "wins": {"a": 12, "b": 5}, "both": 5, "neither": 2, "wrong": {"a": 1, "b": 6}, "p_sign": 0.1435, "share": {"a": {"k": 12, "n": 17, "rate": 0.7059, "lo": 0.4687, "hi": 0.8672}}, "contaminated": {"a": 0, "b": 0}, "key_path": "<out>/key.json"}
+```
+
+`prefer/<time>/`: `prefer.html` (self-contained, no network), `key.json` (`build_id`, `rng_seed`, the arms with their model hashes, `pairs: {pair id: {"A": arm, "B": arm, "seed_id"}}`, `missing`, `contaminated`, `page_sha256`, the spend), and `expansions/<arm>/<seed id>.json` (the cached generated replies).
+
+`derived/chunk-pins.json`: `{"version": 1, "chunks": [{"id": "chunk-04", "created", "blocks": [{"session": "<source>:<session>", "part": "2/3", "keys": [corpus record keys]}]}]}`. A pinned chunk is rendered from exactly its keys; train messages no pin holds are new material for the next delta chunk. A full `prep` deletes the file.
+
+`auto/last.json` and `auto/runs.jsonl`: `{"started", "finished", "engine", "models", "outcome", "reason", "steps": {"extract", "track", "prep", "mine", "synthesize", "corrections"}, "budget": {"max_cost_usd", "spent_usd", "max_calls", "calls"}, "swap" | "rollback" | "regression"}`. `auto/lock` holds the running process. `auto/staging/model/` holds a candidate the gates held back until the next run.

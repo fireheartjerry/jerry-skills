@@ -3,11 +3,13 @@
 
   python3 -I scripts/mind_reading.py [--home PATH] <subcommand> [options]
 
-Subcommands: init, extract, prep, mine, synthesize, eval, refresh, status, select, log-decision, correct, lint.
-Exit codes: 0 ok, 1 usage, 2 refused or blocked (one-look rule, guard, `status` with BLOCKED items), 3 engine failure
-after retries or a budget stop, 4 validation failure (also: no model for `select`; a forbidden rule in a `correct`
-line or in light.md for `refresh --always-on`), 5 the data home is not writable and the line could not be spooled
-either (`log-decision`, `correct`).
+Subcommands: init, extract, prep, mine, synthesize, eval, refresh, status, select, log-decision, correct, lint, track,
+prefer, schedule.
+Exit codes: 0 ok, 1 usage, 2 refused or blocked (one-look rule, guard, `status` with BLOCKED items, `refresh --auto`
+while another runs), 3 engine failure after retries or a budget stop (`refresh --auto` that ended incomplete), 4
+validation failure (also: no model for `select`; a forbidden rule in a `correct` line or in light.md for `refresh
+--always-on`; `refresh --auto` or `--rollback` that could not run), 5 the data home is not writable and the line could
+not be spooled either (`log-decision`, `correct`).
 """
 import argparse
 import datetime as _dt
@@ -172,9 +174,56 @@ def cmd_eval(args, paths, cfg, log):
     return EXIT_ENGINE if failed else EXIT_OK
 
 
+def _tee(paths, log, name):
+    """A log function that also appends timestamped lines to <home>/logs/<name> (unattended runs leave a trail)."""
+    target = paths.logs / name
+
+    def tee(msg):
+        log(msg)
+        try:
+            paths.logs.mkdir(parents=True, exist_ok=True)
+            stamp = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+            with open(target, "a", encoding="utf-8") as fh:
+                for line in str(msg).splitlines() or [""]:
+                    fh.write("%s %s\n" % (stamp, line))
+        except OSError:
+            pass
+    return tee
+
+
+AUTO_EXIT = {"swapped": EXIT_OK, "nothing-new": EXIT_OK, "deferred": EXIT_OK, "held": EXIT_OK, "rolled-back": EXIT_OK,
+             "incomplete": EXIT_ENGINE, "locked": EXIT_REFUSED, "error": EXIT_INVALID}
+
+
 def cmd_refresh(args, paths, cfg, log):
     from mr.refresh import RefreshError, run_refresh
     from mr.select import ModelFormatError
+    if args.auto or args.rollback or args.list_versions:
+        from mr import auto as _auto
+        if args.list_versions:
+            vs = _auto.versions(paths)
+            cur = (_config.read_json(paths.model_json, {}) or {}).get("model_hash")
+            prev = _auto.previous_version(paths)
+            for v in vs:
+                print("%s  archived %s%s" % (v["model_hash"], v["time"], "  (previous: refresh --rollback restores it)" if v["model_hash"] == prev else ""))
+            if not vs:
+                log("refresh: no archived model versions under %s" % paths.archive)
+            _emit(args, {"current": cur, "previous": prev, "versions": vs})
+            return EXIT_OK
+        if args.rollback:
+            try:
+                res = _auto.rollback(paths, cfg, to=args.to, log=log)
+            except _auto.AutoError as exc:
+                log("refresh --rollback: %s" % exc)
+                _emit(args, {"error": str(exc)})
+                return EXIT_INVALID
+            _emit(args, res)
+            return EXIT_OK
+        tee = _tee(paths, log, "refresh-auto.log")
+        rec = _auto.run_auto(paths, cfg, kind=args.engine, max_cost_usd=args.max_cost_usd, max_calls=args.max_calls,
+                             fake_dir=_fake_dir(args), log=tee, force=args.force)
+        _emit(args, rec)
+        return AUTO_EXIT.get(rec["outcome"], EXIT_OK)
     do_all = not (args.corrections or args.extend or args.always_on)
     try:
         summary = run_refresh(paths, cfg, _engine_kind(args, cfg), corrections=args.corrections or do_all, extend=args.extend,
@@ -343,6 +392,12 @@ def cmd_log_decision(args, paths, cfg, log):
     except (TypeError, ValueError):
         log("field 'upgrades' must be an integer")
         return EXIT_USAGE
+    try:  # the model that was live, so the correction tracker can attribute this expansion exactly
+        mh = (_config.read_json(paths.model_json, {}) or {}).get("model_hash")
+    except (OSError, ValueError):
+        mh = None
+    if mh:
+        row["model_hash"] = mh
     if row["mode"] not in ("execute", "discuss", "status", "hold", "plan"):
         log("mode must be one of execute, discuss, status, hold, plan")
         return EXIT_USAGE
@@ -396,6 +451,82 @@ def cmd_correct(args, paths, cfg, log):
         log("correction recorded in %s (fold it in later with refresh --corrections)" % paths.corrections)
     _emit(args, {"line": line})
     return code
+
+
+def cmd_track(args, paths, cfg, log):
+    """Find real invocations in the transcripts, classify the next typed message, store ids and classes only."""
+    from mr.engine import EngineError
+    from mr.track import format_status_line, run_track
+    try:
+        summary = run_track(paths, cfg, claude_dirs=args.claude_dir, codex_dirs=args.codex_dir, full=args.full,
+                            engine=args.engine, engine_model=args.model, max_cost_usd=args.max_cost_usd,
+                            max_calls=args.max_calls, drafts=False if args.no_drafts else None, fake_dir=_fake_dir(args), log=log)
+    except (EngineError, OSError) as exc:
+        log("track: %s" % exc)
+        _emit(args, {"error": str(exc)})
+        return EXIT_ENGINE
+    if args.json:
+        _emit(args, summary)
+    elif not args.quiet:
+        print(format_status_line(summary))
+        for w, r in list(summary["by_week"].items())[-6:]:
+            print("  week %s: %d invocation(s), %d classified, corrections %s, refinements %s" % (
+                w, r["invocations"], r["classified"], _fmt_rate(r["correction"]), _fmt_rate(r["refinement"])))
+        for m, r in summary["by_model"].items():
+            print("  model %s: %d invocation(s), %d classified, corrections %s, refinements %s" % (
+                m[:16], r["invocations"], r["classified"], _fmt_rate(r["correction"]), _fmt_rate(r["refinement"])))
+    return EXIT_OK
+
+
+def _fmt_rate(block):
+    from mr.stats import format_rate
+    return format_rate(block)
+
+
+def cmd_prefer(args, paths, cfg, log):
+    from mr import prefer as _prefer
+    from mr.engine import EngineError
+    try:
+        if args.prefer_cmd == "build":
+            res = _prefer.run_build(paths, cfg, args.a, args.b, args.seeds, out=args.out, n=args.n, rng_seed=args.rng_seed,
+                                    kind=args.engine, model=args.model, max_cost_usd=args.max_cost_usd, max_calls=args.max_calls,
+                                    title=args.title, fake_dir=_fake_dir(args), log=log, collect=args.collect)
+            if res.get("pending"):
+                log(res["instructions"])
+                log("then: " + res["collect"])
+        elif args.prefer_cmd == "score":
+            res = _prefer.run_score(paths, args.answers, key_path=args.key, ledger=not args.no_ledger, log=log)
+        else:
+            log("prefer needs build or score")
+            return EXIT_USAGE
+    except (_prefer.PreferError, EngineError) as exc:
+        log("prefer: %s" % exc)
+        _emit(args, {"error": str(exc)})
+        return EXIT_INVALID
+    _emit(args, res)
+    return EXIT_OK
+
+
+def cmd_schedule(args, paths, cfg, log):
+    from mr import schedule as _schedule
+    if args.action == "install":
+        res = _schedule.install(paths, cfg, weekday=args.weekday, hour=args.hour, minute=args.minute,
+                                daily=True if args.daily else None, label=args.label, dry_run=args.dry_run,
+                                platform=args.platform, log=log)
+        _emit(args, res)
+        return EXIT_OK if res.get("installed") or args.dry_run or res.get("platform") != "darwin" else EXIT_REFUSED
+    if args.action == "uninstall":
+        res = _schedule.uninstall(paths, cfg, label=args.label, platform=args.platform, log=log)
+        _emit(args, res)
+        return EXIT_OK
+    st = _schedule.status(paths, cfg, platform=args.platform)
+    from mr.auto import format_status_line as auto_line, last_run
+    if args.json:
+        _emit(args, dict(st, last_run=last_run(paths)))
+    else:
+        print(_schedule.format_status_line(st))
+        print(auto_line(last_run(paths)))
+    return EXIT_OK
 
 
 def cmd_lint(args, paths, cfg, log):
@@ -498,7 +629,12 @@ def build_parser():
     engine_opts(p, with_judge=True)
     p.set_defaults(func=cmd_eval)
 
-    p = sub.add_parser("refresh", help="fold corrections, extend the corpus, render the always-on block")
+    p = sub.add_parser("refresh", help="fold corrections, extend the corpus, render the always-on block; --auto, --rollback")
+    p.add_argument("--auto", action="store_true", help="unattended capped refresh: extract, track, incremental mine, "
+                   "synthesize --update, fold reviewed corrections, gated swap (default cap: config auto.max_cost_usd)")
+    p.add_argument("--rollback", action="store_true", help="put the previous model version back (or --to HASH)")
+    p.add_argument("--to", help="with --rollback: the archived model hash (a prefix is enough)")
+    p.add_argument("--list", dest="list_versions", action="store_true", help="list archived model versions")
     p.add_argument("--corrections", action="store_true")
     p.add_argument("--extend", action="store_true")
     p.add_argument("--always-on", action="store_true")
@@ -525,6 +661,51 @@ def build_parser():
     p = sub.add_parser("correct", help="append one correction line (JSON on stdin: seed, wrong, meant, scope, kind)")
     p.set_defaults(func=cmd_correct)
 
+    p = sub.add_parser("track", help="correction tracker: real invocations, the next typed message classified (no text stored)")
+    p.add_argument("--claude-dir", action="append", help="Claude Code projects root to scan instead of the configured ones (repeatable)")
+    p.add_argument("--codex-dir", action="append", help="Codex sessions root to scan instead of the configured ones (repeatable)")
+    p.add_argument("--full", action="store_true", help="rescan every transcript, not only new or changed files")
+    p.add_argument("--engine", choices=["claude", "codex", "fake"], help="also label messages no rule matched with a cheap model")
+    p.add_argument("--model", help="engine classifier model (default config track.engine_model)")
+    p.add_argument("--max-cost-usd", type=float, help="engine classifier cap (default config track.engine_max_cost_usd)")
+    p.add_argument("--max-calls", type=int)
+    p.add_argument("--no-drafts", action="store_true", help="do not append pending correction drafts to corrections.md")
+    p.add_argument("--fake-dir", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_track)
+
+    p = sub.add_parser("prefer", help="blind A/B preference pages: build, then score your answers")
+    psub = p.add_subparsers(dest="prefer_cmd", parser_class=lambda **kw: argparse.ArgumentParser(parents=[common], **kw))
+    pb = psub.add_parser("build", help="write a self-contained blind page and a separate key")
+    pb.add_argument("--a", required=True, help="arm A: none | <home> | <skill dir>+<home> | dir:<expansions>")
+    pb.add_argument("--b", required=True, help="arm B, same forms")
+    pb.add_argument("--seeds", required=True, help="directory of seeds (*.json with seed/context, or *.txt / *.md)")
+    pb.add_argument("--out", help="output directory (default <home>/prefer/<timestamp>)")
+    pb.add_argument("--n", type=int, help="at most this many pairs (default config prefer.max_pairs)")
+    pb.add_argument("--rng-seed", type=int, help="seed for the side and order randomization (default random)")
+    pb.add_argument("--title")
+    pb.add_argument("--engine", choices=["claude", "codex", "print", "fake"])
+    pb.add_argument("--model", help="expansion model (default config models.<engine>.expand)")
+    pb.add_argument("--max-cost-usd", type=float, help="cap for generating expansions (default config prefer.max_cost_usd)")
+    pb.add_argument("--max-calls", type=int)
+    pb.add_argument("--collect", action="store_true", help="print mode: collect expansions that landed")
+    pb.add_argument("--fake-dir", help=argparse.SUPPRESS)
+    ps = psub.add_parser("score", help="unblind exported answers, sign test, record in the eval ledger")
+    ps.add_argument("answers", help="answers JSON exported from the page")
+    ps.add_argument("--key", help="key.json (default: key.json next to the answers)")
+    ps.add_argument("--no-ledger", action="store_true", help="report only; do not record in the eval ledger")
+    p.set_defaults(func=cmd_prefer)
+
+    p = sub.add_parser("schedule", help="install, remove or show the timer that runs refresh --auto")
+    p.add_argument("action", choices=["install", "uninstall", "status"])
+    p.add_argument("--weekday", type=int, help="0-6, 0 is Sunday (default config schedule.weekday)")
+    p.add_argument("--hour", type=int)
+    p.add_argument("--minute", type=int)
+    p.add_argument("--daily", action="store_true", help="every day instead of weekly")
+    p.add_argument("--label", help="LaunchAgent label (default config schedule.label)")
+    p.add_argument("--dry-run", action="store_true", help="print the LaunchAgent and the command without writing")
+    p.add_argument("--platform", choices=["darwin", "linux"], help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_schedule)
+
     p = sub.add_parser("lint", help="lint the public skill or the built model")
     p.add_argument("--skill", help="skill directory to lint")
     p.add_argument("--deny-file", help="extra forbidden strings, one per line")
@@ -545,7 +726,7 @@ def main(argv=None):
     paths = Paths(home)
     cfg = load_config(paths, args.config)
     log = _log_factory(args.quiet, args.json)
-    if args.cmd not in ("init", "lint", "status", "select", "log-decision", "correct") and not cfg.get("_exists"):
+    if args.cmd not in ("init", "lint", "status", "select", "log-decision", "correct", "track", "prefer", "schedule") and not cfg.get("_exists"):
         log("no config at %s: run `init --name <Name>` first" % paths.config)
         return EXIT_USAGE
     try:

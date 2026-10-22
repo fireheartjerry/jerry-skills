@@ -9,7 +9,7 @@ description: >
   invocation phrase appears as an instruction: "read my mind", "mind-read this",
   "/mind-reading" (Claude Code) or "$mind-reading" (Codex); the rest is the seed.
   A quoted or reported phrase does not fire it.
-metadata: {author: "Jerry Yuze Li (https://github.com/fireheartjerry)", version: 2.4.0, license: MIT}
+metadata: {author: "Jerry Yuze Li (https://github.com/fireheartjerry)", version: 2.5.0, license: MIT}
 ---
 
 # Mind reading
@@ -106,6 +106,8 @@ MR correct <<'JSON'
 {"seed": "the export is broken again", "wrong": "assumed the CSV export", "meant": "the PDF export on the invoices page", "scope": "project:webshop", "kind": "fix"}
 JSON
 ```
+
+Log every correction you see after an expansion, explicit or quiet: how often the user has to correct a reading is how this skill is measured.
 
 `kind: fix` changes a model sentence, `kind: add` adds one, `kind: drop` removes one (name the sentence under `meant`). `scope: global` for the person; `scope: project:<name>` for a project fact, which `refresh` keeps out of the model. The line lands in `model/corrections.md` and takes effect on the next `select`. Record only what the user corrected: never a line you declined to apply, never a grant (the user edits `grants.md` by hand). `correct` exits 4 and records nothing when `meant` or `wrong` reads as a permission or a forbidden rule; a quiet redirect can never widen what the agent may do. Never edit the other model files during a run; `refresh --corrections` folds the lines in. Silence is not confirmation and is never recorded.
 

@@ -72,6 +72,28 @@ DEFAULTS = {
     "select": {"budget_chars": 28000, "max_groups": 4, "max_examples": 6, "initiative_budget_chars": 48000,
                "initiative_max_groups": 6, "initiative_max_examples": 10, "max_lessons": 2, "initiative_max_lessons": 3},
     "always_on_targets": [],
+    # track: the correction tracker. Scans the configured transcript roots plus the standard local ones for real
+    # mind-reading invocations and classifies the user's next typed message (track.py). The engine classifier is off
+    # unless `track --engine` is passed; its spend is capped by engine_max_cost_usd.
+    "track": {"claude_dirs": [], "codex_dirs": [], "include_default_dirs": True, "promote_after": 3, "drafts": True,
+              "engine_model": {"claude": "haiku", "codex": ""}, "engine_max_cost_usd": 0.25, "engine_max_calls": 10,
+              "engine_batch": 20},
+    # auto: refresh --auto, the unattended low-effort refresh (auto.py). Spend per run is capped by max_cost_usd and
+    # max_calls; mining and synthesis use the models below, not the build's. Delta chunks hold only material no chunk
+    # has pinned yet, sized by delta_chunk_chars so one capped run can mine them; mining resumes on the next run when
+    # the cap stops it. usd_per_mtok (input, output) and estimate_safety only size the per-call reservation that keeps a
+    # run under its cap; the engine's reported cost is what counts.
+    "auto": {"max_cost_usd": 3.0, "max_calls": 30, "synth_reserve_usd": 1.0, "min_new_chars": 20000,
+             "delta_chunk_chars": 60000, "settle_hours": 2, "advance_train_before": True, "keep_versions": 5,
+             "rollback_on_regression": True, "min_invocations": 10, "concurrency": 1,
+             "models": {"claude": {"mine": "sonnet", "synthesize": "sonnet"}, "codex": {"mine": "", "synthesize": ""}},
+             "usd_per_mtok": {"haiku": [1.0, 5.0], "sonnet": [3.0, 15.0], "opus": [5.0, 25.0], "default": [5.0, 25.0]},
+             "estimate_safety": 2.0, "out_tokens": {"mine": 8000, "synthesize": 30000, "refresh": 30000, "track": 2000,
+                                                    "prefer": 3000}},
+    # prefer: blind A/B pages (prefer.py)
+    "prefer": {"max_cost_usd": 2.0, "max_calls": 120, "max_pairs": 30},
+    # schedule: the LaunchAgent (macOS) or cron line (Linux) that runs refresh --auto
+    "schedule": {"label": "local.mind-reading.refresh", "weekday": 0, "hour": 9, "minute": 0, "daily": False},
 }
 
 DIR_MODE = 0o700
@@ -124,7 +146,16 @@ class Paths:
         self.grants = self.model / "grants.md"
         self.decisions = self.model / "decisions.jsonl"
         self.archive = self.model / "archive"
+        self.history = self.model / "history.jsonl"
         self.runs = self.home / "runs"
+        self.chunk_pins = self.derived / "chunk-pins.json"
+        self.track = self.home / "track"
+        self.track_records = self.track / "invocations.jsonl"
+        self.track_summary = self.track / "summary.json"
+        self.track_state = self.track / "state.json"
+        self.auto = self.home / "auto"
+        self.logs = self.home / "logs"
+        self.prefer = self.home / "prefer"
 
     def ensure_tree(self):
         """Create the tree. Every directory is mode 0700: the corpus and model describe one person and were created
@@ -140,7 +171,8 @@ class Paths:
     def private(self):
         """Directories whose mode is not 0700, for `status`."""
         out = []
-        for d in (self.home, self.corpus_dir, self.derived, self.mined, self.model, self.runs, self.eval):
+        for d in (self.home, self.corpus_dir, self.derived, self.mined, self.model, self.runs, self.eval, self.track,
+                  self.auto, self.logs, self.prefer):
             try:
                 if d.exists() and (os.stat(d).st_mode & 0o777) != DIR_MODE:
                     out.append(str(d))

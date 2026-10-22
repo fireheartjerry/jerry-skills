@@ -237,8 +237,24 @@ def reuse_previous(paths, run_id, previous_run, units, log=print):
     return reused
 
 
+def pending_units(paths, cfg, run_id, lenses=None):
+    """[(chunk id, lens)] whose output in mined/<run_id> is missing or was mined from different chunk bytes: the work a
+    resumed or incremental mine still has to do. Every unit is pending when run_id is None."""
+    lenses = resolve_lenses(cfg, lenses)
+    out = []
+    for cpath in chunk_files(paths):
+        cid = cpath.stem
+        h = chunk_hash(cpath)
+        for lens in lenses:
+            name = (cid if lens == "all" else "%s-%s" % (cid, lens)) + ".json"
+            data = read_json(paths.mined / run_id / name) if run_id else None
+            if not isinstance(data, dict) or (data.get("_meta") or {}).get("chunk_hash") != h:
+                out.append((cid, lens))
+    return out
+
+
 def run_mine(paths, cfg, kind, run_id=None, force=False, collect=False, concurrency=4, model=None, max_calls=None,
-             max_cost_usd=None, fake_dir=None, reuse_from=None, log=print, backoff=None, lenses=None):
+             max_cost_usd=None, fake_dir=None, reuse_from=None, log=print, backoff=None, lenses=None, cost_estimate=None):
     schema = _engine.load_schema("mined")
     if run_id in (None, "latest") and collect:
         run_id = _engine.latest_run_id(paths, "mine")
@@ -248,7 +264,7 @@ def run_mine(paths, cfg, kind, run_id=None, force=False, collect=False, concurre
         run_id = _engine.latest_run_id(paths, "mine") or None
     eng = _engine.Engine(paths, cfg, kind, "mine", run_id=run_id, model=_engine.stage_model(cfg, kind, "mine", model),
                          concurrency=concurrency, max_calls=max_calls, max_cost_usd=max_cost_usd, fake_dir=fake_dir,
-                         log=log, backoff=backoff)
+                         log=log, backoff=backoff, cost_estimate=cost_estimate)
     units = build_units(paths, cfg, eng.run_id, schema, lenses=lenses)
     if not units:
         raise _engine.EngineError("no chunks in derived/chunks: run prep first")

@@ -454,6 +454,8 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     parts = []
     corr_p = model_dir / "corrections.md"
     corr = corr_p.read_text(encoding="utf-8") if corr_p.exists() else ""
+    # comment lines carry nothing for the agent; `# pending <id> | ...` drafts from the tracker apply only once reviewed
+    corr = "\n".join(l for l in corr.splitlines() if not l.lstrip().startswith("#"))
     if corr.strip():
         parts.append(("corrections", "## Corrections (later lines win)\n" + corr.strip() + "\n", True))
     grants_p = model_dir / "grants.md"

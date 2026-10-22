@@ -66,7 +66,8 @@ def unfolded(entries, folded_through):
     return entries
 
 
-def fold_corrections(paths, cfg, kind, run_id=None, collect=False, fake_dir=None, log=print, backoff=None, model=None, strict_lint=True):
+def fold_corrections(paths, cfg, kind, run_id=None, collect=False, fake_dir=None, log=print, backoff=None, model=None, strict_lint=True,
+                     max_cost_usd=None, max_calls=None, cost_estimate=None):
     text = paths.corrections.read_text(encoding="utf-8") if paths.corrections.exists() else ""
     entries, bad = parse_corrections(text)
     manifest = read_json(paths.model_json, {}) or {}
@@ -87,7 +88,8 @@ def fold_corrections(paths, cfg, kind, run_id=None, collect=False, fake_dir=None
             if not (paths.model / n).exists():
                 raise RefreshError("model/%s missing: cannot fold corrections" % n)
         eng = _engine.Engine(paths, cfg, kind, "refresh", run_id=run_id, model=_engine.stage_model(cfg, kind, "synthesize", model),
-                             concurrency=1, fake_dir=fake_dir, log=log, backoff=backoff)
+                             concurrency=1, fake_dir=fake_dir, log=log, backoff=backoff, max_cost_usd=max_cost_usd,
+                             max_calls=max_calls, cost_estimate=cost_estimate)
         mapping = {"name": cfg["name"], "people_tokens": _engine.people_tokens(cfg), "privacy": privacy_line(cfg),
                    "date": now_iso()[5:10], "corrections_text": "\n".join(e["raw"] for e in global_lines),
                    "profile_md": paths.profile.read_text(encoding="utf-8"), "light_md": paths.light.read_text(encoding="utf-8"),

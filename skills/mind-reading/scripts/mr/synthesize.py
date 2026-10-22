@@ -522,14 +522,33 @@ def write_manifest(paths, cfg, run_id=None, mined_run=None, engine=None, parents
         "always_on_targets": cfg.get("always_on_targets", []),
         "files": {n: (paths.model / n).stat().st_size for n in ("light.md", "profile.md", "examples.md", "grants.md", "index.json") if (paths.model / n).exists()},
     }
-    if extra:
-        manifest.update(extra)
+    extra = dict(extra or {})
+    event = extra.pop("_event", None) or "build"
+    hist = {k[1:]: extra.pop(k) for k in list(extra) if k.startswith("_")}  # history-only fields (`_archived`)
+    manifest.update(extra)
     write_json(paths.model_json, manifest)
+    if prev.get("model_hash") != model_hash:
+        record_history(paths, model_hash, prev.get("model_hash"), event, **hist)
     return manifest
 
 
+def record_history(paths, model_hash, previous, event, **extra):
+    """Append one line to model/history.jsonl: which model went live, when, after which. The correction tracker uses it
+    to attribute each invocation to the model that was live; refresh --rollback uses it to find the previous version."""
+    row = {"time": now_iso(), "event": event, "model_hash": model_hash, "previous": previous}
+    row.update(extra)
+    try:
+        paths.history.parent.mkdir(parents=True, exist_ok=True)
+        with open(paths.history, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    return row
+
+
 def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None, force=False, collect=False, model=None,
-                   update=False, fake_dir=None, log=print, strict_lint=True, backoff=None):
+                   update=False, fake_dir=None, log=print, strict_lint=True, backoff=None, max_cost_usd=None, max_calls=None,
+                   cost_estimate=None):
     substeps = substeps or SUBSTEPS
     mined_run = mined_run or latest_mined_run(paths)
     if not mined_run and any(s in substeps for s in ("consolidate", "profile", "examples")):
@@ -544,7 +563,8 @@ def run_synthesize(paths, cfg, kind, substeps=None, mined_run=None, run_id=None,
         if run_id == "latest":
             run_id = _engine.latest_run_id(paths, "synthesize")
         eng = _engine.Engine(paths, cfg, kind, "synthesize", run_id=run_id, model=_engine.stage_model(cfg, kind, "synthesize", model),
-                             concurrency=1, fake_dir=fake_dir, log=log, backoff=backoff)
+                             concurrency=1, fake_dir=fake_dir, log=log, backoff=backoff, max_cost_usd=max_cost_usd,
+                             max_calls=max_calls, cost_estimate=cost_estimate)
         summary["run_id"] = eng.run_id
     archived = False
     name = cfg["name"]
