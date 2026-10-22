@@ -1367,7 +1367,9 @@ def cmd_reap(args):
         # Finished children that still linger: end every session, then wait
         # for their runners outside the lock (a runner's last kick takes it),
         # so none writes into a state directory while it is being removed.
-        lingering = [(n, m) for n, m in ((n, load_meta(n)) for n in names)
+        # A member's judge is reaped with it (reap_one), so its runner is retired here too.
+        judges = [j for j in ("%s-judge" % n for n in names) if len(j) <= 40 and (load_meta(j) or {}).get("judge_of")]
+        lingering = [(n, m) for n, m in ((n, load_meta(n)) for n in names + judges)
                      if m and os.path.exists(os.path.join(sdir_of(n), "result.json")) and child_alive(n, m)]
         for n, m in lingering:
             end_session(n, m)

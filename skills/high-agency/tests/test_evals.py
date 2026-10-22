@@ -1806,14 +1806,14 @@ class TestRoutingSiblings(unittest.TestCase):
         if not sibs:
             self.skipTest("no sibling skills next to this one")
         tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp)
+        self.addCleanup(shutil.rmtree, tmp, True)  # git may still be writing a background lock file
         proj = ROUTE.make_project(tmp, "claude", None, siblings=True)
         for n in sibs:
             md = os.path.join(proj, ".claude", "skills", n, "SKILL.md")
             self.assertTrue(os.path.isfile(md), n)
             self.assertFalse(os.path.exists(os.path.join(os.path.dirname(md), "tests")))
         alone = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, alone)
+        self.addCleanup(shutil.rmtree, alone, True)
         proj = ROUTE.make_project(alone, "claude", None)
         self.assertEqual(os.listdir(os.path.join(proj, ".claude", "skills")), ["high-agency"])
 
