@@ -774,6 +774,7 @@ def parse_groups(lines, start, end, path, errors):
 
 
 _BAD_DESCRIPTION = re.compile(r"Did: .*?(?= (?:Better|Keep): )")
+_GOOD_OUTCOME = re.compile(r"Outcome: good, .*?(?= Keep: )")
 
 
 def instruction_view(line):
@@ -781,6 +782,8 @@ def instruction_view(line):
     part is a negative example, not an instruction; for a good one everything stays (it is what to keep)."""
     if "Outcome: bad" in line:
         return _BAD_DESCRIPTION.sub("Did: (what went wrong).", line, count=1)
+    if "Outcome: good" in line:  # the outcome is a report of what happened, not an instruction
+        return _GOOD_OUTCOME.sub("Outcome: good.", line, count=1)
     return line
 
 

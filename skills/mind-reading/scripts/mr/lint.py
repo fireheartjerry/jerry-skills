@@ -13,14 +13,15 @@ FORBIDDEN_RULES = [
     r"(?i)permissions?\s+(are\s+|is\s+|get\s+|gets\s+)?bypassed",
     r"(?i)skip(ping|s)?\s+(the\s+)?permissions?",
     r"(?i)dangerously",
-    r"(?i)without\s+(asking|confirm(ing|ation)?|approval|review|waiting|a\s+(check|prompt|question))",
+    r"(?i)without\s+(asking|confirm(ing|ation)?|approval|review|waiting(?!\s+to\s+be\s+(asked|told|prompted|reminded))|a\s+(check|prompt|question))",
     r"(?i)don'?t\s+ask",
     r"(?i)never\s+ask\s+(me\s+)?(for\s+)?(approval|permission|confirmation|consent|before)",
     r"(?i)never\s+prompts?\s*(again|me|for|before|first)?\b(?!\s+(what|which|about\s+(the\s+)?(seed|typo|meaning)))",
     r"(?i)never\s+(confirm|wait\s+for\s+(approval|permission|confirmation|a\s+yes))",
     r"(?i)no\s+need\s+to\s+(ask|confirm|check\s+in|wait)",
     r"(?i)auto[- ]?approv",
-    r"(?i)already\s+(authori[sz]ed|approved)",
+    r"(?i)(treat|consider|assume|as\s+if)\b.{0,40}already\s+(authori[sz]ed|approved)",
+    r"(?i)already\s+(authori[sz]ed|approved)\b.{0,40}\b(permission|prompt|security|sandbox|settings?|bypass|allow[- ]?list|send|post|deploy|merge|spend|delete)",
     r"(?i)stop\s+asking",
     r"(?i)(approval|permission|authori[sz]ation)s?\s+(is|are)\s+(standing|permanent|implied|granted)",
     r"(?i)permanent(ly)?\s+(approv|authori[sz]|allow|grant)",
@@ -177,8 +178,11 @@ def forbidden_hits(text, path="model", quote_lines_exempt=False, evidence_quotes
     trait, not an instruction, so it is removed before matching; the trait wording around it is still checked.
     Elsewhere nothing is exempt but the rewording template."""
     hits = []
+    quotes = [_norm_words(l.split(":", 1)[1]) for l in text.splitlines() if quote_lines_exempt and l.startswith("- Quote:")]
     for i, line in enumerate(text.splitlines(), 1):
         if quote_lines_exempt and line.startswith("- Quote:"):
+            continue
+        if quote_lines_exempt and _derived_from_quote(line, quotes):
             continue
         if quote_lines_exempt and re.sub(r"\s+", " ", line.strip().lower()) == AUTONOMY_COVERS_LINE:
             continue
@@ -189,6 +193,20 @@ def forbidden_hits(text, path="model", quote_lines_exempt=False, evidence_quotes
                 hits.append("%s:%d: forbidden rule pattern %r" % (path, i, m.group(0)))
                 break
     return hits
+
+
+def _norm_words(text):
+    return " ".join(re.findall(r"[a-z0-9']+", (text or "").lower().replace("\u2019", "'")))
+
+
+def _derived_from_quote(line, quotes):
+    """grants.md: a heading or Covers line whose words appear verbatim in one of the file's Quote lines is the user's
+    own wording carried over by synthesize grants, not a rule this pipeline wrote."""
+    m = re.match(r"^(## G\d+\.|- Covers:)\s*(.*)$", line)
+    if not m:
+        return False
+    body = _norm_words(m.group(2))
+    return bool(body) and any(body in q for q in quotes)
 
 
 def _is_rewording(line):

@@ -480,3 +480,12 @@ class RenderLineCapTests(unittest.TestCase):
         line = render_lesson(lesson)
         self.assertIsNotNone(line)
         self.assertLessEqual(len(line), LINE_MAX)
+
+
+class GoodOutcomeIsDescriptionTests(unittest.TestCase):
+    def test_good_outcome_text_is_not_read_as_an_authorization(self):
+        from mr.lessons import instruction_view
+        line = ("- **Keep.** Did: Write a self-contained brief. Outcome: good, results merged as PRs. "
+                "Keep: brief with numeric goal and scope. [strong]")
+        self.assertNotIn("merged", instruction_view(line))
+        self.assertIn("Keep: brief", instruction_view(line))
