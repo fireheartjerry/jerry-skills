@@ -12,6 +12,8 @@ status=0
 echo ">>> unittest (python3 -I -W error::ResourceWarning)"
 if ! python3 -I -W error::ResourceWarning -m unittest discover -s "$here" -p 'test*.py' 2>"$here/.unittest.err"; then
   status=1
+  # show what failed (CI has no other way to see it)
+  grep -E -A25 "^(FAIL|ERROR):" "$here/.unittest.err" | head -120
 fi
 # unittest cannot turn a warning raised during garbage collection into a failure, so the log is grepped as well
 if grep -q "ResourceWarning" "$here/.unittest.err"; then

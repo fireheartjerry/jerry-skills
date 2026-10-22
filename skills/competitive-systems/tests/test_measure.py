@@ -1065,7 +1065,7 @@ class BisectTests(unittest.TestCase):
     def commit_series(self, slow_from, total=9, broken=()):
         self.git("init", "-q")
         for i in range(1, total + 1):
-            delay = 0.09 if i >= slow_from else 0.01
+            delay = 0.3 if i >= slow_from else 0.01  # well above interpreter start-up noise on slow CI runners
             body = "raise SystemExit(3)\n" if i in broken else ""
             with open(os.path.join(self.root, "step.py"), "w") as f:
                 f.write("import time\n%stime.sleep(%s)\nprint('v%d')\n" % (body, delay, i))
