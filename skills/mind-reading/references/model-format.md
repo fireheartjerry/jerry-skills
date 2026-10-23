@@ -2,6 +2,14 @@
 
 The contract between the pipeline (which writes the model) and the runtime (which reads it). Anything the synthesizer emits outside this format fails `synthesize index` and never ships. All paths are relative to `$MIND_READING_HOME/model/` (default `~/.local/share/mind-reading/model/`). `{name}` is the user's first name from `config.json`; the examples below use "Alex".
 
+The optional [working notebook](working-memory.md) lives separately at
+`$MIND_READING_HOME/context/notebook.json`. It is versioned project state, not a
+personality-model revision. Its records never become grants. `packet` combines a
+scoped snapshot with the current invocation; current observed context takes
+precedence. Candidate refresh copies the notebook as a separate snapshot. Before
+promoting a model built earlier, preserve the current notebook rather than
+replacing newer project state with the candidate's older copy.
+
 ## 1. Files
 
 | File | Written by | Read by the runtime | Edited by hand |

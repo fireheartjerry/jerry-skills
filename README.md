@@ -69,6 +69,13 @@ to first. Optional timestamped forecasts let you compare those predictions with
 later human feedback. Replay keeps later messages separate from generation input;
 missing outcomes remain unknown.
 
+A private **working notebook** carries the mission across sessions: open loops,
+settled answers, decisions, referent bindings and unresolved assumptions. Preferences
+can depend on the project or phase and carry explicit exceptions and counterexamples.
+One stdin packet combines that state with current context; no extra model call is
+needed just to interpret the request. Portable handoffs and an offline explorer make
+the memory inspectable. [Working-memory guide](skills/mind-reading/references/working-memory.md).
+
 **Try it without importing anything:** follow the
 [quickstart](skills/mind-reading/references/quickstart.md) for an offline fictional
 engineer demo. Its three seeds use the real selector and make no model calls.
