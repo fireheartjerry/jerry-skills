@@ -5,6 +5,7 @@ import os
 import stat
 import threading
 import unittest
+from unittest.mock import patch
 
 import helpers
 from mr import intent_context
@@ -22,6 +23,17 @@ def rec(kind="fact", text="the harbor index is rebuilt nightly", project="atlas"
 
 
 class WorkingMemoryTests(unittest.TestCase):
+    def test_windows_lock_backend_can_write_and_release(self):
+        class WindowsLock:
+            LK_LOCK=1
+            LK_UNLCK=2
+            def __init__(self):self.calls=[]
+            def locking(self,fd,mode,size):self.calls.append((mode,size))
+        backend=WindowsLock()
+        with patch.object(wm,'fcntl',None),patch.object(wm,'msvcrt',backend,create=True):
+            result=self.add(text='portable note')
+        self.assertEqual(result['text'],'portable note')
+        self.assertEqual(backend.calls,[(backend.LK_LOCK,1),(backend.LK_UNLCK,1)])
     def setUp(self):
         self.tmp = helpers.tmpdir()
         self.home = self.tmp / "home"

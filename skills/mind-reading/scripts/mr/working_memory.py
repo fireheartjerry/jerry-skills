@@ -23,6 +23,10 @@ try:  # POSIX advisory locking; the notebook refuses to mutate without it.
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None
+try:
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None
 
 from .preferences import PreferenceError, _private_bytes, _safe_path
 from . import intent_context
@@ -297,7 +301,7 @@ class _Lock:
         self.fd = None
 
     def __enter__(self):
-        if fcntl is None:
+        if fcntl is None and msvcrt is None:
             _fail("file locking is unavailable on this platform")
         context = self.root / "context"
         try:
@@ -315,7 +319,14 @@ class _Lock:
             lock = _safe_path(context / ".notebook.lock")
             flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
             self.fd = os.open(str(lock), flags, 0o600)
-            fcntl.flock(self.fd, fcntl.LOCK_EX)
+            if fcntl is not None:
+                fcntl.flock(self.fd, fcntl.LOCK_EX)
+            else:
+                # Windows byte-range locks require one byte and a fixed offset.
+                if os.fstat(self.fd).st_size == 0:
+                    os.write(self.fd,b'\0')
+                os.lseek(self.fd,0,os.SEEK_SET)
+                msvcrt.locking(self.fd,msvcrt.LK_LOCK,1)
         except (PreferenceError, OSError) as exc:
             if self.fd is not None:
                 os.close(self.fd)
@@ -326,7 +337,11 @@ class _Lock:
     def __exit__(self, *exc):
         if self.fd is not None:
             try:
-                fcntl.flock(self.fd, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+                else:
+                    os.lseek(self.fd,0,os.SEEK_SET)
+                    msvcrt.locking(self.fd,msvcrt.LK_UNLCK,1)
             finally:
                 os.close(self.fd)
         return False
