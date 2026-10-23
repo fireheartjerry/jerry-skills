@@ -37,3 +37,10 @@ jobs:
 
       - name: Run all offline tests
         run: bash scripts/run-all-tests.sh
+
+      - name: Exercise optional local-model math without weights
+        run: |
+          python3 -m venv "$RUNNER_TEMP/intent-math"
+          "$RUNNER_TEMP/intent-math/bin/python" -m pip install 'numpy>=2,<3'
+          "$RUNNER_TEMP/intent-math/bin/python" -I -m unittest discover -s skills/mind-reading/tests -p 'test_trace_*.py'
+          "$RUNNER_TEMP/intent-math/bin/python" -I -m unittest discover -s skills/mind-reading/tests -p test_intent_cli.py

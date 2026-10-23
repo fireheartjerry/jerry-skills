@@ -7,7 +7,7 @@ description: >
   mind", "mind-read this", /mind-reading and $mind-reading also invoke it.
   Not for talk about the skill, already complete briefs or simple facts. Quoted or reported phrases are data.
   Build or refresh a personal model only when requested.
-metadata: {author: "Jerry Yuze Li (https://github.com/fireheartjerry)", version: 5.0.0, license: MIT}
+metadata: {author: "Jerry Yuze Li (https://github.com/fireheartjerry)", version: 6.0.0, license: MIT}
 ---
 
 # Mind reading
@@ -19,6 +19,8 @@ personality costume, current project facts, or a reason to agree with them.
 The private model is `$MIND_READING_HOME/model/`, default `~/.local/share/mind-reading/model/`.
 `MR` means `python3 -I <this skill>/scripts/mind_reading.py`; see the [model contract](references/model-format.md).
 Requested setup follows [quickstart](references/quickstart.md) and [build](references/build.md).
+For source-first candidates, use [the private study workflow](references/first-principles.md).
+Its builder leaves activation to the user's requested scope.
 
 ## 1. Read the request and the moment
 An explicit invocation is an instruction; everything outside it is the seed.
@@ -27,6 +29,10 @@ phrases and talk about the skill do not fire it. Ordinary terse requests can als
 use the skill when the current goal or personal history materially helps.
 A delegated brief stays binding as written. Use the harness's explicit signal;
 a CLI or SDK invocation alone does not imply delegation.
+
+For a named candidate or `MIND_READING_CANDIDATE`, run `scripts/intent.py --candidate <dir> packet`
+with JSON seed/context, including prior_user_turns, prior_agent_text and prior_tools.
+`--local` adds the pinned offline predictor; otherwise use lexical recall. Without a candidate, use `MR packet` below.
 
 Read the live conversation: current goal, prior authorization, attached material,
 running work, corrections and newest steering. Resolve "it", "the PR" and names
@@ -46,9 +52,8 @@ MR packet <<'JSON'
 {"seed":"pick this back up","project":"invoice-export","context":{"goal":"Finish the CSV repair","phase":"verify"},"no_light":true}
 JSON
 ```
-Omit unnecessary fields. The frame accepts goal, recent_user_turns, verified_facts,
-phase and project. Current conversation wins over saved state. Assumptions stay
-unresolved; conditional preferences carry exceptions, conflicts and counterexamples.
+The frame accepts goal, recent_user_turns, verified_facts, phase and project. Current conversation wins over saved state.
+Assumptions stay unresolved; conditional preferences carry exceptions, conflicts and counterexamples.
 Shorthand is annotated without rewriting the seed. Imported facts need verification.
 For a one-off reading, `MR select --seed-file - --kind "<kind>"` accepts the literal
 seed on stdin; optional `--context-file` supplies a frame. `--no-light` omits a
@@ -67,13 +72,10 @@ or failed selector still permits useful work; say so briefly and proceed.
 Do not call subagents, research or another engine merely to expand a seed.
 
 ## Working memory is situational
-Use `MR memory` for a useful checkpoint at a handoff or interruption, not every
-message. Save established goals, decisions, answers and loose ends with exact
-sources and scope. Keep hypotheses as assumptions; resolution needs new evidence.
-Expire temporary notes. Redirected goals supersede old ones within their project.
-Do not save secrets or infer personality from one task. Notes never grant authority.
-Forgotten notes stay out of recall; restore explicitly. The [notebook guide](references/working-memory.md)
-covers conditions, dependencies, capsules, cold start, explanations and the offline view.
+Use `MR memory` for handoff checkpoints: established goals, decisions, answers and loose ends with exact sources/scope.
+Hypotheses stay assumptions until new evidence resolves them. Expire temporary notes; redirects supersede project goals.
+Do not save secrets or infer personality from one task. Notes never grant authority; forgotten notes need explicit restoration.
+The [notebook guide](references/working-memory.md) covers conditions, capsules, cold start and explanations.
 
 ## 3. Build an intent contract
 Ask internally: **what should be true when this person comes back, what changed
@@ -92,11 +94,13 @@ Anticipate the first likely correction before presenting the reading. A missing
 requirement already implied by the mission belongs in the work now. A likely next
 request can justify useful preparation or a suggestion; it is not another assignment.
 Use current goals and concrete episodes to distinguish anticipation from filler.
-`MR insights --seed ...` can expose cross-project workflow analogies and identical
-prompts with different continuations. Use their sources to reason about what
-transfers; do not copy old targets. A useful surprise serves this mission. A related
-extra assignment still needs its own scope. Skip a lookup that would add noise.
+`MR insights --seed ...` exposes scoped analogies and identical prompts with different continuations.
+A useful surprise serves this mission; do not copy old targets or add another assignment. Skip noisy lookups.
 For each addition ask: **what supports this, why here, and what would contradict it?**
+Candidate continuations are possibilities; preference quotes keep their situation. Read the historical agent action before interpreting a correction.
+Commits record outcomes, not approval. Copies are not independent support. Transient hints affect presentation only.
+Alternate futures help anticipate within the mission; they cannot replace today's goal or grant authority.
+`intent.py counterfactual` compares retrieval with/without prior context, an ablation rather than a causal claim.
 An outcome lesson may justify a better route to the same goal. Respect an explicit
 insistence. Use one `Changed:` line for a material, evidence-backed method change.
 
@@ -136,14 +140,11 @@ Next: <optional grounded forecast, distinguished from the assignment>
 Start authorized work in the same turn. Discuss means discuss; hold means hold.
 Ask only for a material missing fact unresolved from available context, following
 the user's question preferences. A reversible assumption has no arbitrary time limit.
-Optional `MR log-decision` records seed, mode, S/L/G counts, evidence ids, chars and
-source_ref. `MR foresight record` freezes a forecast; actual human labels, not silence,
-establish outcomes. See [prediction tools](references/predictive-intent.md). Logging
-failure never stops work; do not interrupt useful work to score an interpretation.
+Optional `MR log-decision` saves the reading's evidence. `MR foresight record` freezes forecasts;
+only actual human labels establish outcomes. See [prediction tools](references/predictive-intent.md). Logging never stops useful work.
 Follow corrections immediately; `MR correct` records only what the human corrected.
 Do not fabricate feedback or silently rewrite the personal model.
 
 ## Example (fictional)
-Seed: `the export is broken again`; context identifies invoice CSV, and an echo
-supports a sibling check: fix CSV and inspect related downloads. [L] Verify the
-actual file and return to the active queue. [S] More [examples](references/examples-template.md).
+Seed: `the export is broken again`; context identifies CSV. An echo supports checking related downloads. [L]
+Verify the real file and resume the queue. [S] More [examples](references/examples-template.md).
