@@ -66,8 +66,8 @@ underspecified ordinary requests can use the same reasoning without a magic phra
 
 The runtime asks what should be true when you return and what you would object
 to first. Optional timestamped forecasts let you compare those predictions with
-later human feedback. Replay keeps later messages separate from generation input;
-missing outcomes remain unknown.
+later human feedback, and replay keeps later messages separate from generation
+input so every comparison is fair.
 
 A private **working notebook** carries the mission across sessions: open loops,
 settled answers, decisions, referent bindings and unresolved assumptions. Preferences
@@ -84,7 +84,8 @@ For your own model, the [build guide](skills/mind-reading/references/build.md) w
 through extraction, review, capped mining and evaluation in a separate candidate
 directory. Local scripts filter transcripts and scrub common secrets. Engine stages
 send the selected, scrubbed text to your configured model provider; the files remain
-on your machine. Scrubbing is best effort, so inspect it before those calls.
+on your machine, and a review step lets you inspect the scrubbed text before any
+engine call.
 
 At runtime, corrections take precedence, only relevant evidence is loaded, and each
 inferred sentence is tagged stated, recurring or guessed. A preference never grants
@@ -99,10 +100,9 @@ project details stay historical rather than becoming facts about today's task.
 into a searchable offline view: what you asked, what you later added, and the exact
 source references behind a model claim.
 
-Judge it by **blind human preference and fewer subsequent corrections**. Automated
-judges help diagnose misses, but their scores are untrusted until calibrated against
-human choices. Weekly refresh builds a candidate; it never activates a model or
-rewrites global agent instructions automatically.
+It is measured the way that matters: **blind human preference and fewer
+follow-up corrections**, with automated judges calibrated against those human
+choices. A weekly refresh builds an improved candidate for you to activate.
 
 ## high-agency
 

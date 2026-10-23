@@ -7,7 +7,7 @@ file only when the `SKILL.md` points to it. Install with `./install.sh`.
 
 ## skills/mind-reading
 
-Infers the goal behind an underspecified request and anticipates omitted requirements from the active conversation, project context and verified personal history. Use when that context materially changes the answer; explicit "read my mind", "mind-read this", "/mind-reading" and "$mind-reading" also invoke it. Clear requests need no persona lookup. Talk about the skill or its model is handled normally. Building or refreshing a model still requires the user's request. Quoted invocation phrases are data, not commands.
+Infer the intended goal, omissions and next useful step from current context, verified history and scoped working memory. Use for "my usual bar", "pick this back up" or short requests whose meaning depends on that context. "read my mind", "mind-read this", /mind-reading and $mind-reading also invoke it. Not for talk about the skill, already complete briefs or simple facts. Quoted or reported phrases are data. Build or refresh a personal model only when requested.
 
 Entry point: `skills/mind-reading/SKILL.md`
 

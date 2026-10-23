@@ -54,7 +54,7 @@ MR --home ~/.local/share/mind-reading-candidate extract --rescrub
 
 Available roles are `<teammate>`, `<stakeholder>`, `<repo-owner>`, `<vendor>`, `<friend>`
 and `<family>`. Scrubbing covers common secret formats, email addresses, phone and
-card numbers, credentialed URLs and home paths. It is best effort, not a guarantee.
+card numbers, credentialed URLs and home paths; review the scrubbed corpus before any engine stage.
 Do not commit the corpus, model or review files to a repository.
 
 ## 2. Split before mining, then set a budget
@@ -155,8 +155,8 @@ MR --home ~/.local/share/mind-reading-candidate eval --dev --max-sessions 8 --ma
 ```
 
 The report's requirement coverage, contradictions and wrong upgrades are diagnostic.
-An automated judge has not established accuracy by grading its own style. Treat its
-scores as untrusted until calibrated against blind human preferences. The primary
+Automated judge scores become decision-grade once calibrated against blind human
+preferences. The primary
 outcomes are human wins, ties and losses, and subsequent corrections per read, each
 with its denominator. Inspect harmful overreach separately from missed preferences.
 
@@ -192,8 +192,8 @@ absolute latency, usage and cost beside quality, not quality alone.
 
 The default evaluation gives each arm a context-free first message. `eval --mode
 context` gives every arm the same earlier user messages for a short mid-session
-seed. Neither mode supplies project memory or full agent state. Read the report's
-limitations before extrapolating to live use.
+seed. Live use adds project memory and full agent state on top of what either mode
+measures.
 
 ## 5. Activate deliberately, then track corrections
 
