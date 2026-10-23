@@ -9,7 +9,7 @@ import time
 from agent_sessions.common import OWNER_COMMS, PS_ENV, read_json, run, sdir_of
 
 __all__ = [
-    "ps", "ps_lstart", "pid_running", "process_matches", "engine_alive", "runner_alive", "proc_stat",
+    "ps", "ps_lstart", "start_matches", "pid_running", "process_matches", "engine_alive", "runner_alive", "proc_stat",
     "killpg", "group_alive", "wait_dead", "ps_parent", "ps_argv0", "child_token", "owner_token", "owner_short",
     "owner_gone", "owns", "find_binary", "found_via_login_shell", "shell_lookup", "interpreter_dirs",
 ]
@@ -37,18 +37,35 @@ def proc_stat(pid, line=None):
     return fields[0], fields[19]
 
 
-def ps_lstart(pid):
-    """Start time of pid as a comparable string: ps lstart under the C locale,
-    or on a system without a working ps, `proc:<starttime>` from /proc."""
+def _ps_start_text(pid):
+    """`ps -o lstart=` under the C locale, whitespace-normalized, or None."""
     cp = ps("-o", "lstart=", "-p", str(pid))
-    text = " ".join(cp.stdout.split())
-    if text:
-        return text
-    if cp.returncode == 127 or not cp.stdout:
+    return " ".join(cp.stdout.split()) or None
+
+
+def ps_lstart(pid):
+    """Start time of pid as a comparable string. Where /proc exists (Linux) it is
+    `proc:<starttime in clock ticks>`, which is exact: procps derives lstart from
+    uptime, so two reads of the same process can differ by a second. Elsewhere it
+    is ps lstart under the C locale."""
+    st = proc_stat(pid)
+    if st:
+        return "proc:%s" % st[1]
+    return _ps_start_text(pid)
+
+
+def start_matches(pid, recorded):
+    """True when pid started at `recorded`, False when it did not, None when the
+    start time cannot be read. Accepts both forms, so ids recorded as ps lstart
+    by an earlier version still compare on a system that now records /proc ticks."""
+    rec = " ".join(str(recorded or "").split())
+    if not rec:
+        return None
+    if rec.startswith("proc:"):
         st = proc_stat(pid)
-        if st:
-            return "proc:%s" % st[1]
-    return None
+        return None if st is None else rec == "proc:%s" % st[1]
+    now = _ps_start_text(pid)
+    return None if now is None else now == rec
 
 
 def pid_running(pid):
@@ -73,8 +90,7 @@ def process_matches(pid, lstart):
     """pid is live and started when we recorded it (guards against pid reuse)."""
     if not pid or not lstart or not pid_running(pid):
         return False
-    now = ps_lstart(pid)
-    return now is not None and now == " ".join(str(lstart).split())
+    return start_matches(pid, lstart) is True
 
 
 def engine_alive(info):
@@ -204,8 +220,7 @@ def owner_gone(token):
         if not pid_running(pid):
             gone = True
         else:
-            now = ps_lstart(pid)
-            gone = now is not None and now != " ".join(parts[3].split())
+            gone = start_matches(pid, parts[3]) is False
     _GONE[token] = gone
     return gone
 
