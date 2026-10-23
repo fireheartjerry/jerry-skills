@@ -811,6 +811,8 @@ def build_parser():
     p.add_argument("--model", action="store_true")
     p.add_argument("--strict", action="store_true", help="model lint: names and secrets are fatal too")
     p.set_defaults(func=cmd_lint)
+    from mr.memory_cli import register as register_memory
+    register_memory(sub)
     return ap
 
 
@@ -825,7 +827,8 @@ def main(argv=None):
     paths = Paths(home)
     cfg = load_config(paths, args.config)
     log = _log_factory(args.quiet, args.json)
-    if args.cmd not in ("init", "lint", "status", "select", "log-decision", "correct", "demo", "preferences", "tracking") and not cfg.get("_exists"):
+    if args.cmd not in ("init", "lint", "status", "select", "log-decision", "correct", "demo", "preferences", "tracking",
+                        "memory", "packet", "handoff", "inspect", "insights", "workbench") and not cfg.get("_exists"):
         log("no config at %s: run `init --name <Name>` first" % paths.config)
         return EXIT_USAGE
     try:

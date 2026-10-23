@@ -269,7 +269,7 @@ def prepare_candidate(paths, cfg, candidate_home):
         raise RefreshError("candidate home must be separate from the live home and its ancestors/descendants")
     if target.exists():
         raise RefreshError("candidate home already exists; preserve it and choose a new candidate home")
-    sources = [paths.home / n for n in ("corpus", "derived", "mined", "model")]
+    sources = [paths.home / n for n in ("corpus", "derived", "mined", "model", "context")]
     for source in sources:
         if source.is_symlink() or (source.exists() and any(p.is_symlink() for p in source.rglob("*"))):
             raise RefreshError("candidate snapshot refuses symlinked input: %s" % source.name)
