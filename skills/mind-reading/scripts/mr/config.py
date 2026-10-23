@@ -15,6 +15,10 @@ DEFAULTS = {
         "codex_sessions_dir": "~/.codex/sessions",
     },
     "people": {},
+    # a trace candidate directory (holding cases.jsonl) that feeds the packet's experience layer; empty = none.
+    # MIND_READING_CANDIDATE overrides it.
+    "candidate": "",
+    "experience": {"enabled": False, "max_chars": 3500, "situation": True},
     "engine": "claude",
     "models": {
         "claude": {"mine": "sonnet", "synthesize": "opus", "expand": "sonnet", "judge": "sonnet"},

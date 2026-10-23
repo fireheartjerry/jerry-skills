@@ -515,6 +515,53 @@ def cmd_recall(args, paths, cfg, log):
     return EXIT_OK
 
 
+def cmd_experience(args, paths, cfg, log):
+    """Inspect, rebuild or preview the packet's experience layer."""
+    from mr import experience as xp
+    from mr.intent_context import ContextFormatError, normalize
+    try:
+        if args.action in ("status", "build"):
+            opts, cdir = xp.settings(cfg), xp.candidate_dir(cfg)
+            summary = xp.load_summary(paths, cfg, rebuild=args.action == "build") if cdir else None
+            if args.action == "build" and summary is None:
+                log("experience: no trace candidate; set `candidate` in config.json or MIND_READING_CANDIDATE")
+                return EXIT_USAGE
+            lessons = (summary or {}).get("lessons") or []
+            report = {"enabled": opts["enabled"], "situation": opts["situation"],
+                      "candidate": str(cdir) if cdir else None, "replies": (summary or {}).get("replies", 0),
+                      "outcomes": (summary or {}).get("outcomes", {}), "lessons": lessons}
+            if args.json:
+                _emit(args, report)
+            else:
+                print("experience layer: %s (situation hints %s)" % ("on" if opts["enabled"] else "off",
+                                                                   "on" if opts["situation"] else "off"))
+                print("trace candidate: %s" % (report["candidate"] or "none"))
+                if summary:
+                    print("learned from %d replies; %d lesson(s)" % (report["replies"], len(lessons)))
+                    for lesson in lessons:
+                        print("- " + xp.lesson_text(lesson))
+            return EXIT_OK
+        seed = _read_seed(args, log)
+        if seed is None:
+            return EXIT_USAGE
+        context = None
+        if args.context_file:
+            if args.context_file == "-" and args.seed_file == "-":
+                log("seed and context cannot both read stdin")
+                return EXIT_USAGE
+            raw = sys.stdin.read() if args.context_file == "-" else Path(args.context_file).read_text(encoding="utf-8")
+            context = normalize(json.loads(raw))
+        result = xp.build(paths, cfg, seed, current=context, now=args.now, use_situation=not args.no_situation)
+        if args.json:
+            _emit(args, result)
+        else:
+            print(result["text"] or "No experience signal for this seed.\n", end="")
+        return EXIT_OK
+    except (OSError, ValueError, ContextFormatError) as exc:
+        log("experience: %s" % exc)
+        return EXIT_INVALID
+
+
 def cmd_preferences(args, paths, cfg, log):
     from mr.preferences import PreferenceError, build_review, import_answers, pairs_from_results
     try:
@@ -618,8 +665,20 @@ def cmd_foresight(args, paths, cfg, log):
 def cmd_schedule(args, paths, cfg, log):
     from mr.schedule import ScheduleError, plan
     try:
-        summary = plan(paths, cfg, args.out, weekday=args.weekday, hour=args.hour, minute=args.minute,
-                       timezone=args.timezone, max_calls=args.max_calls, engine=args.engine)
+        if args.action == "plan-trace":
+            from mr import trace_weekly
+            summary = trace_weekly.plan(
+                args.out, args.python or sys.executable, args.source or [], args.code_root or [],
+                {"path": args.encoder_path, "model": args.encoder_model, "revision": args.encoder_revision},
+                bundles=args.bundle or [], seed_cache=args.seed_cache, machine=args.machine,
+                weekday=args.weekday, hour=args.hour, minute=args.minute,
+                timezone=args.timezone or cfg.get("timezone", "UTC"), keep_studies=args.keep_studies)
+        elif args.action == "run-trace":
+            from mr import trace_weekly
+            summary = trace_weekly.run(Path(args.out) / "trace-weekly.json")
+        else:
+            summary = plan(paths, cfg, args.out, weekday=args.weekday, hour=args.hour, minute=args.minute,
+                           timezone=args.timezone, max_calls=args.max_calls, engine=args.engine)
     except (ScheduleError, OSError, ValueError) as exc:
         log("schedule: %s" % exc)
         return EXIT_INVALID
@@ -759,6 +818,15 @@ def build_parser():
     p.add_argument("--limit", type=int, default=3)
     p.set_defaults(func=cmd_recall)
 
+    p = sub.add_parser("experience", help="inspect, rebuild or preview the packet's experience layer")
+    p.add_argument("action", choices=["status", "build", "show"])
+    p.add_argument("--seed")
+    p.add_argument("--seed-file")
+    p.add_argument("--context-file", help="show: JSON intent context (goal, recent_user_turns, ...)")
+    p.add_argument("--now", help="show: ISO 8601 time instead of the current time")
+    p.add_argument("--no-situation", action="store_true", help="show: leave out situation hints")
+    p.set_defaults(func=cmd_experience)
+
     p = sub.add_parser("preferences", help="build and score a frozen human blind comparison")
     p.add_argument("action", choices=["build", "import", "learn"])
     p.add_argument("--pairs")
@@ -790,8 +858,18 @@ def build_parser():
     p.set_defaults(func=cmd_foresight)
 
     p = sub.add_parser("schedule", help="prepare a portable weekly candidate refresh runner")
-    p.add_argument("action", choices=["plan"])
+    p.add_argument("action", choices=["plan", "plan-trace", "run-trace"])
     p.add_argument("--out", required=True)
+    p.add_argument("--python", help="plan-trace: Python 3.12+ with the local learning packages")
+    p.add_argument("--source", action="append", help="plan-trace: kind=PATH (claude, codex, kimi, grok, memory)")
+    p.add_argument("--bundle", action="append", help="plan-trace: PATH=PARSER_SHA256 of an exported event bundle")
+    p.add_argument("--code-root", action="append", help="plan-trace: directory of Git checkouts")
+    p.add_argument("--encoder-path")
+    p.add_argument("--encoder-model")
+    p.add_argument("--encoder-revision")
+    p.add_argument("--seed-cache", help="plan-trace: an earlier study's embedding-cache.sqlite")
+    p.add_argument("--machine", default="local")
+    p.add_argument("--keep-studies", type=int, default=1)
     p.add_argument("--weekday", type=int, default=0)
     p.add_argument("--hour", type=int, default=9)
     p.add_argument("--minute", type=int, default=0)
@@ -828,7 +906,8 @@ def main(argv=None):
     cfg = load_config(paths, args.config)
     log = _log_factory(args.quiet, args.json)
     if args.cmd not in ("init", "lint", "status", "select", "log-decision", "correct", "demo", "preferences", "tracking",
-                        "memory", "packet", "handoff", "inspect", "insights", "workbench") and not cfg.get("_exists"):
+                        "memory", "packet", "handoff", "inspect", "insights", "workbench", "experience") \
+            and not cfg.get("_exists"):
         log("no config at %s: run `init --name <Name>` first" % paths.config)
         return EXIT_USAGE
     try:

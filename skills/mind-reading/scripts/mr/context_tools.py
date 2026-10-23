@@ -84,9 +84,11 @@ def packet(paths, cfg, data):
     from . import working_memory as memory
     from . import habits
     from .select import select_slice, ModelFormatError
+    from . import experience
     if not isinstance(data, dict):
         raise PacketError('packet must be one JSON object')
-    allowed = {'version', 'seed', 'context', 'project', 'kind', 'mode', 'no_light', 'include_working'}
+    allowed = {'version', 'seed', 'context', 'project', 'kind', 'mode', 'no_light', 'include_working',
+               'experience', 'situation', 'now'}
     if set(data) - allowed:
         raise PacketError('unknown packet fields: %s' % ', '.join(sorted(set(data) - allowed)))
     if type(data.get('version', 1)) is not int or data.get('version', 1) != 1:
@@ -97,9 +99,11 @@ def packet(paths, cfg, data):
     for key in ('project', 'kind'):
         if data.get(key) is not None and (not isinstance(data[key], str) or len(data[key]) > 1000):
             raise PacketError('%s must be bounded text' % key)
-    for key in ('no_light', 'include_working'):
+    for key in ('no_light', 'include_working', 'experience', 'situation'):
         if key in data and type(data[key]) is not bool:
             raise PacketError('%s must be boolean' % key)
+    if data.get('now') is not None and (not isinstance(data['now'], str) or len(data['now']) > 64):
+        raise PacketError('now must be an ISO 8601 time string')
     mode = data.get('mode', 'execute')
     if mode not in ('execute', 'discuss', 'status', 'hold', 'plan', 'initiative'):
         raise PacketError('unknown packet mode')
@@ -115,9 +119,20 @@ def packet(paths, cfg, data):
     habit_part = habits.render(personal, budget_chars=5000) if any(personal[k] for k in
         ('habits','exceptions','conflicts','counterexamples','aliases','warnings')) else ''
     extra = '\n'.join(p for p in (memory_part, habit_part) if p)
+    xp_info, xp_text = None, ''
+    if data.get('experience', experience.settings(cfg)['enabled']):
+        try:
+            xp = experience.build(paths, cfg, seed, current=current, now=data.get('now'),
+                                  use_situation=data.get('situation'))
+            xp_text = xp['text']
+            xp_info = {'enabled': True, 'trace_store': xp['trace_store'], 'repeat': bool(xp['repeat']),
+                       'lessons': [l['feature'] for l in xp['lessons']], 'situation': len(xp['situation']),
+                       'chars': len(xp_text)}
+        except (OSError, ValueError) as exc:  # a broken candidate never blocks the packet
+            xp_info = {'enabled': True, 'error': str(exc)[:300]}
     select_cfg = copy.deepcopy(cfg['select'])
     for key in ('budget_chars', 'initiative_budget_chars'):
-        select_cfg[key] = max(1000, select_cfg[key] - len(extra))
+        select_cfg[key] = max(1000, select_cfg[key] - len(extra) - len(xp_text))
     try:
         text, decision = select_slice(paths.model, seed, select_cfg, kind=data.get('kind'),
                                       no_light=data.get('no_light', False), mode=mode,
@@ -131,11 +146,12 @@ def packet(paths, cfg, data):
             from .intent_context import render
             text += render(frame)
         decision = {'model_missing': True, 'mode': mode, 'project': project}
-    full = text + ('\n' + extra if extra else '')
+    full = text + ('\n' + extra if extra else '') + ('\n' + xp_text if xp_text else '')
     budget = cfg['select']['initiative_budget_chars' if mode in ('plan', 'initiative') else 'budget_chars']
     decision.update(chars=len(full), working_ids=record_ids, working_omitted=omitted,
                     notebook_revision=memory.load(paths.home)['revision'] if use_memory else None,
-                    over_budget=len(full) > budget, literal_seed_preserved=True)
+                    over_budget=len(full) > budget, literal_seed_preserved=True,
+                    experience=xp_info or {'enabled': False})
     return {'version': 1, 'seed': seed, 'context': frame, 'slice': full,
             'decision': decision, 'readiness': readiness, 'habits': personal,
             'notice': 'Evidence for the host to interpret. This packet is not an answer or authorization.'}

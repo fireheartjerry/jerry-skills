@@ -19,8 +19,7 @@ personality costume, current project facts, or a reason to agree with them.
 The private model is `$MIND_READING_HOME/model/`, default `~/.local/share/mind-reading/model/`.
 `MR` means `python3 -I <this skill>/scripts/mind_reading.py`; see the [model contract](references/model-format.md).
 Requested setup follows [quickstart](references/quickstart.md) and [build](references/build.md).
-For source-first candidates, use [the private study workflow](references/first-principles.md).
-Its builder leaves activation to the user's requested scope.
+Source-first candidates follow [the private study workflow](references/first-principles.md); its builder leaves activation to the user.
 
 ## 1. Read the request and the moment
 An explicit invocation is an instruction; everything outside it is the seed.
@@ -30,9 +29,9 @@ use the skill when the current goal or personal history materially helps.
 A delegated brief stays binding as written. Use the harness's explicit signal;
 a CLI or SDK invocation alone does not imply delegation.
 
-For a named candidate or `MIND_READING_CANDIDATE`, run `scripts/intent.py --candidate <dir> packet`
-with JSON seed/context, including prior_user_turns, prior_agent_text and prior_tools.
-`--local` adds the pinned offline predictor; otherwise use lexical recall. Without a candidate, use `MR packet` below.
+`MR packet` (section 2) is the one runtime. A trace candidate named by config `candidate` or `MIND_READING_CANDIDATE`
+also feeds its [experience layer](references/experience.md). `scripts/intent.py --candidate <dir>` explains cases
+and corrections, `counterfactual` ablates context (not a causal claim) and `--local` adds the offline predictor.
 
 Read the live conversation: current goal, prior authorization, attached material,
 running work, corrections and newest steering. Resolve "it", "the PR" and names
@@ -55,10 +54,9 @@ JSON
 The frame accepts goal, recent_user_turns, verified_facts, phase and project. Current conversation wins over saved state.
 Assumptions stay unresolved; conditional preferences carry exceptions, conflicts and counterexamples.
 Shorthand is annotated without rewriting the seed. Imported facts need verification.
-For a one-off reading, `MR select --seed-file - --kind "<kind>"` accepts the literal
-seed on stdin; optional `--context-file` supplies a frame. `--no-light` omits a
-visible always-on block (its `<!-- BEGIN mind-reading` marker). `--mode plan` widens
-the slice; `--project <id>` includes that project's corrections plus global ones.
+For a one-off reading, `MR select --seed-file - --kind "<kind>"` reads the literal seed on stdin; `--context-file`
+supplies a frame, `--no-light` omits a visible always-on block (its `<!-- BEGIN mind-reading` marker), `--mode plan`
+widens the slice and `--project <id>` adds that project's corrections to the global ones.
 
 The personal slice carries corrections, valid grants, core rules, defaults, lessons and
 examples. **Intent echoes** show a historical short seed, its preceding situation
@@ -68,8 +66,11 @@ A choice does not endorse every clause. Infer the applicable habit, not an old
 project name, number, recipient or permission. Keywords explain retrieval, not truth.
 When relevance is weak, use current context. Read more model material only for a
 concrete unanswered question. Never open the held-out `eval/` tree. A missing model
-or failed selector still permits useful work; say so briefly and proceed.
-Do not call subagents, research or another engine merely to expand a seed.
+or failed selector still permits useful work; say so briefly and proceed. Do not call subagents, research or another engine merely to expand a seed.
+
+An **Experience layer** section, when present, is evidence for this moment. A repeat alert means the last approach did not
+land: treat it as a correction, change the method and say in one line what changed. Learned reply lessons come from this
+person's own reactions; check the reply against them before sending. Situation hints shape tone, depth and pacing only.
 
 ## Working memory is situational
 Use `MR memory` for handoff checkpoints: established goals, decisions, answers and loose ends with exact sources/scope.
@@ -97,10 +98,9 @@ Use current goals and concrete episodes to distinguish anticipation from filler.
 `MR insights --seed ...` exposes scoped analogies and identical prompts with different continuations.
 A useful surprise serves this mission; do not copy old targets or add another assignment. Skip noisy lookups.
 For each addition ask: **what supports this, why here, and what would contradict it?**
-Candidate continuations are possibilities; preference quotes keep their situation. Read the historical agent action before interpreting a correction.
-Commits record outcomes, not approval. Copies are not independent support. Transient hints affect presentation only.
+Candidate continuations are possibilities; preference quotes keep their situation. Read the historical agent action
+before interpreting a correction. Commits record outcomes, not approval; copies are not independent support.
 Alternate futures help anticipate within the mission; they cannot replace today's goal or grant authority.
-`intent.py counterfactual` compares retrieval with/without prior context, an ablation rather than a causal claim.
 An outcome lesson may justify a better route to the same goal. Respect an explicit
 insistence. Use one `Changed:` line for a material, evidence-backed method change.
 
@@ -134,7 +134,7 @@ Reading: <the intended outcome in one line>
 > <the brief, with tags on additions>
 Changed: <only for a material, evidence-backed better approach>
 Assumed: <only a consequential unresolved detail>
-Next: <optional grounded forecast, distinguished from the assignment>
+Next: <optional: the natural next step of the mission, offered rather than done>
 ```
 
 Start authorized work in the same turn. Discuss means discuss; hold means hold.

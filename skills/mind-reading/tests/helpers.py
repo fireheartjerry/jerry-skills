@@ -80,6 +80,7 @@ def run_cli(home, *args, cwd=None, env_extra=None, stdin=None):
     cmd = [sys.executable, "-I", str(CLI), "--home", str(home)] + [str(a) for a in args]
     env = dict(os.environ)
     env.pop("MIND_READING_HOME", None)
+    env.pop("MIND_READING_CANDIDATE", None)
     env["MIND_READING_SPOOL"] = str(Path(home).parent / ("spool-" + Path(home).name))
     env.update(env_extra or {})
     return subprocess.run(cmd, input=stdin, capture_output=True, text=True, cwd=str(cwd or SKILL.parent.parent), env=env, timeout=300)
