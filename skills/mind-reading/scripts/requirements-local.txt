@@ -1,0 +1,7 @@
+# Optional private-study environment. The lexical runtime remains stdlib-only.
+# Tested on Python 3.12; download weights separately and pin their revision.
+numpy==2.5.4
+torch==2.14.1
+transformers==5.20.2
+sentence-transformers==6.2.0
+zstandard==0.25.0
