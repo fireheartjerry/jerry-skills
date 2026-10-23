@@ -30,7 +30,7 @@ from pathlib import Path
 from . import engine as _engine
 from . import schema as _schema
 from .config import read_json, write_json
-from .prep import NONTYPED_ORIGINS, chunk_files
+from .prep import NONTYPED_ORIGINS, PrepRefused, chunk_files, validate_training_chunks
 
 # Lens name -> the top-level fields of mined.schema.json it produces. `all` is the single-pass prompt.
 LENSES = {
@@ -176,7 +176,44 @@ AGENT_CONTEXT_RULES = {
 }
 
 
-def build_units(paths, cfg, run_id, schema, prompt_tpl=None, lenses=None):
+def _json_hash(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def input_manifest_path(paths, run_id):
+    return paths.mined / run_id / "inputs.json"
+
+
+def _unit_inputs(paths, units):
+    out = {}
+    for unit in units:
+        cid, lens = parse_mined_name(unit.out_path.stem)
+        out[unit.id] = {"output": unit.out_path.name, "chunk_hash": chunk_hash(paths.chunks / (cid + ".jsonl")),
+                        "prompt_hash": hashlib.sha256(unit.prompt.encode("utf-8")).hexdigest(),
+                        "schema_hash": _json_hash(unit.schema), "lens": lens}
+    return out
+
+
+def _invalidate_changed_run(paths, run_id, old, new, force):
+    if old == new:
+        return
+    existing = mined_files(paths, run_id)
+    if existing and not force:
+        raise _engine.EngineError("mine run inputs changed or lack a manifest; start a new run or use --force")
+    for path in existing:
+        # A forced interrupted rerun must not leave old successful outputs under
+        # a new manifest. Preserve them outside the active chunk namespace.
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        dest = paths.mined / run_id / "stale" / digest / path.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        path.replace(dest)
+
+
+def build_units(paths, cfg, run_id, schema, prompt_tpl=None, lenses=None, force=False):
+    try:
+        validate_training_chunks(paths)
+    except PrepRefused as exc:
+        raise _engine.EngineError(str(exc))
     prompt_tpl = prompt_tpl or _engine.load_prompt("mine")
     lenses = resolve_lenses(cfg, lenses)
     texts = lens_texts()
@@ -205,6 +242,13 @@ def build_units(paths, cfg, run_id, schema, prompt_tpl=None, lenses=None):
             uid = cid if lens == "all" else "%s:%s" % (cid, lens)
             out_name = (cid if lens == "all" else "%s-%s" % (cid, lens)) + ".json"
             units.append(_engine.Unit(uid, _engine.render(prompt_tpl, mapping), sch, paths.mined / run_id / out_name))
+    path = input_manifest_path(paths, run_id)
+    old = read_json(path, {}) or {}
+    inputs = _unit_inputs(paths, units)
+    _invalidate_changed_run(paths, run_id, old.get("units"), inputs, force)
+    # Persist before the first call. A process killed after one unit succeeds can
+    # prove what that output was asked, even before run_mine's final metadata pass.
+    write_json(path, dict(old, version=1, run_id=run_id, units=inputs))
     return units
 
 
@@ -215,20 +259,37 @@ def privacy_line(cfg):
 
 
 def reuse_previous(paths, run_id, previous_run, units, log=print):
-    """Copy valid outputs from a previous run for chunks whose content hash is unchanged (refresh --extend)."""
+    """Reuse only schema-valid outputs with matching pre-call input fingerprints."""
     if not previous_run:
+        return 0
+    try:
+        previous = read_json(input_manifest_path(paths, previous_run), {}) or {}
+        current = read_json(input_manifest_path(paths, run_id), {}) or {}
+    except (ValueError, OSError):
+        return 0
+    if previous.get("version") != 1 or current.get("version") != 1:
+        return 0
+    if not isinstance(previous.get("units"), dict) or not isinstance(current.get("units"), dict):
+        return 0
+    if any(previous.get(key) != current.get(key) for key in ("engine", "model")):
         return 0
     reused = 0
     for u in units:
         prev = paths.mined / previous_run / u.out_path.name
         if not prev.exists():
             continue
-        data = read_json(prev)
+        before = (previous.get("units") or {}).get(u.id)
+        after = (current.get("units") or {}).get(u.id)
+        if not isinstance(before, dict) or not isinstance(after, dict) or before != after:
+            continue
+        try:
+            data = read_json(prev)
+        except (ValueError, OSError):
+            continue
         if not isinstance(data, dict):
             continue
-        meta = data.get("_meta") or {}
-        cid = parse_mined_name(u.out_path.stem)[0]
-        if meta.get("chunk_hash") == chunk_hash(paths.chunks / (cid + ".jsonl")):
+        body = {k: v for k, v in data.items() if k != "_meta"}
+        if not _schema.validate(body, u.schema):
             u.out_path.parent.mkdir(parents=True, exist_ok=True)
             u.out_path.write_bytes(prev.read_bytes())
             reused += 1
@@ -237,24 +298,8 @@ def reuse_previous(paths, run_id, previous_run, units, log=print):
     return reused
 
 
-def pending_units(paths, cfg, run_id, lenses=None):
-    """[(chunk id, lens)] whose output in mined/<run_id> is missing or was mined from different chunk bytes: the work a
-    resumed or incremental mine still has to do. Every unit is pending when run_id is None."""
-    lenses = resolve_lenses(cfg, lenses)
-    out = []
-    for cpath in chunk_files(paths):
-        cid = cpath.stem
-        h = chunk_hash(cpath)
-        for lens in lenses:
-            name = (cid if lens == "all" else "%s-%s" % (cid, lens)) + ".json"
-            data = read_json(paths.mined / run_id / name) if run_id else None
-            if not isinstance(data, dict) or (data.get("_meta") or {}).get("chunk_hash") != h:
-                out.append((cid, lens))
-    return out
-
-
 def run_mine(paths, cfg, kind, run_id=None, force=False, collect=False, concurrency=4, model=None, max_calls=None,
-             max_cost_usd=None, fake_dir=None, reuse_from=None, log=print, backoff=None, lenses=None, cost_estimate=None):
+             max_cost_usd=None, fake_dir=None, reuse_from=None, log=print, backoff=None, lenses=None):
     schema = _engine.load_schema("mined")
     if run_id in (None, "latest") and collect:
         run_id = _engine.latest_run_id(paths, "mine")
@@ -264,10 +309,16 @@ def run_mine(paths, cfg, kind, run_id=None, force=False, collect=False, concurre
         run_id = _engine.latest_run_id(paths, "mine") or None
     eng = _engine.Engine(paths, cfg, kind, "mine", run_id=run_id, model=_engine.stage_model(cfg, kind, "mine", model),
                          concurrency=concurrency, max_calls=max_calls, max_cost_usd=max_cost_usd, fake_dir=fake_dir,
-                         log=log, backoff=backoff, cost_estimate=cost_estimate)
-    units = build_units(paths, cfg, eng.run_id, schema, lenses=lenses)
+                         log=log, backoff=backoff)
+    units = build_units(paths, cfg, eng.run_id, schema, lenses=lenses, force=force)
     if not units:
         raise _engine.EngineError("no chunks in derived/chunks: run prep first")
+    manifest_path = input_manifest_path(paths, eng.run_id)
+    inputs = read_json(manifest_path)
+    if any(inputs.get(key) is not None and inputs.get(key) != value for key, value in (("engine", kind), ("model", eng.model))):
+        _invalidate_changed_run(paths, eng.run_id, "previous engine/model", "changed engine/model", force)
+    inputs.update(engine=kind, model=eng.model)
+    write_json(manifest_path, inputs)
     if reuse_from and not force:
         reuse_previous(paths, eng.run_id, reuse_from, units, log)
     summary = eng.run(units, force=force, collect=collect)
@@ -278,8 +329,7 @@ def run_mine(paths, cfg, kind, run_id=None, force=False, collect=False, concurre
             if isinstance(data, dict):
                 cid, lens = parse_mined_name(u.out_path.stem)
                 meta = data.setdefault("_meta", {})
-                meta["chunk_hash"] = chunk_hash(paths.chunks / (cid + ".jsonl"))
-                meta["lens"] = lens
+                meta.update({k: v for k, v in inputs["units"][u.id].items() if k != "output"})
                 write_json(u.out_path, data)
     chunk_ids = {parse_mined_name(u.out_path.stem)[0] for u in units}
     summary["chunks"] = len(chunk_ids)

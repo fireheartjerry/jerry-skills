@@ -4,7 +4,7 @@ Replacement tokens are [REDACTED:<kind>]. Kinds: key, secret, email, phone, card
 `detect` reports hits without rewriting (used by lint)."""
 import re
 
-SCRUB_VERSION = 2  # 2: Stripe, Hugging Face, GitLab, npm, Google OAuth, Authorization: Bearer, prefixed secret labels
+SCRUB_VERSION = 3  # 3: short-lived AQ-prefixed credential values
 
 _KEY_PATTERNS = [
     re.compile(r"AKIA[0-9A-Z]{16}"),
@@ -19,6 +19,7 @@ _KEY_PATTERNS = [
     re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"AIza[0-9A-Za-z_-]{35}"),
     re.compile(r"ya29\.[A-Za-z0-9_-]{20,}"),  # Google OAuth access tokens
+    re.compile(r"(?<![A-Za-z0-9_])AQ\.[A-Za-z0-9_-]{30,}"),  # opaque short-lived credentials
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[^\n]*(?:\n[^\n]*)*"),
     re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),

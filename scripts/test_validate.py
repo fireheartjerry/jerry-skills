@@ -330,6 +330,10 @@ class ContentScanTests(FixtureCase):
         self.assert_secret(FAKE_GOOGLE, "Google")
         self.assert_secret(FAKE_PEM, "private key")
 
+    def test_short_lived_opaque_and_oauth_credentials(self):
+        self.assert_secret("AQ." + "x" * 40, "opaque short-lived")
+        self.assert_secret("ya29." + "y" * 40, "Google OAuth")
+
     def test_pattern_sources_do_not_trip_the_scan(self):
         write(os.path.join(self.root, "scrub.py"),
               'P = [r"AKIA[0-9A-Z]{16}", r"sk-ant-[A-Za-z0-9_-]{16,}", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"]\n'

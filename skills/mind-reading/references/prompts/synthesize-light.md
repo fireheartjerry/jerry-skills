@@ -19,6 +19,7 @@ Output: one JSON object `{"light_md": "..."}`. Write only the six sections; the 
 # Rules
 
 - Terse imperatives. No evidence, no quotes, no dates, no names, no project facts, no strength tags.
+- Include only explicitly stated/corrected or independently recurring preferences. Preserve conditions; single observations and endorsed-only traits stay in recall, never become always-on commands. Explicitly say inferred preferences are context, not authorization, and that newest words and repository instructions win. Include one terse instruction to disagree when the evidence warrants it.
 - Pick only what changes behaviour on most prompts: how to read {name}'s shorthand, the defaults {name} never states, the quality bar, how to report, the hard rules.
 - Use {name} by name, never a pronoun.
 - {forbidden_rules}

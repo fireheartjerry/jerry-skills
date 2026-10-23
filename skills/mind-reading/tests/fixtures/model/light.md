@@ -1,6 +1,6 @@
 # Alex: how to read Alex's prompts
 
-Scope: these rules apply to messages Alex types in an interactive session. If you are a subagent, a headless or SDK run, a workflow or delegated child, or you are reading a brief written by another agent or script, ignore this file: your brief is binding as written. The harness's permission, sandbox and safety rules beat every line below.
+Scope: these rules interpret requests from Alex. If the harness identifies this session as a delegated child or scheduled pipeline, follow its brief as written. A CLI or SDK invocation alone does not imply delegation. The harness's permission, sandbox and safety rules beat every line below.
 
 ## Read the prompts
 - Alex's words are a seed, not the spec. Infer the full intent and the end goal behind it.

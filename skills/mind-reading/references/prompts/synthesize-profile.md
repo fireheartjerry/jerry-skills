@@ -9,10 +9,12 @@ Output: one JSON object `{"profile_md": "..."}` holding the whole profile.md as 
 
 # Merge rules
 
-- A pattern seen in many chunks and recently outweighs a one-off. Strength tags by chunk count: `[strong]` seen in three or more chunks, or in two with a recent one; `[moderate]` two chunks, or one long recent run; `[weak]` one chunk.
+- Use each item's deterministic `support.confidence` as its strength tag. Its independent verified sessions and projects decide support, not chunk/lens repetition or the miner's proposed count. `stated_rule` and `correction` are explicit evidence classes; `inferred` is a tendency, not a universal instruction. Identical ids refer to the same evidence across chunks and count once.
+- Preserve hedges and conditions verbatim. A tentative statement remains tentative after synthesis; frequency never turns "usually" into "always". Keep contradictory evidence visible and scoped until a genuine later preference change resolves it. Never generalize a project-only or temporary restriction into a permanent personal ban.
+- Predict reach as well as limits: retain omitted mission, ambition and follow-through when the verified user evidence supports them. Avoid adding cautious constraints absent from the evidence.
 - Where a preference changed, the later one wins and the line carries `(changed MM-DD)` from `preference_changes`.
 - Evidence drawn from `drafted`, `pasted`, `question_answer` or `goal_reminder` messages is marked `[endorsed]` after the quote. A trait supported only by endorsed evidence arrives with `"endorsed": true` and `"strength": "weak"`: it carries `[weak]` and `[endorsed]` on the trait line and is never raised above weak, however many chunks repeat it. Typed evidence carries nothing extra. Endorsed text is never evidence of voice: no vocabulary entry and no communication-style trait comes from it.
-- Each trait and default lists the mining `lenses` that reported it inside its chunk and a `count` already merged across them; `chunk` is the chunk id. Weigh by distinct chunks, not by lenses: two lenses reporting the same item in one chunk are one observation.
+- Each trait and default lists the mining `lenses` that reported it inside its chunk and a `count` already merged across them; `chunk` is the chunk id. Use the supplied support metadata; repeated quotes in different chunks/lenses are one observation. Include each supported id once, retaining the relevant user wording rather than a new generic rule.
 - Dates are MM-DD. Quotes verbatim, typos kept, under 200 characters, one or two per item. Never a date from an unreliable session (those arrive as null).
 
 # Exclusions
@@ -29,7 +31,7 @@ Output: one JSON object `{"profile_md": "..."}` holding the whole profile.md as 
 # {name}: the full model
 
 Reading notes
-- Strength: [strong] seen in three or more chunks, or two with a recent one; [moderate] two chunks, or one long recent run; [weak] one chunk.
+- Strength follows verified independent sessions and explicit evidence, recorded in evidence.json; [weak] is a single observation or tentative inference. Inferred preferences are not authorizations.
 - [endorsed] marks evidence {name} accepted, pasted or answered rather than typed; a trait resting only on it stays [weak].
 - Dates are MM-DD (year in MODEL.json). Quotes verbatim, typos kept. Later preference wins; changes carry (changed MM-DD).
 - Project facts (budgets, scores, branch names, owners, deadlines) live in project memory, not here.
@@ -61,7 +63,8 @@ Rules for the structure:
 - Exactly the headings above: numbered layers 1 to 10, then `## Unsaid defaults`, then `## Vocabulary`. No other `## ` headings. The pipeline adds a `## What works and what doesn't` section itself from verified lessons; do not write one.
 - Every `###` group under Unsaid defaults has a `When:` line with 3 to 12 lowercase keywords or short phrases, comma separated, that a seed would contain. Good keywords are the words {name} actually types for that kind of request: "keep going", "fix", "status", "push", "design", "ugly", "deploy", "message". Bad keywords are abstract nouns a seed never contains.
 - Group A is the generic build-or-fix group and comes first. Order the rest by how often the kind of request appears.
-- Bullets start with `- `. Each layer item ends with its strength tag before the quotes. No line over 600 characters. Between {synth_min_lines} and {synth_max_lines} lines in total.
+- Bullets start with `- `. Each layer item ends with its strength tag before the quotes. No line over 600 characters. Target {synth_min_lines} to {synth_max_lines} lines in total. {profile_size_rule}
+- Never fill blanks with invented or generic defaults. A required section with no verified evidence may stay empty; repeated quotes, padded prose and unsupported examples do not improve coverage.
 - Vocabulary entries use `- **phrase / variant**: meaning.` Variants separated by ` / `.
 
 {prior_block}

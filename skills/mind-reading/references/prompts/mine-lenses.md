@@ -4,9 +4,9 @@ Each `## <lens>` section below is inserted into prompts/mine.md as the lens's fo
 
 ## core
 
-Question: who is {name} as a person who directs coding agents, and what do {name}'s laziest prompts really mean?
+Question: what do {name}'s short prompts omit that later genuine user turns establish, and which stable working preferences explain those omissions?
 
-- `traits`: claims about {name}, each with `layer` (thinking, quality_bar, building, design_taste, communication, standing_rules, likes, dislikes, workflow, context), `scope`, `strength`, `count` and 1 to 3 verbatim quotes with time, session and origin. Cover every layer the chunk gives evidence for. Fifteen well-evidenced traits beat five generic ones; forty specific ones beat fifteen.
+- `traits`: claims about {name}, each with `layer` (thinking, quality_bar, building, design_taste, communication, standing_rules, likes, dislikes, workflow, context), `scope`, `strength`, `count` and 1 to 3 verbatim quotes with time, session and origin. Cover every layer the chunk gives evidence for. Coverage follows evidence, not a target count. An explicit rule can stand on its own; an inferred workflow, git or communication preference needs repeated independent sessions and project diversity before promotion.
 - `seed_expansions`: 5 to 12 of {name}'s shortest or laziest prompts whose real intent the later turns reveal. `seed` verbatim, typos kept; `context` one line; `full_prompt` is the complete prompt {name} would have sent with unlimited time and stamina: first person, {name}'s priorities and vocabulary, cleaned up and well ordered, covering goal and why, scope and what not to touch, quality bar, deliverables, follow-through, how to report; `tags` name the kind of request in 1 to 4 lowercase words a seed would contain.
 - `preference_changes`: where {name} said one thing earlier and the opposite later, with both excerpts and both dates.
 - `session_stats`: sessions read, messages read, sessions with reliable time.
@@ -17,7 +17,8 @@ Question: what did {name} want that the first message did not say?
 
 - `unsaid_defaults`: the most valuable part of the model. Within each session, compare the opening request (`first_messages` on later parts) with what {name} added, corrected, narrowed or insisted on later. Each item: `when` (the kind of request, under 80 chars, in words a seed would contain), `default` (what {name} wanted but did not say at first, as one instruction), `kind`, `scope`, and evidence pairs of `first` and `later` excerpts.
 - `kind` sorts the default: `constraint` (a limit the work must respect: do not touch, keep, never), `scope` (how far to go, which siblings, what is in or out), `follow_through` (what should happen afterwards without being asked), `reporting` (how to report), `preference` (taste: order, style, tooling), `default` when none fits.
-- Look hardest for constraints and scope: the limits {name} holds but did not type (other people's work, frozen baselines, held-out data, the branch, spend) and the siblings {name} expects fixed along with the one named. One session gives one item; the same default seen in several sessions is one item with several evidence pairs.
+- Preserve tentative wording, conditions and dates. The opening and later excerpt must both occur in the cited session in that order; a later assistant summary is not evidence. Distinguish a correction of the agent's misunderstanding from a genuine change in the user's preference.
+- Look for omitted ambition and delivery as well as constraints and scope: the limits {name} holds but did not type (other people's work, frozen baselines, held-out data, the branch, spend) and the siblings {name} expects fixed along with the one named. One session gives one item; the same default seen in several sessions is one item with several evidence pairs.
 - Nothing else: no traits, no vocabulary, no grants.
 
 ## reactions

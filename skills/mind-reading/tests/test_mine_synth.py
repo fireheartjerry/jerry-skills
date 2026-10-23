@@ -1,10 +1,13 @@
 import json
+import copy
 import unittest
+from unittest import mock
 
 import helpers
 from mr import select as _select
 from mr.config import read_json
-from mr.mine import DEFAULT_LENSES, latest_mined_run, mined_chunks, run_mine
+from mr.mine import DEFAULT_LENSES, input_manifest_path, latest_mined_run, mined_chunks, run_mine
+from mr import engine as _engine
 from mr.synthesize import consolidate, jaccard, merge_items, run_synthesize
 
 
@@ -35,6 +38,53 @@ class MineSynthTests(unittest.TestCase):
         self.assertEqual(len(res2["skipped"]), units)  # reused from the previous run by chunk hash, no calls
         self.assertEqual(res2["calls"], 0)
 
+    def test_input_manifest_precedes_calls_and_survives_interruption(self):
+        paths, cfg = helpers.build_home(through="prep")
+        original = _engine.Engine.run
+
+        def interrupted(engine, units, **kwargs):
+            inputs = read_json(input_manifest_path(paths, engine.run_id))
+            self.assertEqual(len(inputs["units"]), len(units))
+            for item in inputs["units"].values():
+                self.assertEqual(len(item["prompt_hash"]), 64)
+                self.assertEqual(len(item["schema_hash"]), 64)
+            original(engine, units[:1], **kwargs)
+            raise KeyboardInterrupt
+
+        with mock.patch.object(_engine.Engine, "run", interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                run_mine(paths, cfg, "fake", run_id="interrupted", fake_dir=helpers.FAKE, lenses=["core"], log=helpers.quiet)
+        first = next((paths.mined / "interrupted").glob("chunk-*.json"))
+        self.assertNotIn("chunk_hash", read_json(first)["_meta"])  # no post-batch stamping ran
+        resumed = run_mine(paths, cfg, "fake", run_id="recovered", reuse_from="interrupted", fake_dir=helpers.FAKE,
+                           max_calls=0, lenses=["core"], log=helpers.quiet)
+        self.assertEqual((len(resumed["skipped"]), len(resumed["stopped"]), resumed["calls"]), (1, 1, 0))
+
+    def test_reuse_refuses_changed_prompt_schema_and_missing_manifest(self):
+        paths, cfg = helpers.build_home(through="prep")
+        run_mine(paths, cfg, "fake", run_id="source", fake_dir=helpers.FAKE, lenses=["core"], log=helpers.quiet)
+        load_prompt = _engine.load_prompt
+        with mock.patch.object(_engine, "load_prompt", lambda name, *a, **kw: load_prompt(name, *a, **kw) + ("\nchanged input" if name == "mine" else "")):
+            result = run_mine(paths, cfg, "fake", run_id="new-prompt", reuse_from="source", fake_dir=helpers.FAKE,
+                              max_calls=0, lenses=["core"], log=helpers.quiet)
+        self.assertEqual((len(result["skipped"]), result["calls"]), (0, 0))
+        load_schema = _engine.load_schema
+
+        def schema(name, *args, **kwargs):
+            value = copy.deepcopy(load_schema(name, *args, **kwargs))
+            if name == "mined":
+                value["properties"]["traits"]["items"]["properties"]["claim"]["maxLength"] = 199
+            return value
+
+        with mock.patch.object(_engine, "load_schema", schema):
+            result = run_mine(paths, cfg, "fake", run_id="new-schema", reuse_from="source", fake_dir=helpers.FAKE,
+                              max_calls=0, lenses=["core"], log=helpers.quiet)
+        self.assertEqual((len(result["skipped"]), result["calls"]), (0, 0))
+        input_manifest_path(paths, "source").unlink()
+        result = run_mine(paths, cfg, "fake", run_id="missing-manifest", reuse_from="source", fake_dir=helpers.FAKE,
+                          max_calls=0, lenses=["core"], log=helpers.quiet)
+        self.assertEqual((len(result["skipped"]), result["calls"]), (0, 0))
+
     def test_single_pass_writes_one_file_per_chunk(self):
         paths, cfg = helpers.build_home(through="prep")
         res = run_mine(paths, cfg, "fake", fake_dir=helpers.FAKE, lenses=["all"], log=helpers.quiet)
@@ -47,10 +97,10 @@ class MineSynthTests(unittest.TestCase):
     def test_consolidate_moves_project_facts_and_trims_evidence(self):
         c = consolidate(self.paths, self.run_id, log=helpers.quiet)
         self.assertEqual(c["chunks"], 2)  # distinct chunks, not lens files
-        self.assertEqual(c["session_stats"]["sessions_read"], 6 + 6)  # once per chunk, not once per lens (both chunks are the canned chunk-00)
+        self.assertEqual(c["session_stats"]["sessions_read"], 10)  # actual prepared training sessions, never engine-reported counts
         # 2 per chunk (one trait, one unsaid default): the copies the followthrough lens reported are merged in; plus one
         # project-scoped lesson, merged across the two chunks
-        self.assertEqual(len(c["project_facts"]), 5)
+        self.assertEqual(len(c["project_facts"]), 1)  # cs10 and cx10 observations are held out
         self.assertEqual(sum(1 for f in c["project_facts"] if f.get("kind") == "lesson"), 1)
         self.assertTrue(all(t["scope"] == "project" for t in c["project_facts"]))
         for layer, traits in c["traits"].items():
@@ -59,17 +109,17 @@ class MineSynthTests(unittest.TestCase):
                 self.assertLessEqual(len(t["evidence"]), 2)
         # "ship it" and "Ship it" merged by lowercase phrase; "rq" never occurs in typed fixture text, so it is dropped
         self.assertEqual([v["phrase"] for v in c["vocabulary"]], ["ship it"])
-        self.assertEqual(len(c["seed_expansions"]), 6)
-        self.assertEqual(len(c["preference_changes"]), 2)  # core and reactions report the same change: one per chunk
+        self.assertEqual(len(c["seed_expansions"]), 4)  # held-out-only seed is rejected
+        self.assertEqual(len(c["preference_changes"]), 0)  # later quote is a selected answer, not typed evidence
         self.assertEqual(c["trimmed"], [])
         for t in [t for ts in c["traits"].values() for t in ts]:
             self.assertIn(t["chunk"], ("chunk-00", "chunk-01"))  # the chunk id, never a lens file stem
         verify = next(t for t in c["traits"]["quality_bar"] if t["chunk"] == "chunk-00")
         self.assertEqual(verify["lenses"], ["core", "followthrough"])
-        self.assertEqual(verify["count"], 3)  # the same two quotes from two lenses are not new observations
-        self.assertEqual(sum(len(c["traits"][l]) for l in c["traits"]), 2 * 5)  # 5 person traits per chunk, no duplicates
-        drafted = next(t for t in c["traits"]["building"] if t["chunk"] == "chunk-00")
-        self.assertNotIn("endorsed", drafted)  # one typed quote beside the drafted one: not endorsed-only
+        self.assertEqual(verify["count"], 1)  # only cs01 is training; repetition in lenses/chunks is not recurrence
+        self.assertEqual(sum(len(c["traits"][l]) for l in c["traits"]), 2 * 4)
+        self.assertEqual(c["traits"]["building"], [])  # cx10 was never training evidence
+        self.assertGreater(c["origin_filter"]["unverified"], 0)
         self.assertTrue((self.paths.mined / self.run_id / "consolidated.json").exists())
 
     def test_consolidate_budget_trims(self):
@@ -92,7 +142,7 @@ class MineSynthTests(unittest.TestCase):
         idx = read_json(paths.index)
         self.assertEqual(len(idx["groups"]), 8)
         self.assertEqual(len(idx["examples"]), 22)  # 20 plus the two upgrade pairs
-        self.assertEqual([g["id"] for g in idx["lessons"]], ["W1", "W2", "W3"])
+        self.assertEqual([g["id"] for g in idx["lessons"]], ["W1", "W2"])
         light = paths.light.read_text(encoding="utf-8")
         self.assertTrue(light.startswith("# Alex: how to read Alex's prompts"))
         self.assertIn("Scope:", light)
@@ -214,7 +264,7 @@ class MergeTests(unittest.TestCase):
         f = mined_chunks(paths, run_id)["chunk-00"]["core"]
         data = read_json(f)
         data["traits"].append({"layer": "building", "claim": "Wants resilient checkout flows", "scope": "person", "strength": "strong",
-                               "count": 2, "evidence": [_ev("Make the checkout flow resilient to payment provider timeouts", "drafted")]})
+                               "count": 2, "evidence": [_ev("pasted log line", "pasted", session="cs04")]})
         data["seed_expansions"].append({"seed": "Make the checkout flow resilient to payment provider timeouts", "context": "drafted",
                                         "full_prompt": "x", "tags": []})
         f.write_text(json.dumps(data), encoding="utf-8")
@@ -227,7 +277,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual((t["strength"], t["endorsed"]), ("weak", True))
         self.assertNotIn("Make the checkout flow resilient to payment provider timeouts", [s["seed"] for s in c["seed_expansions"]])
         self.assertNotIn("payment provider timeouts", [v["phrase"] for v in c["vocabulary"]])
-        self.assertEqual((c["origin_filter"]["seeds"], c["origin_filter"]["vocabulary"], c["origin_filter"]["endorsed_capped"]), (1, 3, 1))  # "rq" twice
+        self.assertEqual((c["origin_filter"]["seeds"], c["origin_filter"]["vocabulary"], c["origin_filter"]["endorsed_capped"]), (3, 3, 1))  # two baseline held-out seeds plus new drafted seed
 
 
 if __name__ == "__main__":

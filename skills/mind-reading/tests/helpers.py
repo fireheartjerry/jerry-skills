@@ -1,10 +1,12 @@
 """Shared test helpers: path setup, fixture locations, a fast in-process pipeline builder, and a CLI runner."""
 import json
+import contextlib
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import re
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
@@ -37,7 +39,6 @@ def init_home(home, name="Alex", engine="fake", people=None, prep_overrides=None
     cfg["engine"] = engine
     cfg["people"] = PEOPLE if people is None else people
     cfg["claude_settings_path"] = str(Path(home) / "no-settings.json")
-    cfg["track"]["include_default_dirs"] = False  # a test never scans the machine's real transcripts
     if prep_overrides:
         cfg["prep"].update(prep_overrides)
     if cfg_overrides:
@@ -94,3 +95,39 @@ def copy_fixture_sources(dest):
     shutil.copytree(FIX / "claude", dest / "claude")
     shutil.copytree(FIX / "codex", dest / "codex")
     return dest / "claude", dest / "codex"
+
+
+@contextlib.contextmanager
+def fixture_upgrade_lesson_ids():
+    """Adapt canned deployment examples to the verified lesson ids of a new split.
+
+    A cutoff can admit a formerly held-out lesson and renumber every later group.
+    Only test responses are adapted; production validation still checks each id
+    against a real bad-outcome group from its actual synthesis prompt.
+    """
+    from unittest import mock
+    from mr.engine import FakeBackend
+    original = FakeBackend.call
+
+    def call(backend, unit, prompt, attempt):
+        result = original(backend, unit, prompt, attempt)
+        if backend.stage != "synthesize" or unit.id != "examples" or not result.ok:
+            return result
+        current, deploy = None, None
+        for line in prompt.splitlines():
+            match = re.match(r"^### (W\d+)\. (.+)$", line)
+            if match:
+                current = match.groups()
+            elif current and line.startswith("- ") and "Outcome: bad" in line and current[1].strip().lower() == "deploy":
+                deploy = current[0]
+        if deploy is None:
+            raise AssertionError("fixture needs a verified bad deployment lesson")
+        text = result.data["examples_md"]
+        text = re.sub(r"\blesson W\d+\b", "lesson " + deploy, text)
+        text = re.sub(r"\(W\d+\)\.", "(" + deploy + ").", text)
+        text = re.sub(r"(?m)^(Tags: upgrade, )w\d+(, deploy)$", r"\g<1>" + deploy.lower() + r"\2", text)
+        result.data = dict(result.data, examples_md=text)
+        return result
+
+    with mock.patch.object(FakeBackend, "call", call):
+        yield

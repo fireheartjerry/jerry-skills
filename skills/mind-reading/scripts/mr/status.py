@@ -68,9 +68,10 @@ def eval_guard_present(settings_path, home):
 
 
 def calibration(paths):
+    from .tracking import summarize
     rows = read_jsonl(paths.decisions)
     if not rows:
-        return {"invocations": 0}
+        return {"invocations": 0, "real_use": summarize(paths)}
     n = len(rows)
     s = sum(int(r.get("s") or 0) for r in rows)
     l = sum(int(r.get("l") or 0) for r in rows)
@@ -89,7 +90,8 @@ def calibration(paths):
         except (TypeError, ValueError):
             continue
     return {"invocations": n, "mean_s": round(s / n, 2), "mean_l": round(l / n, 2), "mean_g": round(g / n, 2),
-            "held_rate": round(held / n, 3), "corrections_per_100": round(100.0 * corr / n, 1), "modes": modes,
+            "held_rate": round(held / n, 3), "corrections_per_100": None, "correction_lines_unlinked": corr,
+            "real_use": summarize(paths), "modes": modes,
             "mean_chars": round(sum(int(r.get("chars") or 0) for r in rows) / n),
             "upgrades_per_100": round(100.0 * upgrades / n, 1), "lessons_in_slice_rate": round(sum(1 for r in rows if r.get("lessons")) / n, 3)}
 
@@ -184,19 +186,6 @@ def gather(paths, cfg):
     if st["spool_pending"]:
         st["warnings"].append("%d spooled runtime line(s) wait in %s (applied when the data home is writable)" % (st["spool_pending"], sp))
     st["ledger"] = read_json(paths.ledger, []) or []
-    # the human metrics: blind preference (primary) and the correction rate in real use
-    from . import prefer as _prefer
-    st["prefer"] = _prefer.latest_prefer(st["ledger"])
-    st["track"] = read_json(paths.track_summary)
-    from . import auto as _auto
-    st["auto"] = _auto.last_run(paths)
-    try:
-        from . import schedule as _schedule
-        st["schedule"] = _schedule.status(paths, cfg)
-    except Exception as exc:  # status is read-only and must not fail on the scheduler
-        st["schedule"] = {"error": str(exc)}
-    if paths.chunk_pins.exists() and st["chunks"]:
-        st["incremental"] = True
     corr_entries, corr_bad = ([], [])
     if paths.corrections.exists():
         corr_entries, corr_bad = _refresh.parse_corrections(paths.corrections.read_text(encoding="utf-8"))
@@ -214,8 +203,11 @@ def gather(paths, cfg):
                 st["blocked"].append("always-on block %s in %s: run refresh --always-on --write-to %s" % (s, t, t))
     if paths.eval.exists() and not _dir_mode_ok(paths.eval):
         st["blocked"].append("eval/ is not mode 0700: chmod 700 %s" % paths.eval)
-    guard, note = eval_guard_present(cfg.get("claude_settings_path", "~/.claude/settings.json"), paths.home)
+    guard_applicable = not (split and split.get("no_test"))
+    guard, note = (eval_guard_present(cfg.get("claude_settings_path", "~/.claude/settings.json"), paths.home)
+                   if guard_applicable else (None, "not applicable: this split holds no test data"))
     st["eval_guard"], st["eval_guard_note"] = guard, note
+    st["eval_guard_applicable"] = guard_applicable
     if guard is False:
         st["blocked"].append("no valid permissions.deny guard for %s in %s (see build.md step 4)%s" % (
             paths.eval, cfg.get("claude_settings_path"), (": " + note) if note else ""))
@@ -309,16 +301,9 @@ def format_text(st, est=None):
     out.append("grants: %d total, %d active%s%s" % (g.get("total", 0), g.get("active", 0),
                                                     (", %d revoked" % g["revoked"]) if g.get("revoked") else "",
                                                     (", %d invalid (never applied)" % g["invalid"]) if g.get("invalid") else ""))
-    from . import prefer as _prefer
-    from . import track as _track
-    from . import auto as _auto
-    out.append(_prefer.format_status_line(st.get("prefer")))
-    out.append(_track.format_status_line(st.get("track")))
     for e in st["ledger"]:
-        if e.get("kind") == "prefer":
-            continue
-        out.append("eval look: model %s split %s on %s arms %s%s (automated judge, secondary to the two human metrics)" % (
-            e.get("model_hash"), e.get("split_id"), (e.get("date") or "")[:10], e.get("arms"), " TUNED" if e.get("forced") else ""))
+        out.append("eval look: model %s split %s on %s arms %s%s" % (e["model_hash"], e["split_id"], e["date"][:10], e["arms"],
+                                                                    " TUNED" if e.get("forced") else ""))
     cr = st["corrections"]
     out.append("corrections: %d total, %d pending, %d unparseable" % (cr["total"], cr["pending"], len(cr["unparseable"])))
     for b in cr["unparseable"]:
@@ -330,17 +315,15 @@ def format_text(st, est=None):
             cal["upgrades_per_100"], cal["mean_chars"]))
     else:
         out.append("calibration: no runtime decisions recorded yet")
+    real = cal.get("real_use") or {}
+    rate = real.get("corrections_per_100_observed")
+    out.append("real-use corrections: %s; %d human-reviewed observed follow-ups, %d unreviewed or unobserved, %d legacy unlinked invocations" % (
+        ("%.1f per 100" % rate) if rate is not None else "unknown", real.get("human_reviewed_observed", 0),
+        real.get("unreviewed_or_unobserved", 0), real.get("legacy_unlinked", 0)))
     for t, s in st["drift"]:
         out.append("always-on %s: %s" % (t, s))
-    out.append(_auto.format_status_line(st.get("auto")))
-    sch = st.get("schedule") or {}
-    if sch.get("error"):
-        out.append("schedule: unknown (%s)" % sch["error"])
-    elif sch:
-        from . import schedule as _schedule
-        out.append(_schedule.format_status_line(sch))
     if st["eval_guard"] is None:
-        out.append("eval guard: no Claude settings file found (nothing to check)")
+        out.append("eval guard: " + (st.get("eval_guard_note") or "no Claude settings file found (nothing to check)"))
     else:
         out.append("eval guard: %s%s" % ("present" if st["eval_guard"] else "MISSING", (" (" + st["eval_guard_note"] + ")") if st.get("eval_guard_note") else ""))
     if est:

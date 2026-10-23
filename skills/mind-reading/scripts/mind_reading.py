@@ -3,13 +3,11 @@
 
   python3 -I scripts/mind_reading.py [--home PATH] <subcommand> [options]
 
-Subcommands: init, extract, prep, mine, synthesize, eval, refresh, status, select, log-decision, correct, lint, track,
-prefer, schedule.
-Exit codes: 0 ok, 1 usage, 2 refused or blocked (one-look rule, guard, `status` with BLOCKED items, `refresh --auto`
-while another runs), 3 engine failure after retries or a budget stop (`refresh --auto` that ended incomplete), 4
-validation failure (also: no model for `select`; a forbidden rule in a `correct` line or in light.md for `refresh
---always-on`; `refresh --auto` or `--rollback` that could not run), 5 the data home is not writable and the line could
-not be spooled either (`log-decision`, `correct`).
+Subcommands: init, extract, prep, mine, synthesize, eval, refresh, status, select, log-decision, correct, lint.
+Exit codes: 0 ok, 1 usage, 2 refused or blocked (one-look rule, guard, `status` with BLOCKED items), 3 engine failure
+after retries or a budget stop, 4 validation failure (also: no model for `select`; a forbidden rule in a `correct`
+line or in light.md for `refresh --always-on`), 5 the data home is not writable and the line could not be spooled
+either (`log-decision`, `correct`).
 """
 import argparse
 import datetime as _dt
@@ -137,7 +135,8 @@ def cmd_synthesize(args, paths, cfg, log):
     try:
         summary = run_synthesize(paths, cfg, _engine_kind(args, cfg), substeps=args.substeps or None, mined_run=args.mined_run,
                                  run_id=args.run, force=args.force, collect=args.collect, model=args.model, update=args.update,
-                                 fake_dir=_fake_dir(args), log=log, strict_lint=not args.no_strict)
+                                 fake_dir=_fake_dir(args), log=log, strict_lint=not args.no_strict,
+                                 max_calls=args.max_calls, max_cost_usd=args.max_cost_usd)
     except ModelFormatError as exc:
         log("synthesize: model format error:\n%s" % exc)
         _emit(args, {"error": str(exc)})
@@ -174,62 +173,16 @@ def cmd_eval(args, paths, cfg, log):
     return EXIT_ENGINE if failed else EXIT_OK
 
 
-def _tee(paths, log, name):
-    """A log function that also appends timestamped lines to <home>/logs/<name> (unattended runs leave a trail)."""
-    target = paths.logs / name
-
-    def tee(msg):
-        log(msg)
-        try:
-            paths.logs.mkdir(parents=True, exist_ok=True)
-            stamp = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
-            with open(target, "a", encoding="utf-8") as fh:
-                for line in str(msg).splitlines() or [""]:
-                    fh.write("%s %s\n" % (stamp, line))
-        except OSError:
-            pass
-    return tee
-
-
-AUTO_EXIT = {"swapped": EXIT_OK, "nothing-new": EXIT_OK, "deferred": EXIT_OK, "held": EXIT_OK, "rolled-back": EXIT_OK,
-             "incomplete": EXIT_ENGINE, "locked": EXIT_REFUSED, "error": EXIT_INVALID}
-
-
 def cmd_refresh(args, paths, cfg, log):
     from mr.refresh import RefreshError, run_refresh
     from mr.select import ModelFormatError
-    if args.auto or args.rollback or args.list_versions:
-        from mr import auto as _auto
-        if args.list_versions:
-            vs = _auto.versions(paths)
-            cur = (_config.read_json(paths.model_json, {}) or {}).get("model_hash")
-            prev = _auto.previous_version(paths)
-            for v in vs:
-                print("%s  archived %s%s" % (v["model_hash"], v["time"], "  (previous: refresh --rollback restores it)" if v["model_hash"] == prev else ""))
-            if not vs:
-                log("refresh: no archived model versions under %s" % paths.archive)
-            _emit(args, {"current": cur, "previous": prev, "versions": vs})
-            return EXIT_OK
-        if args.rollback:
-            try:
-                res = _auto.rollback(paths, cfg, to=args.to, log=log)
-            except _auto.AutoError as exc:
-                log("refresh --rollback: %s" % exc)
-                _emit(args, {"error": str(exc)})
-                return EXIT_INVALID
-            _emit(args, res)
-            return EXIT_OK
-        tee = _tee(paths, log, "refresh-auto.log")
-        rec = _auto.run_auto(paths, cfg, kind=args.engine, max_cost_usd=args.max_cost_usd, max_calls=args.max_calls,
-                             fake_dir=_fake_dir(args), log=tee, force=args.force)
-        _emit(args, rec)
-        return AUTO_EXIT.get(rec["outcome"], EXIT_OK)
     do_all = not (args.corrections or args.extend or args.always_on)
     try:
         summary = run_refresh(paths, cfg, _engine_kind(args, cfg), corrections=args.corrections or do_all, extend=args.extend,
                               always_on_flag=args.always_on or do_all, write_to=args.write_to, new_cutoff=args.new_cutoff,
                               run_id=args.run, collect=args.collect, fake_dir=_fake_dir(args), log=log, model=args.model,
-                              concurrency=args.concurrency)
+                              concurrency=args.concurrency, candidate_home=args.candidate_home,
+                              max_calls=args.max_calls, max_cost_usd=args.max_cost_usd, train_before=args.train_before)
     except (RefreshError, ModelFormatError) as exc:
         log("refresh: %s" % exc)
         _emit(args, {"error": str(exc)})
@@ -273,6 +226,32 @@ def cmd_select(args, paths, cfg, log):
     """The slice for a seed. Exit 4 with "no model" only when neither index.json nor any model file exists; a model
     built before the index format is read through the legacy fallback (every example, matching groups)."""
     from mr.select import ModelFormatError, select_slice
+    from mr.intent_context import ContextFormatError, normalize
+    context = None
+    context_file = getattr(args, "context_file", None)
+    if context_file:
+        if context_file == "-" and args.seed_file == "-":
+            log("seed and intent context cannot both read stdin")
+            return EXIT_USAGE
+        try:
+            if context_file == "-":
+                raw_context = sys.stdin.read(65537)
+            else:
+                with open(context_file, encoding="utf-8") as fh:
+                    raw_context = fh.read(65537)
+            if len(raw_context) > 65536:
+                raise ContextFormatError("intent context file exceeds 65536 characters")
+            def unique_context(items):
+                result = {}
+                for key, value in items:
+                    if key in result:
+                        raise ContextFormatError("duplicate intent-context key: %s" % key)
+                    result[key] = value
+                return result
+            context = normalize(json.loads(raw_context, object_pairs_hook=unique_context))
+        except (OSError, ValueError) as exc:
+            log("select: invalid intent context: %s" % exc)
+            return EXIT_USAGE
     seed = _read_seed(args, log)
     if seed is None:
         return EXIT_USAGE
@@ -281,8 +260,9 @@ def cmd_select(args, paths, cfg, log):
         log("select: no model at %s (index.json missing): expand from project memory and the conversation, then offer to build it (references/build.md)" % paths.model)
         return EXIT_INVALID
     try:
-        text, decision = select_slice(paths.model, seed, cfg["select"], kind=args.kind, no_light=args.no_light, mode=args.mode)
-    except (ModelFormatError, FileNotFoundError) as exc:
+        text, decision = select_slice(paths.model, seed, cfg["select"], kind=args.kind, no_light=args.no_light, mode=args.mode,
+                                      project=args.project, context=context)
+    except (ModelFormatError, FileNotFoundError, ContextFormatError) as exc:
         log("select: %s" % exc)
         return EXIT_INVALID
     if args.json:
@@ -377,29 +357,37 @@ def cmd_log_decision(args, paths, cfg, log):
     row = {"date": _dt.date.today().isoformat(), "seed_hash": data.pop("seed_hash", None) or seed_hash(seed or ""),
            "mode": data.get("mode", "execute")}
     for k in ("s", "l", "g", "chars"):
-        try:
-            row[k] = int(data.get(k) or 0)
-        except (TypeError, ValueError):
-            log("field %r must be an integer" % k)
+        value = data.get(k, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            log("field %r must be a nonnegative integer" % k)
             return EXIT_USAGE
+        row[k] = value
     row["held"] = [str(h)[:120] for h in (data.get("held") or []) if str(h).strip()]
     row["groups"] = [str(g) for g in (data.get("groups") or [])]
     row["examples"] = [int(e) for e in (data.get("examples") or []) if str(e).isdigit()]
     row["grants"] = [str(g)[:8] for g in (data.get("grants") or []) if str(g).strip()]  # grant ids applied (G1, G2)
     row["lessons"] = [str(x)[:8] for x in (data.get("lessons") or []) if str(x).strip()]  # lesson groups in the slice (W1)
-    try:
-        row["upgrades"] = int(data.get("upgrades") or 0)  # expansions that took a lesson's better way over the literal ask
-    except (TypeError, ValueError):
-        log("field 'upgrades' must be an integer")
+    row["echoes"] = [str(x)[:32] for x in (data.get("echoes") or []) if str(x).strip()]
+    row["upgrades"] = data.get("upgrades", 0)
+    if not isinstance(row["upgrades"], int) or isinstance(row["upgrades"], bool) or row["upgrades"] < 0:
+        log("field 'upgrades' must be a nonnegative integer")
         return EXIT_USAGE
-    try:  # the model that was live, so the correction tracker can attribute this expansion exactly
-        mh = (_config.read_json(paths.model_json, {}) or {}).get("model_hash")
-    except (OSError, ValueError):
-        mh = None
-    if mh:
-        row["model_hash"] = mh
     if row["mode"] not in ("execute", "discuss", "status", "hold", "plan"):
         log("mode must be one of execute, discuss, status, hold, plan")
+        return EXIT_USAGE
+    from mr.tracking import TrackingError, validate_decision
+    for key in ("decision_id", "timestamp", "source_ref"):
+        if key in data:
+            row[key] = data[key]
+    from mr.select import files_hash
+    row["model_hash"] = files_hash(paths.model)
+    try:
+        row = validate_decision(row)
+    except TrackingError as exc:
+        log("log-decision: %s" % exc)
+        return EXIT_USAGE
+    if any(r.get("decision_id") == row["decision_id"] for r in read_jsonl(paths.decisions)):
+        log("log-decision: duplicate decision_id")
         return EXIT_USAGE
     code = _append_line(paths.decisions, json.dumps(row, ensure_ascii=False), log, "decision")
     if code == EXIT_OK:
@@ -442,6 +430,16 @@ def cmd_correct(args, paths, cfg, log):
     line = "%s | seed: \"%s\" | wrong: %s | meant: %s | scope: %s | kind: %s" % (
         _dt.date.today().isoformat(), seed.replace("|", "/").replace('"', "'"), wrong.replace("|", "/"),
         meant.replace("|", "/"), scope.replace("|", "/"), kind)
+    if data.get("decision_id"):
+        import re
+        did = data["decision_id"]
+        if not isinstance(did, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", did):
+            log("correct: invalid decision_id")
+            return EXIT_USAGE
+        if not any(r.get("decision_id") == did for r in read_jsonl(paths.decisions)):
+            log("correct: decision_id must refer to a recorded invocation")
+            return EXIT_USAGE
+        line += " | decision_id: " + did
     entries, bad = parse_corrections(line)
     if bad or len(entries) != 1:
         log("correction does not parse after formatting; check for stray characters: %s" % line)
@@ -451,82 +449,6 @@ def cmd_correct(args, paths, cfg, log):
         log("correction recorded in %s (fold it in later with refresh --corrections)" % paths.corrections)
     _emit(args, {"line": line})
     return code
-
-
-def cmd_track(args, paths, cfg, log):
-    """Find real invocations in the transcripts, classify the next typed message, store ids and classes only."""
-    from mr.engine import EngineError
-    from mr.track import format_status_line, run_track
-    try:
-        summary = run_track(paths, cfg, claude_dirs=args.claude_dir, codex_dirs=args.codex_dir, full=args.full,
-                            engine=args.engine, engine_model=args.model, max_cost_usd=args.max_cost_usd,
-                            max_calls=args.max_calls, drafts=False if args.no_drafts else None, fake_dir=_fake_dir(args), log=log)
-    except (EngineError, OSError) as exc:
-        log("track: %s" % exc)
-        _emit(args, {"error": str(exc)})
-        return EXIT_ENGINE
-    if args.json:
-        _emit(args, summary)
-    elif not args.quiet:
-        print(format_status_line(summary))
-        for w, r in list(summary["by_week"].items())[-6:]:
-            print("  week %s: %d invocation(s), %d classified, corrections %s, refinements %s" % (
-                w, r["invocations"], r["classified"], _fmt_rate(r["correction"]), _fmt_rate(r["refinement"])))
-        for m, r in summary["by_model"].items():
-            print("  model %s: %d invocation(s), %d classified, corrections %s, refinements %s" % (
-                m[:16], r["invocations"], r["classified"], _fmt_rate(r["correction"]), _fmt_rate(r["refinement"])))
-    return EXIT_OK
-
-
-def _fmt_rate(block):
-    from mr.stats import format_rate
-    return format_rate(block)
-
-
-def cmd_prefer(args, paths, cfg, log):
-    from mr import prefer as _prefer
-    from mr.engine import EngineError
-    try:
-        if args.prefer_cmd == "build":
-            res = _prefer.run_build(paths, cfg, args.a, args.b, args.seeds, out=args.out, n=args.n, rng_seed=args.rng_seed,
-                                    kind=args.engine, model=args.model, max_cost_usd=args.max_cost_usd, max_calls=args.max_calls,
-                                    title=args.title, fake_dir=_fake_dir(args), log=log, collect=args.collect)
-            if res.get("pending"):
-                log(res["instructions"])
-                log("then: " + res["collect"])
-        elif args.prefer_cmd == "score":
-            res = _prefer.run_score(paths, args.answers, key_path=args.key, ledger=not args.no_ledger, log=log)
-        else:
-            log("prefer needs build or score")
-            return EXIT_USAGE
-    except (_prefer.PreferError, EngineError) as exc:
-        log("prefer: %s" % exc)
-        _emit(args, {"error": str(exc)})
-        return EXIT_INVALID
-    _emit(args, res)
-    return EXIT_OK
-
-
-def cmd_schedule(args, paths, cfg, log):
-    from mr import schedule as _schedule
-    if args.action == "install":
-        res = _schedule.install(paths, cfg, weekday=args.weekday, hour=args.hour, minute=args.minute,
-                                daily=True if args.daily else None, label=args.label, dry_run=args.dry_run,
-                                platform=args.platform, log=log)
-        _emit(args, res)
-        return EXIT_OK if res.get("installed") or args.dry_run or res.get("platform") != "darwin" else EXIT_REFUSED
-    if args.action == "uninstall":
-        res = _schedule.uninstall(paths, cfg, label=args.label, platform=args.platform, log=log)
-        _emit(args, res)
-        return EXIT_OK
-    st = _schedule.status(paths, cfg, platform=args.platform)
-    from mr.auto import format_status_line as auto_line, last_run
-    if args.json:
-        _emit(args, dict(st, last_run=last_run(paths)))
-    else:
-        print(_schedule.format_status_line(st))
-        print(auto_line(last_run(paths)))
-    return EXIT_OK
 
 
 def cmd_lint(args, paths, cfg, log):
@@ -550,6 +472,170 @@ def cmd_lint(args, paths, cfg, log):
         log("lint: clean" + (" (with warnings)" if warnings else ""))
     _emit(args, {"hits": hits, "warnings": warnings})
     return EXIT_INVALID if fatal else EXIT_OK
+
+
+def cmd_demo(args, paths, cfg, log):
+    from mr.demo import DemoRefused, run_demo
+    if not args.home:
+        log("demo: pass --home <new-scratch-directory> to keep it separate from your personal model")
+        return EXIT_REFUSED
+    try:
+        summary = run_demo(paths, cfg, force=args.force, log=log)
+    except DemoRefused as exc:
+        log("demo: %s" % exc)
+        return EXIT_REFUSED
+    _emit(args, summary)
+    return EXIT_OK
+
+
+def cmd_recall(args, paths, cfg, log):
+    from mr.prep import PrepRefused
+    from mr.recall import RecallFormatError, build_episodes, render, retrieve
+    if args.action == "build":
+        try:
+            summary = build_episodes(paths)
+        except PrepRefused as exc:
+            log("recall: %s" % exc)
+            return EXIT_REFUSED
+        log("recall: built %d verified intent echoes" % summary["episodes"])
+        _emit(args, summary)
+    else:
+        seed = _read_seed(args, log)
+        if seed is None:
+            return EXIT_USAGE
+        try:
+            found = retrieve(paths.model, seed, kind=args.kind, project=args.project, limit=args.limit)
+        except RecallFormatError as exc:
+            log("recall: %s" % exc)
+            return EXIT_INVALID
+        if args.json:
+            print(json.dumps({"echoes": found}, ensure_ascii=False))
+        else:
+            print(render(found) or "No relevant intent echo. Use current context.\n", end="")
+    return EXIT_OK
+
+
+def cmd_preferences(args, paths, cfg, log):
+    from mr.preferences import PreferenceError, build_review, import_answers, pairs_from_results
+    try:
+        if args.action == "build":
+            if args.pairs:
+                with open(args.pairs, encoding="utf-8") as fh:
+                    pairs = json.load(fh)
+            elif args.baseline_results and args.candidate_results:
+                pairs = pairs_from_results(args.baseline_results, args.candidate_results, args.baseline_arm,
+                                           args.candidate_arm, args.seeds_dir)
+            else:
+                raise PreferenceError("pass --pairs or both --baseline-results and --candidate-results")
+            if not args.out:
+                raise PreferenceError("build needs --out <private-review-directory>")
+            summary = build_review(pairs, args.out, seed=args.seed, limit=args.limit)
+        elif args.action == "import":
+            if not args.key or not args.answers:
+                raise PreferenceError("import needs --key and --answers")
+            summary = import_answers(args.key, args.answers, out_path=args.out)
+        elif args.action == "learn":
+            from mr.preference_memory import learn
+            if not args.key or not args.answers or not args.pairs:
+                raise PreferenceError("learn needs --pairs, --key and --answers, with --home pointing to a still-building candidate")
+            with open(args.pairs, encoding="utf-8") as fh:
+                pairs = json.load(fh)
+            summary = learn(paths, cfg, pairs, args.key, args.answers)
+        else:
+            raise PreferenceError("choose build, import or learn")
+    except (PreferenceError, OSError, ValueError) as exc:
+        log("preferences: %s" % exc)
+        return EXIT_INVALID
+    print(json.dumps(summary, ensure_ascii=False, indent=None if args.json else 2))
+    return EXIT_OK
+
+
+def cmd_tracking(args, paths, cfg, log):
+    from mr import tracking
+    from mr.preferences import PreferenceError
+    try:
+        if args.action == "record":
+            data = _stdin_json(log)
+            if data is None:
+                return EXIT_USAGE
+            summary = tracking.record_outcome(paths, data)
+        elif args.action == "report":
+            summary = tracking.summarize(paths)
+            if args.out:
+                from mr.preferences import _private_json
+                _private_json(args.out, summary)
+        elif args.action == "discover":
+            discovery = tracking.scan_transcripts(cfg)
+            events = discovery.pop("events")
+            meta = discovery
+            summary = dict(meta, candidates=len(events), confirmed_correction_rate=None)
+            if args.out:
+                summary["review"] = tracking.build_baseline_review(events, args.out) if any(e["followup_observed"] for e in events) else None
+                from mr.preferences import _private_json
+                _private_json(Path(args.out) / "private" / "discovery.json", {"metadata": meta, "events": events})
+        elif args.action == "import":
+            if not args.key or not args.answers:
+                raise tracking.TrackingError("import needs --key and --answers")
+            summary = tracking.import_baseline_answers(args.key, args.answers, out_path=args.out)
+        else:
+            raise tracking.TrackingError("choose record, report, discover or import")
+    except (tracking.TrackingError, PreferenceError, ValueError, OSError) as exc:
+        log("tracking: %s" % exc)
+        return EXIT_INVALID
+    print(json.dumps(summary, ensure_ascii=False, indent=None if args.json else 2))
+    return EXIT_OK
+
+
+def cmd_foresight(args, paths, cfg, log):
+    from mr import foresight
+    try:
+        if args.action == "report":
+            summary = foresight.report(paths)
+        elif args.action == "replay":
+            from mr.replay import freeze_cases
+            from mr.config import read_json
+            if not args.after or not args.out:
+                raise foresight.ForesightError("replay needs --after <UTC timestamp> and --out <private directory>")
+            excluded = set((read_json(paths.split, {}) or {}).get("train_ids", []))
+            if args.exclude_sessions:
+                extra = read_json(args.exclude_sessions)
+                if not isinstance(extra, list) or any(not isinstance(s, str) for s in extra):
+                    raise foresight.ForesightError("--exclude-sessions must contain a JSON list of source:session strings")
+                excluded.update(extra)
+            summary = freeze_cases(read_jsonl(paths.messages), args.out, args.after, excluded_sessions=excluded, limit=args.limit)
+        else:
+            data = _stdin_json(log)
+            if data is None:
+                return EXIT_USAGE
+            summary = (foresight.record if args.action == "record" else foresight.observe)(paths, data)
+    except (ValueError, OSError) as exc:
+        log("foresight: %s" % exc)
+        return EXIT_INVALID
+    print(json.dumps(summary, ensure_ascii=False, indent=None if args.json else 2))
+    return EXIT_OK
+
+
+def cmd_schedule(args, paths, cfg, log):
+    from mr.schedule import ScheduleError, plan
+    try:
+        summary = plan(paths, cfg, args.out, weekday=args.weekday, hour=args.hour, minute=args.minute,
+                       timezone=args.timezone, max_calls=args.max_calls, engine=args.engine)
+    except (ScheduleError, OSError, ValueError) as exc:
+        log("schedule: %s" % exc)
+        return EXIT_INVALID
+    print(json.dumps(summary, ensure_ascii=False, indent=None if args.json else 2))
+    return EXIT_OK
+
+
+def cmd_atlas(args, paths, cfg, log):
+    from mr.atlas import build_atlas
+    try:
+        summary = build_atlas(paths, args.out, force=args.force)
+    except (ValueError, OSError) as exc:
+        log("atlas: %s" % exc)
+        return EXIT_INVALID
+    print(json.dumps(summary, ensure_ascii=False, indent=None if args.json else 2))
+    return EXIT_OK
 
 
 def build_parser():
@@ -629,17 +715,14 @@ def build_parser():
     engine_opts(p, with_judge=True)
     p.set_defaults(func=cmd_eval)
 
-    p = sub.add_parser("refresh", help="fold corrections, extend the corpus, render the always-on block; --auto, --rollback")
-    p.add_argument("--auto", action="store_true", help="unattended capped refresh: extract, track, incremental mine, "
-                   "synthesize --update, fold reviewed corrections, gated swap (default cap: config auto.max_cost_usd)")
-    p.add_argument("--rollback", action="store_true", help="put the previous model version back (or --to HASH)")
-    p.add_argument("--to", help="with --rollback: the archived model hash (a prefix is enough)")
-    p.add_argument("--list", dest="list_versions", action="store_true", help="list archived model versions")
+    p = sub.add_parser("refresh", help="fold corrections, extend the corpus, render the always-on block")
     p.add_argument("--corrections", action="store_true")
     p.add_argument("--extend", action="store_true")
     p.add_argument("--always-on", action="store_true")
     p.add_argument("--write-to", action="append", help="file to receive the always-on block (repeatable)")
     p.add_argument("--new-cutoff", help="with --extend: mint a new split instead of keeping the current one")
+    p.add_argument("--candidate-home", help="copy into a separate private candidate; never alter the source model")
+    p.add_argument("--train-before", help="with --extend: deployment candidate from reliable sessions before this date, with no test split")
     engine_opts(p)
     p.set_defaults(func=cmd_refresh)
 
@@ -651,7 +734,9 @@ def build_parser():
     p.add_argument("--seed", help="the seed text (shell-quoted; prefer --seed-file - with a quoted heredoc)")
     p.add_argument("--seed-file", help="read the seed from this file, or from stdin with `-`")
     p.add_argument("--kind", help="resolved request kind (group id or words)")
+    p.add_argument("--project", help="exact project id for scoped corrections and relevant historical episodes")
     p.add_argument("--no-light", action="store_true", help="omit light.md (the always-on block is already in context)")
+    p.add_argument("--context-file", help="bounded JSON intent frame from preceding conversation; '-' reads stdin")
     p.add_argument("--mode", default="execute", choices=["execute", "discuss", "status", "hold", "plan", "initiative"])
     p.set_defaults(func=cmd_select)
 
@@ -661,50 +746,64 @@ def build_parser():
     p = sub.add_parser("correct", help="append one correction line (JSON on stdin: seed, wrong, meant, scope, kind)")
     p.set_defaults(func=cmd_correct)
 
-    p = sub.add_parser("track", help="correction tracker: real invocations, the next typed message classified (no text stored)")
-    p.add_argument("--claude-dir", action="append", help="Claude Code projects root to scan instead of the configured ones (repeatable)")
-    p.add_argument("--codex-dir", action="append", help="Codex sessions root to scan instead of the configured ones (repeatable)")
-    p.add_argument("--full", action="store_true", help="rescan every transcript, not only new or changed files")
-    p.add_argument("--engine", choices=["claude", "codex", "fake"], help="also label messages no rule matched with a cheap model")
-    p.add_argument("--model", help="engine classifier model (default config track.engine_model)")
-    p.add_argument("--max-cost-usd", type=float, help="engine classifier cap (default config track.engine_max_cost_usd)")
-    p.add_argument("--max-calls", type=int)
-    p.add_argument("--no-drafts", action="store_true", help="do not append pending correction drafts to corrections.md")
-    p.add_argument("--fake-dir", help=argparse.SUPPRESS)
-    p.set_defaults(func=cmd_track)
+    p = sub.add_parser("demo", help="try a fictional engineer's model offline in a separate home")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_demo)
 
-    p = sub.add_parser("prefer", help="blind A/B preference pages: build, then score your answers")
-    psub = p.add_subparsers(dest="prefer_cmd", parser_class=lambda **kw: argparse.ArgumentParser(parents=[common], **kw))
-    pb = psub.add_parser("build", help="write a self-contained blind page and a separate key")
-    pb.add_argument("--a", required=True, help="arm A: none | <home> | <skill dir>+<home> | dir:<expansions>")
-    pb.add_argument("--b", required=True, help="arm B, same forms")
-    pb.add_argument("--seeds", required=True, help="directory of seeds (*.json with seed/context, or *.txt / *.md)")
-    pb.add_argument("--out", help="output directory (default <home>/prefer/<timestamp>)")
-    pb.add_argument("--n", type=int, help="at most this many pairs (default config prefer.max_pairs)")
-    pb.add_argument("--rng-seed", type=int, help="seed for the side and order randomization (default random)")
-    pb.add_argument("--title")
-    pb.add_argument("--engine", choices=["claude", "codex", "print", "fake"])
-    pb.add_argument("--model", help="expansion model (default config models.<engine>.expand)")
-    pb.add_argument("--max-cost-usd", type=float, help="cap for generating expansions (default config prefer.max_cost_usd)")
-    pb.add_argument("--max-calls", type=int)
-    pb.add_argument("--collect", action="store_true", help="print mode: collect expansions that landed")
-    pb.add_argument("--fake-dir", help=argparse.SUPPRESS)
-    ps = psub.add_parser("score", help="unblind exported answers, sign test, record in the eval ledger")
-    ps.add_argument("answers", help="answers JSON exported from the page")
-    ps.add_argument("--key", help="key.json (default: key.json next to the answers)")
-    ps.add_argument("--no-ledger", action="store_true", help="report only; do not record in the eval ledger")
-    p.set_defaults(func=cmd_prefer)
+    p = sub.add_parser("recall", help="build or retrieve source-linked intent echoes")
+    p.add_argument("action", nargs="?", choices=["build"])
+    p.add_argument("--seed")
+    p.add_argument("--seed-file")
+    p.add_argument("--kind")
+    p.add_argument("--project")
+    p.add_argument("--limit", type=int, default=3)
+    p.set_defaults(func=cmd_recall)
 
-    p = sub.add_parser("schedule", help="install, remove or show the timer that runs refresh --auto")
-    p.add_argument("action", choices=["install", "uninstall", "status"])
-    p.add_argument("--weekday", type=int, help="0-6, 0 is Sunday (default config schedule.weekday)")
-    p.add_argument("--hour", type=int)
-    p.add_argument("--minute", type=int)
-    p.add_argument("--daily", action="store_true", help="every day instead of weekly")
-    p.add_argument("--label", help="LaunchAgent label (default config schedule.label)")
-    p.add_argument("--dry-run", action="store_true", help="print the LaunchAgent and the command without writing")
-    p.add_argument("--platform", choices=["darwin", "linux"], help=argparse.SUPPRESS)
+    p = sub.add_parser("preferences", help="build and score a frozen human blind comparison")
+    p.add_argument("action", choices=["build", "import", "learn"])
+    p.add_argument("--pairs")
+    p.add_argument("--baseline-results")
+    p.add_argument("--candidate-results")
+    p.add_argument("--baseline-arm", default="full")
+    p.add_argument("--candidate-arm", default="full")
+    p.add_argument("--seeds-dir")
+    p.add_argument("--out")
+    p.add_argument("--limit", type=int, default=24)
+    p.add_argument("--seed", default="0")
+    p.add_argument("--key")
+    p.add_argument("--answers")
+    p.set_defaults(func=cmd_preferences)
+
+    p = sub.add_parser("tracking", help="measure linked outcomes or review historical brief follow-ups")
+    p.add_argument("action", choices=["record", "report", "discover", "import"])
+    p.add_argument("--out")
+    p.add_argument("--key")
+    p.add_argument("--answers")
+    p.set_defaults(func=cmd_tracking)
+
+    p = sub.add_parser("foresight", help="register predictions before later turns and measure explicit human outcomes")
+    p.add_argument("action", choices=["record", "observe", "report", "replay"])
+    p.add_argument("--out")
+    p.add_argument("--after")
+    p.add_argument("--exclude-sessions")
+    p.add_argument("--limit", type=int, default=24)
+    p.set_defaults(func=cmd_foresight)
+
+    p = sub.add_parser("schedule", help="prepare a portable weekly candidate refresh runner")
+    p.add_argument("action", choices=["plan"])
+    p.add_argument("--out", required=True)
+    p.add_argument("--weekday", type=int, default=0)
+    p.add_argument("--hour", type=int, default=9)
+    p.add_argument("--minute", type=int, default=0)
+    p.add_argument("--timezone")
+    p.add_argument("--max-calls", type=int, default=12)
+    p.add_argument("--engine", choices=["claude", "codex"])
     p.set_defaults(func=cmd_schedule)
+
+    p = sub.add_parser("atlas", help="explore exact personal evidence and intent echoes in a private interactive page")
+    p.add_argument("--out", required=True)
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_atlas)
 
     p = sub.add_parser("lint", help="lint the public skill or the built model")
     p.add_argument("--skill", help="skill directory to lint")
@@ -712,6 +811,8 @@ def build_parser():
     p.add_argument("--model", action="store_true")
     p.add_argument("--strict", action="store_true", help="model lint: names and secrets are fatal too")
     p.set_defaults(func=cmd_lint)
+    from mr.memory_cli import register as register_memory
+    register_memory(sub)
     return ap
 
 
@@ -726,7 +827,8 @@ def main(argv=None):
     paths = Paths(home)
     cfg = load_config(paths, args.config)
     log = _log_factory(args.quiet, args.json)
-    if args.cmd not in ("init", "lint", "status", "select", "log-decision", "correct", "track", "prefer", "schedule") and not cfg.get("_exists"):
+    if args.cmd not in ("init", "lint", "status", "select", "log-decision", "correct", "demo", "preferences", "tracking",
+                        "memory", "packet", "handoff", "inspect", "insights", "workbench") and not cfg.get("_exists"):
         log("no config at %s: run `init --name <Name>` first" % paths.config)
         return EXIT_USAGE
     try:

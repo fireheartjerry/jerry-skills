@@ -20,7 +20,7 @@ LAYER_TITLES = {
     6: "Standing rules", 7: "Likes", 8: "Dislikes", 9: "Workflow habits", 10: "Recurring contexts",
 }
 LIGHT_SECTIONS = ["Read the prompts", "Default behaviour", "Quality bar", "Report", "Standing rules", "Never"]
-MODEL_FILES = ("light.md", "profile.md", "examples.md", "grants.md")
+MODEL_FILES = ("light.md", "profile.md", "examples.md", "grants.md", "episodes.json", "preference_memory.json")
 _LAYER_RE = re.compile(r"^## (\d+)\. (.+?)\s*$")
 _GROUP_RE = re.compile(r"^### ([A-Z]{1,2})\. (.+?)\s*$")
 _EXAMPLE_RE = re.compile(r"^### (\d+)\. (.+?)\s*$")
@@ -30,9 +30,9 @@ _STOP = {"a", "an", "and", "the", "or", "of", "to", "for", "in", "on", "with", "
          "do", "it", "his", "her", "their", "that", "this", "is", "are", "be"}
 
 SCOPE_HEADER = (
-    "Scope: these rules apply to messages {name} types in an interactive session. If you are a subagent, a headless "
-    "or SDK run, a workflow or delegated child, or you are reading a brief written by another agent or script, "
-    "ignore this file: your brief is binding as written. The harness's permission, sandbox and safety rules beat "
+    "Scope: these rules interpret requests from {name}. If the harness identifies this session as a delegated child "
+    "or scheduled pipeline, follow its brief as written. A CLI or SDK invocation alone does not imply delegation. "
+    "The harness's permission, sandbox and safety rules beat "
     "every line below.")
 
 
@@ -211,7 +211,7 @@ def ensure_light_header(body, name):
 
 
 def files_hash(model_dir):
-    """sha256 over light.md, profile.md, examples.md and grants.md (bytes, in that order), first 16 hex characters."""
+    """SHA256 of MODEL_FILES in order, with absent optional files contributing no bytes."""
     h = hashlib.sha256()
     for name in MODEL_FILES:
         p = Path(model_dir) / name
@@ -356,6 +356,11 @@ def _phrase_in(phrase, seed_lower):
     return False
 
 
+def _kind_keyword_in(keyword, kind_words):
+    """A decoded kind can name the informative word in a multiword trigger."""
+    return bool((_words(keyword) - _STOP) & (kind_words - _STOP))
+
+
 def runtime_grants(text, tokens=None):
     """The grants.md text the runtime may see: the file's preamble plus only the blocks that are active, parse with
     zero errors and carry no forbidden instruction outside their Quote line. Revoked, invalid and malformed blocks are
@@ -384,7 +389,7 @@ def index_is_stale(model_dir):
     return bool(idx) and not idx.get("legacy") and idx.get("model_hash") != files_hash(model_dir)
 
 
-def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="execute", index=None):
+def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="execute", index=None, project=None, context=None):
     """Return (markdown slice, decision dict). Implements the algorithm in model-format.md.
 
     Order of the slice: corrections, standing grants, light, reading notes, standing rules, groups (best first),
@@ -408,20 +413,37 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
         legacy = True
     if not idx:
         raise ModelFormatError("index.json missing: run `synthesize index`")
+    from . import intent_context as _intent
+    frame = _intent.normalize(context)
+    if project and frame.get("project") and project != frame["project"]:
+        raise _intent.ContextFormatError("--project and intent-context project disagree")
+    project = project or frame.get("project")
+    context_text = _intent.retrieval_text(frame)
+    context_lower = context_text.lower()
+    context_words = _words(context_text)
+    context_stems = {_stem(w) for w in context_words}
     initiative = mode in ("initiative", "plan")
     seed_lower = (seed or "").lower()
     seed_words = _words(seed)
     seed_stems = {_stem(w) for w in seed_words}
     kind_words = _words(kind)
+    kind_id = (kind or "").strip().casefold()
     profile = _lines(model_dir / "profile.md") if (model_dir / "profile.md").exists() else []
     examples = _lines(model_dir / "examples.md") if (model_dir / "examples.md").exists() else []
 
     scored = []
     for g in idx["groups"]:
-        s = sum(1 for w in g["when"] if _keyword_in(w, seed_lower, seed_stems, legacy)) + 0.5 * sum(1 for w in g["when"] if w in kind_words)
+        s = sum(1 for w in g["when"] if _keyword_in(w, seed_lower, seed_stems, legacy)) + 0.5 * sum(1 for w in g["when"] if _kind_keyword_in(w, kind_words))
+        if kind_id == g["id"].casefold():
+            s += 0.5
         scored.append((s, g))
     matching = [g for s, g in sorted(scored, key=lambda t: (-t[0], t[1]["id"])) if s > 0]
-    escalated = (not initiative) and len(matching) > cfg_select["max_groups"]  # a seed spanning kinds reads more
+    context_routed = False
+    if not matching and context_text:
+        contextual = [(sum(1 for w in g["when"] if _keyword_in(w, context_lower, context_stems, legacy)), g) for g in idx["groups"]]
+        matching = [g for s, g in sorted(contextual, key=lambda t: (-t[0], t[1]["id"])) if s > 0]
+        context_routed = bool(matching)
+    escalated = (not initiative and not context_routed) and len(matching) > cfg_select["max_groups"]  # current seed spanning kinds reads more
     wide = initiative or escalated
     budget = cfg_select["initiative_budget_chars"] if wide or legacy else cfg_select["budget_chars"]
     max_groups = cfg_select.get("initiative_max_groups", 6) if wide else cfg_select["max_groups"]
@@ -433,15 +455,23 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     max_lessons = cfg_select.get("initiative_max_lessons", 3) if wide else cfg_select.get("max_lessons", 2)
     ls_scored = []
     for lg in idx.get("lessons") or []:
-        sc = sum(1 for w in lg["when"] if _keyword_in(w, seed_lower, seed_stems, False)) + 0.5 * sum(1 for w in lg["when"] if w in kind_words)
+        sc = sum(1 for w in lg["when"] if _keyword_in(w, seed_lower, seed_stems, False)) + 0.5 * sum(1 for w in lg["when"] if _kind_keyword_in(w, kind_words))
+        if kind_id == lg["id"].casefold():
+            sc += 0.5
         ls_scored.append((sc, lg))
     chosen_lessons = [lg for sc, lg in sorted(ls_scored, key=lambda t: (-t[0], t[1]["id"])) if sc > 0][:max_lessons]
+    if not chosen_lessons and context_text:
+        contextual_lessons = [(sum(1 for w in lg["when"] if _keyword_in(w, context_lower, context_stems, False)), lg)
+                              for lg in idx.get("lessons") or []]
+        chosen_lessons = [lg for sc, lg in sorted(contextual_lessons, key=lambda t: (-t[0], t[1]["id"])) if sc > 0][:max_lessons]
     chosen_ids = {g["id"].lower() for g in chosen + chosen_lessons}
     chosen_when = {w for g in chosen + chosen_lessons for w in g["when"]}
     ex_scored = []
     for e in idx["examples"]:
         tag_score = sum(1 for t in e["tags"] if t in chosen_ids or t in chosen_when)
         overlap = len((_words(e["seed"]) | _words(e.get("situation"))) & (seed_words | kind_words))
+        if context_text:
+            overlap += 0.5 * len((_words(e["seed"]) | _words(e.get("situation"))) & context_words)
         when_hits = sum(1 for w in chosen_when if _phrase_in(w, e["seed"].lower()))
         ex_scored.append((tag_score + when_hits, overlap, e))
     ranked = sorted(ex_scored, key=lambda t: (-t[0], -t[1], t[2]["n"]))
@@ -454,10 +484,17 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     parts = []
     corr_p = model_dir / "corrections.md"
     corr = corr_p.read_text(encoding="utf-8") if corr_p.exists() else ""
-    # comment lines carry nothing for the agent; `# pending <id> | ...` drafts from the tracker apply only once reviewed
-    corr = "\n".join(l for l in corr.splitlines() if not l.lstrip().startswith("#"))
     if corr.strip():
-        parts.append(("corrections", "## Corrections (later lines win)\n" + corr.strip() + "\n", True))
+        # Project corrections cannot cross into another checkout. Global and
+        # unparsed legacy lines remain visible so an old correction is not lost.
+        scoped = []
+        for line in corr.splitlines():
+            scope = re.search(r"\|\s*scope:\s*project:([^|]+)", line)
+            if scope and (not project or scope.group(1).strip() != project):
+                continue
+            scoped.append(line)
+        if any(line.strip() for line in scoped):
+            parts.append(("corrections", "## Corrections (later lines win)\n" + "\n".join(scoped).strip() + "\n", True))
     grants_p = model_dir / "grants.md"
     grant_ids = []
     if grants_p.exists():
@@ -474,6 +511,8 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     sr = idx.get("standing_rules")
     if sr and profile:
         parts.append(("standing_rules", "\n".join(profile[sr["lines"][0] - 1:sr["lines"][1]]).strip() + "\n", True))
+    if frame:
+        parts.append(("intent_context", _intent.render(frame), True))
     for k, g in enumerate(chosen):
         a, b = g["lines"]
         parts.append(("group:" + g["id"], "\n".join(profile[a - 1:b]).strip() + "\n", k == 0))
@@ -486,6 +525,26 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
         for v in vocab:
             vl.append(profile[v["line"] - 1])
         parts.append(("vocabulary", "\n".join(vl) + "\n", True))
+    from . import recall as _recall
+    recall_warning = None
+    try:
+        echoes = _recall.retrieve(model_dir, seed, kind=kind, project=project, limit=cfg_select.get("max_echoes", 3), context_text=context_text)
+    except _recall.RecallFormatError as exc:
+        echoes = []
+        recall_warning = str(exc)
+    for echo in echoes:
+        parts.append(("echo:" + echo["id"], _recall.render([echo]), False))
+    from . import preference_memory as _preferences
+    preference_warning, preferences = None, []
+    has_preferences = (model_dir / _preferences.FILENAME).exists()
+    if has_preferences:
+        try:
+            preferences = _preferences.retrieve(model_dir, seed, context_text=context_text,
+                                                limit=cfg_select.get("max_preference_pairs", 2))
+        except _preferences.PreferenceMemoryError as exc:
+            preference_warning = str(exc)
+    for preference in preferences:
+        parts.append(("preference:" + preference["review_id"] + "/" + preference["id"], _preferences.render([preference]), False))
     for e in reversed(ex_chosen):  # ascending relevance: the best match is last
         a, b = e["lines"]
         parts.append(("example:%d" % e["n"], "\n".join(examples[a - 1:b]).strip() + "\n", False))
@@ -502,11 +561,16 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
         if drop is None:
             drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("lessons:") and not parts[i][2]), None)
         if drop is None:
+            drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("echo:")), None)
+        if drop is None:
+            drop = next((i for i in range(len(parts) - 1, -1, -1) if parts[i][0].startswith("preference:")), None)
+        if drop is None:
             break
         parts.pop(drop)
     kept_groups = [p[0].split(":", 1)[1] for p in parts if p[0].startswith("group:")]
     kept_lessons = [p[0].split(":", 1)[1] for p in parts if p[0].startswith("lessons:")]
     kept_examples = [int(p[0].split(":", 1)[1]) for p in parts if p[0].startswith("example:")]
+    kept_echoes = [p[0].split(":", 1)[1] for p in parts if p[0].startswith("echo:")]
     body = "\n".join(t for _, t, _ in parts)
     notes = []
     if legacy:
@@ -523,4 +587,17 @@ def select_slice(model_dir, seed, cfg_select, kind=None, no_light=False, mode="e
     decision = {"groups": kept_groups, "examples": kept_examples, "lessons": kept_lessons, "vocabulary": [v["phrase"] for v in vocab],
                 "grants": grant_ids, "chars": len(body) + len(header), "light": not no_light, "mode": mode,
                 "legacy": legacy, "escalated": escalated, "stale_index": stale}
+    decision.update({"echoes": kept_echoes, "project": project,
+                     "recall_warning": recall_warning,
+                     "matched_keywords": {g["id"]: [w for w in g["when"] if _keyword_in(w, seed_lower, seed_stems, legacy)
+                                                               or _kind_keyword_in(w, kind_words)] for g in chosen if g["id"] in kept_groups},
+                     "fallback": not bool(matching), "budget_chars": budget,
+                     "over_budget": len(body) + len(header) > budget})
+    if frame:
+        decision.update(context_fields=sorted(frame), context_hash=_intent.fingerprint(frame), context_routed=context_routed,
+                        context_keywords={g["id"]: [w for w in g["when"] if _keyword_in(w, context_lower, context_stems, legacy)]
+                                          for g in chosen if g["id"] in kept_groups})
+    if has_preferences:
+        decision.update(preference_pairs=[p[0].split(":", 1)[1] for p in parts if p[0].startswith("preference:")],
+                        preference_warning=preference_warning)
     return header + body, decision

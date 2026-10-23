@@ -114,6 +114,10 @@ def build_candidates(raw_iter, people_re, scrub_counts, unknown_tags, with_conte
         if tag:
             unknown_tags[tag] = unknown_tags.get(tag, 0) + 1
         origin = filters.origin(text, info, raw.get("origin_hint"))
+        authored = filters.authored_text(raw["text"])
+        # It duplicates a subset of text for provenance. Count the source redactions
+        # once, while still scrubbing both stored representations independently.
+        authored, _ = scrub.scrub(authored, people_re, {})
         text, _ = scrub.scrub(text, people_re, scrub_counts)
         project, _ = scrub.scrub(_project_label(raw.get("project")) or "", people_re, {})
         meta = dict(raw.get("meta") or {})
@@ -124,6 +128,8 @@ def build_candidates(raw_iter, people_re, scrub_counts, unknown_tags, with_conte
             "source": raw["source"], "session": raw["session"], "record_id": raw["record_id"],
             "project": project or None, "time": raw.get("time"), "ordinal": raw.get("ordinal", 0),
             "origin": origin, "text": text, "text_norm_hash": norm_hash(text), "meta": meta,
+            "typed_text": authored if origin == "typed" else "",
+            "authorship_version": filters.AUTHORSHIP_VERSION,
             "scrub_version": scrub.SCRUB_VERSION, "_path": raw.get("path"),
         }
         if with_context:
@@ -242,6 +248,9 @@ def _rescrub(paths, people_re, log):
                 except json.JSONDecodeError:
                     continue
                 r["text"], _ = scrub.scrub(r.get("text", ""), people_re, counts)
+                authored = filters.authored_text(r.get("text", ""))
+                r["typed_text"], _ = scrub.scrub(authored if r.get("origin", "typed") == "typed" else "", people_re, {})
+                r["authorship_version"] = filters.AUTHORSHIP_VERSION
                 if r.get("project"):
                     r["project"], _ = scrub.scrub(r["project"], people_re, {})
                 if (r.get("meta") or {}).get("question"):

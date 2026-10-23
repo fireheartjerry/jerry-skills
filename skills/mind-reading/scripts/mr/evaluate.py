@@ -32,6 +32,31 @@ class EvalRefused(Exception):
 
 # ---------------------------------------------------------------- scoring math (pure)
 
+def count_errors(rows, historical=False):
+    """Reject impossible count artifacts, including historical fractional counts; never round them into validity."""
+    errors = []
+    for row in rows:
+        sid = row.get("id", row.get("sid", "?"))
+        n = row.get("n_req") if historical else row.get("n")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            errors.append("%s: requirement count is not a nonnegative integer" % sid)
+            continue
+        arms = {a: row[a] for a in ("old", "new") if a in row} if historical else row.get("arms", {})
+        for arm, counts in arms.items():
+            fields = ("full", "partial") if historical else ("full", "partial", "none", "contra")
+            valid = True
+            for field in fields:
+                value = counts.get(field, 0)
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    errors.append("%s %s: %s is not a nonnegative integer (%r)" % (sid, arm, field, value))
+                    valid = False
+            if valid and counts.get("full", 0) + counts.get("partial", 0) > n:
+                errors.append("%s %s: full + partial exceeds requirements" % (sid, arm))
+            if valid and not historical and "none" in counts and sum(counts.get(k, 0) for k in ("full", "partial", "none")) != n:
+                errors.append("%s %s: verdict counts do not sum to requirements" % (sid, arm))
+    return errors
+
+
 def session_row(sid, requirements, judgments_by_arm):
     """requirements: list of {id, kind?, ...}; judgments_by_arm: {arm: score json}. Returns one table row, with the
     verdict counts per requirement kind under `by_kind` for each arm."""
@@ -40,6 +65,13 @@ def session_row(sid, requirements, judgments_by_arm):
     for k in kinds.values():
         row["kinds"][k] = row["kinds"].get(k, 0) + 1
     for arm, j in judgments_by_arm.items():
+        expected = [r["id"] for r in requirements]
+        items = j.get("items", [])
+        if any(not isinstance(i.get("id"), int) or isinstance(i.get("id"), bool) for i in items) or \
+                sorted(i["id"] for i in items) != sorted(expected) or len(set(expected)) != len(expected):
+            raise EvalRefused("%s %s: judgment IDs do not match unique requirement IDs" % (sid, arm))
+        if any(i.get("verdict") not in ("full", "partial", "none") for i in items):
+            raise EvalRefused("%s %s: invalid requirement verdict" % (sid, arm))
         counts = {"full": 0, "partial": 0, "none": 0}
         by_kind = {}
         for it in j.get("items", []):
@@ -159,6 +191,9 @@ def bootstrap(rows, arms, w, resamples, seed):
 
 
 def build_report(rows, arms, cfg_eval, meta):
+    errors = count_errors(rows)
+    if errors:
+        raise EvalRefused("invalid judge count artifacts:\n" + "\n".join(errors))
     w = cfg_eval["partial_weight"]
     arms = [a for a in arms if any(a in r["arms"] for r in rows)]
     pooled = {a: {"hit_rate": pooled_rate(rows, a, w), "hit_rate_full_only": pooled_rate(rows, a, 0.0),
@@ -183,7 +218,10 @@ def build_report(rows, arms, cfg_eval, meta):
               "kinds": {k: sum((r.get("kinds") or {}).get(k, 0) for r in rows) for k in kinds_present},
               "by_kind": {a: pooled_by_kind(rows, a, w) for a in arms},
               "per_session": [{"sid": r["sid"], "n": r["n"], **{a: {k: v for k, v in r["arms"][a].items() if not k.endswith("_texts")} for a in r["arms"]}} for r in rows],
-              "limitation": LIMITATIONS.get(mode, LIMITATIONS["first"])}
+              "limitation": LIMITATIONS.get(mode, LIMITATIONS["first"]),
+              "measurement": "automated judge diagnostic", "acceptance_eligible": False,
+              "judge_calibration": {"status": "uncalibrated", "human_agreement": None},
+              "calibration_warning": "Automated judgments have not been calibrated against completed human labels; these scores cannot establish acceptance."}
     report.update(meta)
     return report
 
@@ -203,6 +241,7 @@ def report_markdown(report, rows):
         report["sessions"], report["requirements"], report["partial_weight"], report["rubric_version"],
         "dev split (repeatable)" if report.get("dev") else "held-out test split",
         "mid-session seeds with the earlier messages as context" if mode == "context" else "first-message seeds, no context"), "",
+        report.get("calibration_warning", "Automated judge diagnostic; acceptance requires completed human preference review."), "",
         "| arm | hit rate | full only | contradictions | 95% CI |", "|---|---|---|---|---|"]
     for a in report["arms"]:
         p = report["pooled"][a]
@@ -341,8 +380,9 @@ def run_eval(paths, cfg, kind, dev=False, arms=None, judge_kind=None, force=Fals
     split_id = split["split_id"]
     if not paths.index.exists():
         raise EvalRefused("model/index.json missing: run synthesize first")
-    manifest = read_json(paths.model_json, {}) or {}
-    model_hash = manifest.get("model_hash") or _select.files_hash(paths.model)
+    # Runtime files are hand-editable (including episodes.json). A manifest can lag those edits;
+    # using its old hash would reuse another model's expansions and one-look ledger entry.
+    model_hash = _select.files_hash(paths.model)
     split_dir = paths.dev if dev else paths.eval / split_id
     seeds_dir, truth_dir = split_dir / seeds_dir_name(mode), _truth_dir(split_dir, mode)
     if not seeds_dir.exists() or truth_dir is None:
@@ -460,6 +500,10 @@ def run_eval(paths, cfg, kind, dev=False, arms=None, judge_kind=None, force=Fals
             "cost_usd": round(s1["cost_usd"] + s2["cost_usd"] + s3["cost_usd"], 4),
             "failed_units": s1["failed"] + s2["failed"] + s3["failed"],
             "stopped_units": s1["stopped"] + s2["stopped"] + s3["stopped"]}
+    meta["completion"] = {"requested_sessions": len(seed_docs), "requested_arms": list(arms),
+                          "missing_judgments": [{"sid": sid, "arm": arm} for sid in seed_docs for arm in arms
+                                                if not (results / "judgments" / ("%s-%s.json" % (sid, arm))).exists()]}
+    meta["completion"]["complete"] = not meta["completion"]["missing_judgments"]
     report = build_report(rows, arms, cfg["eval"], meta)
     write_json(results / "report.json", report)
     (results / "report.md").write_text(report_markdown(report, rows), encoding="utf-8")

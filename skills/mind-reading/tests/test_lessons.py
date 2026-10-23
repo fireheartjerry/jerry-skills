@@ -324,8 +324,9 @@ class PipelineTests(unittest.TestCase):
     def test_profile_section_index_and_no_injection(self):
         profile = self.paths.profile.read_text(encoding="utf-8")
         section = "\n".join(L.section_of(profile))
-        self.assertIn("### W1. Implement a mandate", section)
-        self.assertIn("### W3. Deploy", section)
+        self.assertNotIn("Implement a mandate", section)  # its only source session cx10 is held out
+        self.assertIn("### W1. Bug report", section)
+        self.assertIn("### W2. Deploy", section)
         self.assertIn("Keep: fix the instance", section)
         for gone in ("deploy to production whenever", "just post", "logo", "backup", "small steps", "this repo's release doc"):
             self.assertNotIn(gone, section)
@@ -335,7 +336,7 @@ class PipelineTests(unittest.TestCase):
             self.assertNotIn("deleting old branches", text, f)  # an injected grant phrase never becomes a grant
             self.assertNotIn(INJECTED, text, f)
         idx = read_json(self.paths.index)
-        self.assertEqual([(g["id"], g["count"]) for g in idx["lessons"]], [("W1", 1), ("W2", 1), ("W3", 1)])
+        self.assertEqual([(g["id"], g["count"]) for g in idx["lessons"]], [("W1", 1), ("W2", 1)])
         self.assertEqual(_lint.lint_model(self.paths, self.cfg)["forbidden"], [])
 
     def test_agent_only_quotes_never_become_traits_reactions_or_changes(self):
@@ -370,12 +371,12 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("its only user quote was the agent's text", reasons)
         self.assertIn("no user quote found in a typed message", reasons)
         self.assertTrue(any("authorization" in r for r in reasons))
-        self.assertEqual((rep["kept"], rep["single_dropped"], rep["project"]), (3, 1, 1))
+        self.assertEqual((rep["kept"], rep["single_dropped"], rep["project"]), (2, 1, 1))
 
     def test_routed_loading(self):
         text, d = _select.select_slice(self.paths.model, "deploy it to prod", self.cfg["select"], no_light=True)
-        self.assertEqual(d["lessons"], ["W3"])
-        self.assertIn("lessons W3;", text.splitlines()[0])
+        self.assertEqual(d["lessons"], ["W2"])
+        self.assertIn("lessons W2;", text.splitlines()[0])
         self.assertIn(L.HEADING + " (lessons for this kind of request)", text)
         self.assertEqual(d["examples"][-1], 22)  # the upgrade pair for this lesson is the best match
         _, d2 = _select.select_slice(self.paths.model, "progress update?", self.cfg["select"], no_light=True)
@@ -414,7 +415,7 @@ class PipelineTests(unittest.TestCase):
         paths.corrections.write_text(line + "\n", encoding="utf-8")
         _refresh.fold_corrections(paths, cfg, "fake", fake_dir=helpers.FAKE, log=helpers.quiet)
         self.assertTrue(L.section_of(paths.profile.read_text(encoding="utf-8")))  # the canned refresh left it out
-        self.assertEqual(len(read_json(paths.index)["lessons"]), 3)
+        self.assertEqual(len(read_json(paths.index)["lessons"]), 2)
 
 
 class EvalUpgradeTests(unittest.TestCase):
@@ -448,9 +449,11 @@ class EvalUpgradeTests(unittest.TestCase):
 class RuntimeDocTests(unittest.TestCase):
     def test_skill_rule_is_present_and_lean(self):
         text = (helpers.SKILL / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("## 3a. Lessons: take the better way", text)
-        self.assertIn("Changed: <the literal ask> -> <the better way>", text)
-        self.assertIn("never lifts a hold, never stands in for a grant", text)
+        self.assertIn("## 3. Build an intent contract", text)
+        self.assertIn("Changed: <only for a material, evidence-backed better approach>", text)
+        self.assertIn("inferred confidence never", text)
+        authority = (helpers.SKILL / "references" / "authority.md").read_text(encoding="utf-8")
+        self.assertIn("never\ngrants authorization", authority)
         self.assertLessEqual(len(text.splitlines()), 150)
 
     def test_log_decision_keeps_lessons_and_upgrades(self):

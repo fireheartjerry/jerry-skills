@@ -488,6 +488,10 @@ class SynthesizeTests(unittest.TestCase):
         revoking = dict(rows[0], text="actually never push without asking me again", record_id="rev-1", key="rev-1", session="cs01", origin="typed",
                         time="2026-04-03T10:00:00Z")
         write_jsonl(self.paths.messages, rows + [revoking])
+        prepared = self.paths.sessions.read_text()
+        sessions = helpers.read_jsonl(self.paths.sessions)
+        next(s for s in sessions if s["session"] == "cs01")["messages"].append(dict(revoking, typed_text=revoking["text"]))
+        write_jsonl(self.paths.sessions, sessions)
         try:
             cons = dict(self.consolidated())
             cons["preference_changes"] = [{"topic": "pushing", "earlier": GRANT_TEXT, "later": "actually never push without asking me again",
@@ -500,6 +504,7 @@ class SynthesizeTests(unittest.TestCase):
             self.assertEqual(read_json(self.paths.model_json)["grant_tombstones"][0]["reason"], "revoked")
         finally:
             write_jsonl(self.paths.messages, rows)
+            self.paths.sessions.write_text(prepared)
             self.paths.grants.write_text(original, encoding="utf-8")
             self.paths.model_json.write_text(manifest, encoding="utf-8")
 
@@ -523,7 +528,7 @@ class SynthesizeTests(unittest.TestCase):
     def test_grants_substep_runs_without_an_engine(self):
         paths, cfg = helpers.build_home(through="mine")
         s = run_synthesize(paths, cfg, "fake", substeps=["consolidate", "grants"], fake_dir=helpers.FAKE, log=helpers.quiet)
-        self.assertEqual(s["substeps"]["grants"], "5 candidate(s), 2 verified, 1 added, 1 in grants.md (1 valid and active)")
+        self.assertEqual(s["substeps"]["grants"], "3 candidate(s), 2 verified, 1 added, 1 in grants.md (1 valid and active)")
         self.assertEqual(s["warnings"], [])
         self.assertTrue(paths.grants.exists())
         self.assertFalse(paths.profile.exists())  # no engine step ran

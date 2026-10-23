@@ -65,6 +65,8 @@ SECRET_PATTERNS: Sequence[Tuple[str, "re.Pattern[str]"]] = (
     ("AWS access key id", re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])")),
     ("Slack token", re.compile(r"(?<![A-Za-z0-9_-])xox[abprs]-[A-Za-z0-9-]{10,}")),
     ("Google API key", re.compile(r"(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9_-])")),
+    ("Google OAuth token", re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}")),
+    ("opaque short-lived credential", re.compile(r"(?<![A-Za-z0-9_-])AQ\.[A-Za-z0-9_-]{30,}")),
     ("private key header", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
 )
 

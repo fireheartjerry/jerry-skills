@@ -1,4 +1,5 @@
 """refresh: fold corrections.md into the model, extend the corpus, render the always-on block."""
+import copy
 import hashlib
 import json
 import re
@@ -19,7 +20,7 @@ REFRESH_SCHEMA = {"type": "object", "additionalProperties": False,
                   "properties": {"profile_md": {"type": "string", "minLength": 200}, "light_md": {"type": "string", "minLength": 50},
                                  "examples_md": {"type": "string", "minLength": 200},
                                  "notes": {"type": "array", "items": {"type": "string", "maxLength": 300}}}}
-_FIELD = re.compile(r"^\s*(date|seed|wrong|meant|scope|kind)\s*:\s*(.*?)\s*$")
+_FIELD = re.compile(r"^\s*(date|seed|wrong|meant|scope|kind|decision_id)\s*:\s*(.*?)\s*$")
 
 
 class RefreshError(Exception):
@@ -53,6 +54,9 @@ def parse_corrections(text):
                 entry["kind"] not in ("fix", "drop", "add") or not (entry["scope"] == "global" or entry["scope"].startswith("project:")):
             bad.append({"line": i, "text": raw})
             continue
+        if "decision_id" in entry and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", entry["decision_id"]):
+            bad.append({"line": i, "text": raw})
+            continue
         entries.append(entry)
     return entries, bad
 
@@ -67,7 +71,7 @@ def unfolded(entries, folded_through):
 
 
 def fold_corrections(paths, cfg, kind, run_id=None, collect=False, fake_dir=None, log=print, backoff=None, model=None, strict_lint=True,
-                     max_cost_usd=None, max_calls=None, cost_estimate=None):
+                     max_calls=None, max_cost_usd=None):
     text = paths.corrections.read_text(encoding="utf-8") if paths.corrections.exists() else ""
     entries, bad = parse_corrections(text)
     manifest = read_json(paths.model_json, {}) or {}
@@ -88,8 +92,7 @@ def fold_corrections(paths, cfg, kind, run_id=None, collect=False, fake_dir=None
             if not (paths.model / n).exists():
                 raise RefreshError("model/%s missing: cannot fold corrections" % n)
         eng = _engine.Engine(paths, cfg, kind, "refresh", run_id=run_id, model=_engine.stage_model(cfg, kind, "synthesize", model),
-                             concurrency=1, fake_dir=fake_dir, log=log, backoff=backoff, max_cost_usd=max_cost_usd,
-                             max_calls=max_calls, cost_estimate=cost_estimate)
+                             concurrency=1, fake_dir=fake_dir, log=log, backoff=backoff, max_calls=max_calls, max_cost_usd=max_cost_usd)
         mapping = {"name": cfg["name"], "people_tokens": _engine.people_tokens(cfg), "privacy": privacy_line(cfg),
                    "date": now_iso()[5:10], "corrections_text": "\n".join(e["raw"] for e in global_lines),
                    "profile_md": paths.profile.read_text(encoding="utf-8"), "light_md": paths.light.read_text(encoding="utf-8"),
@@ -165,6 +168,8 @@ def render_block(light_text, model_hash, name, date=None, home_label="$MIND_READ
     date = date or now_iso()[:10]
     footer = ("Precedence: the harness's rules, then a repo's AGENTS.md or CLAUDE.md and project memory, then %s's newest "
               "words, then this block. Full expansion on demand: the mind-reading skill (\"read my mind: ...\")." % name)
+    footer += ("\nFor an underspecified request whose goal or standards depend on this history, use the mind-reading skill "
+               "with current context even without an invocation phrase. Clear requests proceed normally.")
     return ("<!-- BEGIN mind-reading (generated %s from %s/model/light.md, model %s; delete this block to remove) -->\n"
             "%s\n\n%s\n%s\n" % (date, home_label, model_hash, _demote(light_text), footer, END_MARK))
 
@@ -251,8 +256,67 @@ def drift(paths, cfg):
     return out
 
 
+def prepare_candidate(paths, cfg, candidate_home):
+    """Clone inputs into a distinct data home. No symlink or target can route candidate writes into the live tree."""
+    from .config import Paths
+    from .preferences import PreferenceError, _safe_path
+    try:
+        target = _safe_path(expand(candidate_home))
+    except PreferenceError as exc:
+        raise RefreshError("candidate path is unsafe: %s" % exc)
+    live = paths.home.resolve()
+    if live == target or live in target.parents or target in live.parents:
+        raise RefreshError("candidate home must be separate from the live home and its ancestors/descendants")
+    if target.exists():
+        raise RefreshError("candidate home already exists; preserve it and choose a new candidate home")
+    sources = [paths.home / n for n in ("corpus", "derived", "mined", "model", "context")]
+    for source in sources:
+        if source.is_symlink() or (source.exists() and any(p.is_symlink() for p in source.rglob("*"))):
+            raise RefreshError("candidate snapshot refuses symlinked input: %s" % source.name)
+    candidate = Paths(target)
+    target.mkdir(parents=True, mode=0o700)
+    for source in sources:
+        if source.exists():
+            shutil.copytree(source, target / source.name)
+    candidate.ensure_tree()
+    candidate_cfg = copy.deepcopy(cfg)
+    candidate_cfg["always_on_targets"] = []
+    candidate_cfg["_path"] = str(candidate.config)
+    save_config(candidate, candidate_cfg)
+    state = {"schema_version": 1, "created": now_iso(), "live_home": str(live),
+             "live_model_hash": _select.files_hash(paths.model), "candidate_home": str(target),
+             "status": "building", "human_preference": "unreviewed", "promotion": "never automatic"}
+    write_json(target / "CANDIDATE.json", state)
+    return candidate, candidate_cfg, state
+
+
+def _incomplete(stage):
+    return any(stage.get(k) for k in ("failed", "stopped", "pending"))
+
+
 def run_refresh(paths, cfg, kind, corrections=True, extend=False, always_on_flag=False, write_to=None, new_cutoff=None,
-                run_id=None, collect=False, fake_dir=None, log=print, backoff=None, model=None, concurrency=4):
+                run_id=None, collect=False, fake_dir=None, log=print, backoff=None, model=None, concurrency=4,
+                candidate_home=None, max_calls=None, max_cost_usd=None, train_before=None):
+    if train_before and (not extend or new_cutoff):
+        raise RefreshError("--train-before requires --extend and cannot be combined with --new-cutoff")
+    if candidate_home:
+        if always_on_flag or write_to:
+            raise RefreshError("candidate refresh never writes always-on targets")
+        candidate, candidate_cfg, state = prepare_candidate(paths, cfg, candidate_home)
+        try:
+            result = run_refresh(candidate, candidate_cfg, kind, corrections, extend, False, None, new_cutoff,
+                                 run_id, collect, fake_dir, log, backoff, model, concurrency,
+                                 max_calls=max_calls, max_cost_usd=max_cost_usd, train_before=train_before)
+            # Neither an exception nor exit 0 alone proves a complete candidate.
+            state["status"] = "incomplete" if result.get("incomplete") else "awaiting_human_review"
+            state["candidate_model_hash"] = _select.files_hash(candidate.model)
+            state["updated"] = now_iso()
+            write_json(candidate.home / "CANDIDATE.json", state)
+            return dict(result, candidate=state)
+        except Exception as exc:
+            state.update({"status": "failed", "updated": now_iso(), "error_type": type(exc).__name__})
+            write_json(candidate.home / "CANDIDATE.json", state)
+            raise
     summary = {}
     if extend:
         from .corpus import run_extract
@@ -263,12 +327,30 @@ def run_refresh(paths, cfg, kind, corrections=True, extend=False, always_on_flag
             cfg["sources"]["claude_projects_dir"], cfg["sources"]["codex_sessions_dir"]))
         summary["extract"] = run_extract(paths, cfg, log=log)
         # keep_split freezes test_ids and dev_ids exactly; --new-cutoff mints a fresh held-out set instead
-        summary["prep"] = run_prep(paths, cfg, cutoff=new_cutoff or "auto", keep_split=not new_cutoff, force=False, log=log)["split"]["split_id"]
+        summary["prep"] = run_prep(paths, cfg, cutoff=new_cutoff or "auto", keep_split=not (new_cutoff or train_before),
+                                   no_test=bool(train_before), train_before=train_before, force=False, log=log)["split"]["split_id"]
         prev = latest_mined_run(paths)
-        summary["mine"] = run_mine(paths, cfg, kind, run_id=run_id, concurrency=concurrency, fake_dir=fake_dir, reuse_from=prev, log=log, backoff=backoff)
-        summary["synthesize"] = run_synthesize(paths, cfg, kind, update=True, fake_dir=fake_dir, log=log, backoff=backoff, model=model)
+        summary["mine"] = run_mine(paths, cfg, kind, run_id=run_id, concurrency=concurrency, fake_dir=fake_dir, reuse_from=prev,
+                                   log=log, backoff=backoff, max_calls=max_calls, max_cost_usd=max_cost_usd)
+        if _incomplete(summary["mine"]):
+            summary["incomplete"] = "mining did not complete; synthesis was not run"
+            return summary
+        summary["synthesize"] = run_synthesize(paths, cfg, kind, update=True, fake_dir=fake_dir, log=log, backoff=backoff,
+                                               model=model, max_calls=max_calls, max_cost_usd=max_cost_usd)
+        if summary["synthesize"].get("instructions") or any(_incomplete(s) for s in summary["synthesize"].get("substeps", {}).values() if isinstance(s, dict)):
+            summary["incomplete"] = "synthesis did not complete"
+            return summary
     if corrections:
-        summary["corrections"] = fold_corrections(paths, cfg, kind, run_id=run_id, collect=collect, fake_dir=fake_dir, log=log, backoff=backoff, model=model)
+        summary["corrections"] = fold_corrections(paths, cfg, kind, run_id=run_id, collect=collect, fake_dir=fake_dir, log=log,
+                                                 backoff=backoff, model=model, max_calls=max_calls, max_cost_usd=max_cost_usd)
+        if summary["corrections"].get("instructions"):
+            summary["incomplete"] = "correction folding needs collected engine output"
+            return summary
+    if extend:
+        # Echo recall must advance with the same prepared training boundary as
+        # the profile. Its hash/manifest update is part of this candidate build.
+        from .recall import build_episodes
+        summary["recall"] = build_episodes(paths)
     if always_on_flag:
         summary["always_on"] = always_on(paths, cfg, write_to, log)
     return summary

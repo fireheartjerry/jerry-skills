@@ -25,6 +25,7 @@ def key_cases():
         ("glpat-" + "i" * 20, "key"),
         ("npm_" + "j" * 36, "key"),
         ("ya29." + "k" * 40, "key"),
+        ("AQ." + "m" * 40, "key"),
     ]
 
 
@@ -60,7 +61,7 @@ class ScrubTests(unittest.TestCase):
         self.assertEqual(counts.get("secret"), 1)
         out, counts = scrub.scrub("bearer token refresh flow")  # prose: a short word after bearer is not a token
         self.assertEqual(out, "bearer token refresh flow")
-        self.assertEqual(scrub.SCRUB_VERSION, 2)
+        self.assertEqual(scrub.SCRUB_VERSION, 3)
 
     def test_email_phone_card(self):
         out, counts = scrub.scrub("mail someone@example.com or call +1 416 555 0199, card 4111 1111 1111 1111")

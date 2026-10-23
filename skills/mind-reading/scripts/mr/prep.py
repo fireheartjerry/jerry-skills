@@ -17,6 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from . import agent_context as _ac
+from . import filters
 from .config import read_json, write_json, write_jsonl
 from .corpus import load_corpus, normalize, now_iso
 
@@ -319,6 +320,9 @@ def _msg_out(m):
     context when there is one."""
     out = {"time": m.get("time"), "origin": m.get("origin", "typed"), "text": m.get("text", ""),
            "time_reliable": bool(m.get("time_reliable", True))}
+    for key in ("key", "record_id", "typed_text", "authorship_version"):
+        if key in m:
+            out[key] = m[key]
     if m.get("agent_context"):
         out["agent_context"] = m["agent_context"]
     return out
@@ -333,6 +337,8 @@ def chunk_msg(m, p, omitted=None):
     `omitted` accumulates the characters cut, for prep-report."""
     text = m.get("text", "") or ""
     origin = m.get("origin", "typed")
+    if origin == "typed":
+        text = filters.authored_message(m)
     cap = p.get("chunk_message_max_chars") or 0
     if origin in NONTYPED_ORIGINS and p.get("chunk_nontyped_head_chars"):
         cap = min(cap, p["chunk_nontyped_head_chars"]) if cap else p["chunk_nontyped_head_chars"]
@@ -341,7 +347,10 @@ def chunk_msg(m, p, omitted=None):
         text = text[:cap].rstrip() + " [%d chars omitted]" % cut
         if omitted is not None:
             omitted[origin] = omitted.get(origin, 0) + cut
-    return {"time": m.get("time") if m.get("time_reliable", True) else None, "origin": origin, "text": text}
+    out = {"time": m.get("time") if m.get("time_reliable", True) else None, "origin": origin, "text": text}
+    if m.get("key"):
+        out["key"] = m["key"]
+    return out
 
 
 def chunk_context(m, p):
@@ -425,19 +434,12 @@ def _block(s, part, n_parts, msgs, first_messages, p, omitted=None, ctx_stats=No
     return b
 
 
-def first_messages_of(msgs, p):
-    """The session's first two typed messages as a later part shows them."""
-    typed = [m for m in msgs if m.get("origin", "typed") == "typed"]
-    return [{"time": cm["time"], "text": cm["text"]} for cm in (chunk_msg(m, p) for m in typed[:2])]
-
-
-def session_parts(s, p, first_messages=None):
-    """(parts, first_messages): the session's messages cut into parts of at most part_chars."""
+def session_blocks(s, p, omitted=None, ctx_stats=None):
     msgs = s["messages"]
     if not msgs:
-        return [], []
-    if first_messages is None:
-        first_messages = first_messages_of(msgs, p)
+        return []
+    typed = [m for m in msgs if m.get("origin", "typed") == "typed"]
+    first_messages = [{"time": cm["time"], "text": cm["text"]} for cm in (chunk_msg(m, p) for m in typed[:2])]
     overhead = len(json.dumps(_block(s, 2, 2, [], first_messages, p), ensure_ascii=False)) + 16
     budget = max(p["part_chars"] - overhead, p["part_chars"] // 2)
     parts, cur, size = [], [], 0
@@ -450,11 +452,6 @@ def session_parts(s, p, first_messages=None):
         size += k
     if cur:
         parts.append(cur)
-    return parts, first_messages
-
-
-def session_blocks(s, p, omitted=None, ctx_stats=None):
-    parts, first_messages = session_parts(s, p)
     return [_block(s, i + 1, len(parts), part, first_messages, p, omitted, ctx_stats) for i, part in enumerate(parts)]
 
 
@@ -497,33 +494,23 @@ def build_chunks(train, p, omitted=None, ctx_stats=None):
     """Chunks of session blocks, sized by the user's text only (agent context excluded from the count), with the agent
     context of each chunk under chunk_context_cap: a block whose context would pass it starts a new chunk, and a block
     that passes it alone loses its last heads. A context lens's prompt stays under chunk_chars plus that cap."""
-    return pack_blocks((b for s in train for b in session_blocks(s, p, omitted, ctx_stats)), p, ctx_stats)
-
-
-def pack_blocks(blocks, p, ctx_stats=None, chunk_chars=None, keys=None):
-    """Pack blocks in order into chunks of at most chunk_chars of the user's text, each chunk's agent context under
-    chunk_context_cap. With `keys` (a list parallel to blocks), returns (chunks, key lists per chunk)."""
     cap = chunk_context_cap(p)
-    limit = chunk_chars or p["chunk_chars"]
     chunks, cur, size, ctx_size = [], [], 0, 0
-    kchunks, kcur = [], []
-    for i, b in enumerate(blocks):
-        if context_chars(b) > cap:
-            cap_block_context(b, cap, ctx_stats)
-        n = len(json.dumps(without_context(b), ensure_ascii=False)) + 1
-        c = context_chars(b)
-        if cur and (size + n > limit or ctx_size + c > cap):
-            chunks.append(cur)
-            kchunks.append(kcur)
-            cur, size, ctx_size, kcur = [], 0, 0, []
-        cur.append(b)
-        kcur.append(keys[i] if keys is not None else None)
-        size += n
-        ctx_size += c
+    for s in train:
+        for b in session_blocks(s, p, omitted, ctx_stats):
+            if context_chars(b) > cap:
+                cap_block_context(b, cap, ctx_stats)
+            n = len(json.dumps(without_context(b), ensure_ascii=False)) + 1
+            c = context_chars(b)
+            if cur and (size + n > p["chunk_chars"] or ctx_size + c > cap):
+                chunks.append(cur)
+                cur, size, ctx_size = [], 0, 0
+            cur.append(b)
+            size += n
+            ctx_size += c
     if cur:
         chunks.append(cur)
-        kchunks.append(kcur)
-    return (chunks, kchunks) if keys is not None else chunks
+    return chunks
 
 
 def no_test_split(sessions, p, train_before):
@@ -643,11 +630,7 @@ def _clear_dir(d):
     d.mkdir(parents=True, exist_ok=True)
 
 
-def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=False, log=print, no_test=False, train_before=None,
-             pin=False, min_new_chars=0, delta_chunk_chars=None):
-    """pin: incremental chunks (incremental.py). Chunks a previous run pinned keep their messages and their bytes; only
-    material no chunk holds goes into new delta chunks (of at most delta_chunk_chars, and only once it reaches
-    min_new_chars). Without pin every chunk is rebuilt and the pins are discarded."""
+def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=False, log=print, no_test=False, train_before=None):
     p = cfg["prep"]
     rows = load_corpus(paths)
     if not rows:
@@ -662,8 +645,10 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
             no_test, train_before, frozen_split = True, frozen_split.get("train_before"), None
         elif not frozen_split or not frozen_split.get("test_ids"):
             raise PrepRefused("--keep-split needs an existing derived/split.json with test_ids")
+    n_in = len(rows)
+    rows = [r for r in rows if filters.keep(filters.clean(r.get("text") or "")[0])]
+    legacy_harness_removed = n_in - len(rows)
     sessions = _sessions_from_rows(rows)
-    n_in = sum(len(s["messages"]) for s in sessions)
     bulk, bulk_msgs = flag_bulk_stamped(sessions, p)
     twins, copies = ([], []) if no_twins else detect_twins(sessions, p)
     dups = dedup_within_session(sessions, p)
@@ -685,6 +670,7 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
             shutil.move(str(split_dir), str(archive))
             log("archived eval/%s to %s" % (split["split_id"], archive))
     paths.ensure_tree()
+    _clear_dir(paths.chunks)
     _clear_dir(paths.dev)
     truth_name, ctx_truth_name = "truth-" + split["truth_suffix"], "truth-context-" + split["truth_suffix"]
     if split_dir.exists() and not frozen and not no_test:
@@ -692,22 +678,11 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
             if (split_dir / sub).exists():
                 shutil.rmtree(split_dir / sub)
     omitted, ctx_stats = {}, {}
-    pin_info = None
-    if pin:
-        from . import incremental as _inc
-        prior = {f.stem: f.read_bytes() for f in chunk_files(paths)}
-        named, pin_info = _inc.pinned_chunks(paths, split["train"], p, prior, omitted, ctx_stats, min_new_chars=min_new_chars,
-                                             delta_chunk_chars=delta_chunk_chars, log=log)
-    else:
-        named = [("chunk-%02d" % k, c) for k, c in enumerate(build_chunks(split["train"], p, omitted, ctx_stats))]
-        if paths.chunk_pins.exists():
-            paths.chunk_pins.unlink()  # a full rebuild regroups every chunk: the pins describe chunks that no longer exist
-    _clear_dir(paths.chunks)
-    for cid, c in named:
-        with open(paths.chunks / (cid + ".jsonl"), "w", encoding="utf-8") as fh:
+    chunks = build_chunks(split["train"], p, omitted, ctx_stats)
+    for k, c in enumerate(chunks):
+        with open(paths.chunks / ("chunk-%02d.jsonl" % k), "w", encoding="utf-8") as fh:
             for b in c:
                 fh.write(json.dumps(b, ensure_ascii=False) + "\n")
-    chunks = [c for _, c in named]
     test_ctx_written, test_ctx_skipped, dev_ctx_written, dev_ctx_skipped = 0, [], 0, []
     if no_test:
         test_written, test_skipped, dev_written, dev_skipped = 0, [], 0, []
@@ -764,6 +739,7 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
     write_jsonl(paths.sessions, rows_out)
     report = {
         "created": now_iso(), "messages_in": n_in, "messages_out": sum(len(s["messages"]) for s in all_kept),
+        "legacy_harness_removed": legacy_harness_removed,
         "sessions": len(sessions), "bulk_stamped_sessions": bulk, "bulk_stamped_messages": bulk_msgs,
         "bulk_copies": copies, "bulk_copies_removed": sum(c["dropped"] for c in copies), "twins": twins,
         "within_session_duplicates_removed": dups, "ineligible_post_cutoff_dropped": split["dropped_post_cutoff"],
@@ -783,7 +759,7 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
                                 "ratio": p.get("chunk_agent_context_ratio", 0.5), "head_cap": p.get("chunk_agent_context_chars", 300)},
         "chunk_chars_omitted": omitted, "chunk_caps": {"message_max_chars": p.get("chunk_message_max_chars"),
                                                        "nontyped_head_chars": p.get("chunk_nontyped_head_chars")},
-        "no_twins": no_twins, "chunk_ids": [cid for cid, _ in named], "incremental": pin_info,
+        "no_twins": no_twins,
     }
     report.update(leaks)
     write_json(paths.prep_report, report)
@@ -802,8 +778,96 @@ def run_prep(paths, cfg, cutoff="auto", force=False, keep_split=False, no_twins=
 
 
 def chunk_files(paths):
-    """Chunk files in numeric order (chunk-99 before chunk-100)."""
-    def key(p):
-        m = re.match(r"chunk-(\d+)$", p.stem)
-        return (int(m.group(1)) if m else 10 ** 9, p.stem)
-    return sorted(Path(paths.chunks).glob("chunk-*.jsonl"), key=key)
+    return sorted(Path(paths.chunks).glob("chunk-*.jsonl"))
+
+
+def training_rows(paths, report=None):
+    """Only prepared training messages, never raw future/dev/test corpus text.
+
+    Filtering raw corpus by session id alone reintroduces deduplicated/leaked text
+    and the tail of a session trimmed at train_before. Old prepared artifacts lack
+    keys; fallback ids remain tied to exact prepared text. Prep restores source keys.
+    """
+    split = read_json(paths.split)
+    if not isinstance(split, dict) or not isinstance(split.get("train_ids"), list) or not split.get("split_id"):
+        raise PrepRefused("training evidence requires derived/split.json with train_ids; run prep first")
+    train = set(split["train_ids"])
+    held = set(split.get("test_ids") or []) | set(split.get("dev_ids") or [])
+    if train & held:
+        raise PrepRefused("training and held-out session ids overlap")
+    if not paths.sessions.exists():
+        raise PrepRefused("training evidence requires derived/sessions.jsonl; run prep first")
+    out, found = [], set()
+    provenance = {"input_messages": 0, "kept_messages": 0, "harness_removed": 0, "authorship_reparsed": 0,
+                  "authorship_version": filters.AUTHORSHIP_VERSION}
+    for line in paths.sessions.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            session = json.loads(line)
+        except (ValueError, TypeError) as exc:
+            raise PrepRefused("invalid prepared session record: %s" % exc)
+        if not isinstance(session, dict):
+            raise PrepRefused("prepared session record must be an object")
+        sid = "%s:%s" % (session.get("source", ""), session.get("session", ""))
+        if sid not in train:
+            continue
+        if session.get("split") != "train":
+            raise PrepRefused("prepared session disagrees with training split: %s" % sid)
+        found.add(sid)
+        for ordinal, message in enumerate(session.get("messages") or []):
+            provenance["input_messages"] += 1
+            if not filters.keep(filters.clean(message.get("text") or "")[0]):
+                provenance["harness_removed"] += 1
+                continue
+            row = dict(message, source=session["source"], session=session["session"],
+                       project=session.get("project"), ordinal=ordinal)
+            row["time"] = message.get("time") if message.get("time_reliable", True) else None
+            row["key"] = message.get("key") or hashlib.sha256((sid + "\n" + str(ordinal) + "\n" +
+                                                               (message.get("text") or "")).encode("utf-8")).hexdigest()[:24]
+            row.setdefault("record_id", row["key"])
+            row["source_id"] = "%s:%s:%s" % (row["source"], row["session"], row["key"])
+            if row.get("origin", "typed") == "typed":
+                if row.get("authorship_version") != filters.AUTHORSHIP_VERSION:
+                    provenance["authorship_reparsed"] += 1
+                row["text"] = filters.authored_message(row)
+            out.append(row)
+    if found != train:
+        raise PrepRefused("prepared training sessions are missing; run prep again")
+    if not out:
+        raise PrepRefused("no prepared training messages; run prep with a valid training window")
+    provenance["kept_messages"] = len(out)
+    if report is not None:
+        report.update(provenance)
+    return out
+
+
+def validate_training_chunks(paths, rows=None):
+    """Reject stale or edited chunks before a mining engine can read them."""
+    rows = training_rows(paths) if rows is None else rows
+    by_session = defaultdict(list)
+    for row in rows:
+        by_session[(row["source"], row["session"])].append(row)
+    for path in chunk_files(paths):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            block = json.loads(line)
+            candidates = by_session.get((block.get("source"), block.get("session")))
+            if candidates is None:
+                raise PrepRefused("%s contains a session outside the training split; run prep again" % path.name)
+            for message in (block.get("messages") or []) + (block.get("first_messages") or []):
+                text = re.sub(r" \[\d+ chars omitted\]$", "", message.get("text") or "").rstrip()
+                matches = [r for r in candidates if (not message.get("key") or r["key"] == message["key"])
+                           and (r.get("text") or "").startswith(text)]
+                if not matches:
+                    raise PrepRefused("%s contains text absent from prepared training evidence; run prep again" % path.name)
+                context = message.get("agent_context")
+                if context:
+                    head = re.sub(r" \.\.\.$", "", context.get("head") or "")
+                    valid = [r for r in matches if isinstance(r.get("agent_context"), dict)
+                             and re.sub(r"\s+", " ", r["agent_context"].get("head") or "").startswith(head)
+                             and set(context.get("markers") or []).issubset(set(r["agent_context"].get("markers") or []))]
+                    if not valid:
+                        raise PrepRefused("%s contains context absent from prepared training evidence; run prep again" % path.name)
+    return rows

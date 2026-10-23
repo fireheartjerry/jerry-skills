@@ -1,53 +1,61 @@
 # Seed to full prompt: examples
 
-This file is a format template and the fallback for shape when no model exists; it is not a model of anyone. The persona is synthetic: a solo developer who owns a small web app and shares one team repository with a `<teammate>` and a `<repo-owner>`, verifies on the real path, pushes finished work to the working branch of their own projects, and wants results before explanations.
-
 These are patterns, not scripts. Rebuild every expansion from the current project's memory and conversation.
+
+This is an authored fictional engineer persona, not a model of the repository's
+author or a promise about a new user's preferences. This engineer builds a local-first
+issue tracker, values reversible SQLite migrations and keyboard access, and wants
+concise verification evidence. A real expansion may infer these details only when
+the current conversation, project instructions or the user's own model supports them.
+
+Literal seed words are untagged. `[S]` marks stated evidence, `[L]` a recurring
+pattern, and `[G]` a guess that remains visible. An example never supplies authority
+to push, deploy, spend or contact someone.
+
+## Data changes
+
+### 1. add the migration
+Situation: the schema change is already agreed in the conversation; the engineer has repeatedly requested reversible migrations.
+Tags: migration, sqlite
+> Add the migration for the agreed schema change. [S] Preserve existing rows and include a rollback path. [L] Check it against a populated database copy, an interrupted run and a second run, because recovery and repeat execution have mattered in previous migrations. [S] Keep offline behavior working and report the exact checks with their actual outcomes. [G: I mean the schema change already agreed here; resolve that from the conversation before editing.]
+
+### 2. tighten the import
+Situation: an existing importer is losing rows; the engineer has defined tighten as removing edge cases while preserving behavior.
+Tags: fix, import
+> Tighten the existing import. [S] Reproduce the lost-row case before editing and keep it as a deterministic regression test. [L] Check neighboring parsing paths that share the cause, including retry behavior, while preserving the import format callers already use. [S] Report the cause, the exact check and its actual outcome. [G: I take the import to mean the one from the latest bug report in this conversation; verify that referent before changing files.]
+
+## Interface changes
+
+### 3. add the setting
+Situation: the requested setting is clear; the engineer has repeatedly asked for command palette access and offline use.
+Tags: settings, keyboard
+> Add the setting to the existing settings screen. [S] Make it reachable from the command palette as well. [L] Preserve keyboard shortcuts and focus order, and verify the behavior in offline mode. [S] Show the keyboard path a user can follow and report what was exercised. [G: use the app's existing default unless the conversation specifies another, and state that assumption.]
+
+### 4. make this easier to use
+Situation: the conversation identifies a cumbersome settings flow and the app already has a visual language.
+Tags: settings, design
+> Make the settings flow easier to use. [S] Keep the current design language and command palette entry points. [L] Group controls around the task a user is doing, and check the entire keyboard path, including focus after save and after an error. [S] Show before and after evidence with the checks you actually ran. [G: start with the flow just discussed; do not infer a redesign of unrelated screens.]
 
 ## Running work
 
-### 1. keep going
-Situation: a standing goal is live; the last turn ended with a report and no question.
+### 5. keep going
+Situation: an agreed checklist is active and the last report identifies an unfinished item.
 Tags: resume
-> Keep going on the standing goal from exactly where you stopped: no recap, no re-plan, no questions. Take the next unfinished item in the plan file. If the plan is done, take the largest gap you already know about against the target we set and close it. Finish each item properly: tests pass, docs updated, committed to the working branch with a message that says what changed and why. Do not touch `<teammate>`'s area of the repo or the frozen baseline numbers. If something blocks an item, park it with one line saying what is needed from me and move to the next unblocked one. Report in three lines when you stop: finished, running, next.
+> Keep going from the next unfinished checklist item. [S] Preserve the goal and constraints already agreed in this conversation. [L] Finish its verification and any documentation the change affects before moving to the next unblocked item. [S] Report the result and evidence concisely, with anything unverified made explicit. [G: if a referent cannot be resolved from the checklist and the last report, state that gap while continuing independent work.]
 
-### 2. status?
-Situation: a long job is running and the user has been away for a few hours.
+### 6. status?
+Situation: work is already running and the engineer wants a concise result with evidence.
 Tags: status, report
-> Give me the state of play in the shortest form that is still complete. First anything blocked on me, with the exact thing you need. Then what is finished since my last message, with the evidence (test output, a screenshot, a number against the target), what is running now with an expected finish time in my timezone, and what is queued next. Keep verified results apart from anything unproven. No narrative, no restating the plan. Then carry on with the next unblocked item while I read.
+> Give me the current status. [S] Lead with any input you need from me, then what is verified, what is running and what remains. [L] Include the exact check or artifact supporting a completed claim, and keep unverified behavior explicit. [S] Continue the agreed unblocked work after the status update. [G: include a completion time only if the running job provides a basis for one.]
 
-## Fixing and polishing
+## Handoffs
 
-### 3. login is flaky on mobile
-Situation: a user reported one failed login on a phone; the app has a web and a mobile layout.
-Tags: bug, verify
-> Login fails intermittently on mobile. Find the root cause, not a symptom: reproduce it on a real phone-sized viewport in the browser against the real backend, not a mock, until it fails for you. Fix the cause, then check every other form that shares the same auth path or the same components (signup, password reset, the session refresh) for the same failure and fix those too. Add a regression test that would have caught it. Confirm the fix on the same device path before and after. Commit to the working branch with the cause in the message. Report: the cause in one sentence, what changed, what you verified and how, and anything you could not reproduce.
-
-### 4. make the settings page less ugly
-Situation: a working but plain settings page; the rest of the app has an established look.
-Tags: ui, design
-> Redo the settings page so it looks like it belongs in this app: match the existing design language, spacing, type and colour tokens exactly, and make the improvement obvious, not subtle. Group the controls by what a user would look for, with clear labels and sensible defaults, and keep every existing setting working. Check it at phone width and at desktop width, including overflow, alignment, contrast and the empty and error states. Do not introduce a new visual style or new dependencies. Show me before and after screenshots of both widths rather than describing the changes. Commit to the working branch when it passes your own check.
-
-## Shipping and handoffs
-
-### 5. ship it
-Situation: the user's own app; the feature branch is green locally and the standing rule is that finished work is pushed.
-Tags: ship
-> Ship the current feature. Run the full verify command, not only the unit tests, and fix anything red before going further. Bump the version, update the changelog with what a user would notice, and push the working branch. Merge it the way we agreed for this project and deploy to the environment we use for releases. Then confirm the release on the live path yourself: load the app, exercise the new feature once, and watch the logs for the first minutes. Report: the version, the commit, where it is live, what you verified live, and anything you saw that I should know about. If any step needs my credentials or a physical device, do everything else first and tell me exactly what to do.
-
-### 6. write a prompt for codex to do the migration
-Situation: a database migration is planned and another agent will implement it in its own session.
+### 7. write a brief for another agent
+Situation: an agreed change needs a standalone implementation brief for a separate session.
 Tags: handoff
-> Write a standalone brief for another agent that will run with zero context from this conversation. It must state the goal and why; the files it owns and the files it must not touch; the exact migration steps in order with the current and target schema; the acceptance criteria; the exact verify command to run and what a pass looks like; and what to report back, in short bullets. Include the constraints it cannot infer: no pushing, no merging, no messages to anyone, stop and report if the verify command fails twice. Save it as a markdown file in the project's notes directory and give me a short paste-ready prompt that points at that file. Keep my name, the project's name and any secrets out of it.
+> Write a standalone brief for another agent with no access to this conversation. [S] Include the goal, owned files, interfaces, acceptance criteria and exact verification command with a passing outcome. [L] Carry over the constraints the change depends on, including reversible migrations and existing keyboard paths when relevant. [S] State the authority already granted in this conversation accurately, and distinguish unresolved assumptions. Deliver the brief in the location requested here.
 
-## People and planning
-
-### 7. tell the repo owner the fix is in
-Situation: the shared team repository; the user has fixed a bug the `<repo-owner>` reported and the PR is open.
+### 8. tell the maintainer
+Situation: the user wants a message drafted about an already verified fix; no wording has been approved.
 Tags: message
-> Draft a message to `<repo-owner>` saying the fix for the bug they reported is in: one or two short sentences in my casual voice, the PR link, what changed in plain words, and what I would like from them (a review, or a merge if they are happy). Show me the draft and send nothing until I say yes. While you wait, make sure the PR itself is ready for them: description complete, checks green, the review comments from `<teammate>` addressed. If anything is still red, fix it first and tell me.
-
-### 8. lets build the notifications system
-Situation: a new subsystem that will take several days and touches the backend, the app and the email provider.
-Tags: plan, build
-> Plan the notifications system before writing code. Read the project memory and the existing event and email code first so the plan fits what is there. Give me one checklist file with every step in dependency order: data model, delivery channels (in-app and email to start), user preferences, batching and quiet hours, the provider integration, tests, docs, rollout. For each step: what it changes, which files, how it is verified. Call out the decisions that are genuinely mine (spend on the provider, anything users will see, anything that messages people) with a recommended default for each so I can answer in one word. Estimate the order of work, not durations. Then stop and wait for my yes; once I give it, execute the checklist end to end without stopping at design gates, pushing finished steps to the working branch as they land.
+> Draft a short message to the maintainer about the verified fix. [S] Include the issue, the result and the evidence they need to review it. [L] Use my concise style and make the requested next action clear. [G: resolve which maintainer and channel from the current conversation; leave an unresolved recipient explicit.] Show the exact text for review before sending it, while continuing any already authorized work that does not depend on the message.
