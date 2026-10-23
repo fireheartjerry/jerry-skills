@@ -62,6 +62,8 @@ _LIST_LINE = re.compile(r"(?m)^\s*(?:[-*•]|\d+\.)\s")
 
 _REPEAT_MARK = re.compile(r"\b(?:again|still (?:not|broken|doesn'?t|isn'?t|failing|wrong)|i (?:already )?(?:said|told you|asked)|"
                           r"like i said|as i said|same (?:issue|problem|thing|error|bug)|once more|for the \w+ time)\b", re.I)
+_CONTINUE = re.compile(r"\b(?:keep going|continue|carry on|resume|go on|pick (?:it|this) back up|where (?:you|we) left off|"
+                       r"try again|don'?t stop)\b", re.I)
 _DEADLINE = re.compile(r"\b(?:due|deadline|tonight|asap|urgent|right now|before (?:class|the (?:meeting|call|demo|deadline))|"
                        r"in \d+ ?(?:min|mins|minutes|hr|hrs|hours)|by (?:tonight|tomorrow|morning|noon|\d))\b", re.I)
 _FRUSTRATION = re.compile(r"(?:\b(?:bro|wtf|ugh|smh|bruh)\b|[!?]{2,})", re.I)
@@ -259,7 +261,8 @@ def repeat_check(seed, context=None):
     marker = _REPEAT_MARK.search(seed or "")
     if not best and not marker:
         return None
-    return {"earlier": best, "marker": marker.group(0) if marker else None}
+    kind = "continue" if _CONTINUE.search(seed or "") else "restate"
+    return {"earlier": best, "marker": marker.group(0) if marker else None, "kind": kind}
 
 
 def _local_now(cfg, now=None):
@@ -330,14 +333,20 @@ def render(result, max_chars=3500):
     parts = []
     rep = result.get("repeat")
     if rep:
-        lines = ["### Repeat alert: this may be the second time you are being asked"]
+        nudge = rep.get("kind") == "continue"
+        lines = ["### Repeat alert: %s" % ("the user has had to ask you to continue again" if nudge
+                                           else "this may be the second time you are being asked")]
         if rep.get("earlier"):
             e = rep["earlier"]
             lines.append('It restates a message from %d turn(s) ago: "%s".' % (e["turns_back"], e["earlier"]))
         if rep.get("marker"):
             lines.append('Repeat wording: "%s".' % rep["marker"])
-        lines.append("Treat it as a correction: the earlier approach did not land. Change the approach instead of "
-                     "retrying it, and say in one line what is different this time.")
+        if nudge:
+            lines.append("Stopping early did not land. Keep working through to the finish line in this turn and report "
+                         "only when the work is done or truly blocked.")
+        else:
+            lines.append("Treat it as a correction: the earlier approach did not land. Change the approach instead of "
+                         "retrying it, and say in one line what is different this time.")
         parts.append("\n".join(lines))
     if result.get("lessons"):
         lines = ["### What lands with this user (learned from %d past replies and the reactions that followed)"

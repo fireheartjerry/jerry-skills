@@ -147,6 +147,18 @@ class LiveSignalTest(unittest.TestCase):
         self.assertIsNone(xp.repeat_check("push it", {"recent_user_turns": ["fix the bug and push it"]}))
         self.assertIsNone(xp.repeat_check("add dark mode to settings", {"recent_user_turns": ["write the README"]}))
 
+    def test_a_repeated_nudge_asks_to_finish_not_to_change_course(self):
+        rep = xp.repeat_check("keep going with the export work", {"recent_user_turns": ["keep going with the export work"
+                                                                                        " now", "ok"]})
+        self.assertEqual(rep["kind"], "continue")
+        text = xp.render({"repeat": rep})
+        self.assertIn("ask you to continue again", text)
+        self.assertIn("finish line", text)
+        self.assertNotIn("Change the approach", text)
+        restate = xp.render({"repeat": xp.repeat_check("make the navbar sticky on mobile please",
+                                                       {"recent_user_turns": ["make the navbar sticky on mobile", "ok"]})})
+        self.assertIn("Change the approach", restate)
+
     def test_repeat_wording_fires_without_history(self):
         rep = xp.repeat_check("it's still not loading", {})
         self.assertEqual(rep["marker"], "still not")

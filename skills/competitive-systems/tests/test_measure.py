@@ -1062,10 +1062,10 @@ class BisectTests(unittest.TestCase):
         return subprocess.run(cmd, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               universal_newlines=True, check=True, env=self.env).stdout.strip()
 
-    def commit_series(self, slow_from, total=9, broken=()):
+    def commit_series(self, slow_from, total=9, broken=(), fast_delay=0.01):
         self.git("init", "-q")
         for i in range(1, total + 1):
-            delay = 0.3 if i >= slow_from else 0.01  # well above interpreter start-up noise on slow CI runners
+            delay = 0.3 if i >= slow_from else fast_delay  # well above interpreter start-up noise on slow CI runners
             body = "raise SystemExit(3)\n" if i in broken else ""
             with open(os.path.join(self.root, "step.py"), "w") as f:
                 f.write("import time\n%stime.sleep(%s)\nprint('v%d')\n" % (body, delay, i))
@@ -1109,8 +1109,9 @@ class BisectTests(unittest.TestCase):
         self.assertEqual(data["range"], [commits[3], commits[5]])
 
     def test_no_slowdown_refuses_and_bad_refs_are_usage_errors(self):
-        self.commit_series(slow_from=99, total=4)
-        p = self.bisect("--min-effect", "0.5")  # identical commits: only a real gap this large counts, not runner noise
+        # identical commits that each sleep 0.3 s: start-up jitter on a loaded runner cannot double the median
+        self.commit_series(slow_from=99, total=4, fast_delay=0.3)
+        p = self.bisect("--min-effect", "0.5")
         self.assertEqual(p.returncode, 1, p.stderr)
         self.assertIn("nothing to bisect", p.stderr)
         self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
