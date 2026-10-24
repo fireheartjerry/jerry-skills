@@ -529,7 +529,8 @@ def cmd_experience(args, paths, cfg, log):
             lessons = (summary or {}).get("lessons") or []
             report = {"enabled": opts["enabled"], "situation": opts["situation"],
                       "candidate": str(cdir) if cdir else None, "replies": (summary or {}).get("replies", 0),
-                      "outcomes": (summary or {}).get("outcomes", {}), "lessons": lessons}
+                      "outcomes": (summary or {}).get("outcomes", {}), "lessons": lessons,
+                      "weekly": (summary or {}).get("weekly", [])}
             if args.json:
                 _emit(args, report)
             else:
@@ -540,6 +541,12 @@ def cmd_experience(args, paths, cfg, log):
                     print("learned from %d replies; %d lesson(s)" % (report["replies"], len(lessons)))
                     for lesson in lessons:
                         print("- " + xp.lesson_text(lesson))
+                    weekly = summary.get("weekly") or []
+                    if weekly:
+                        print("after agent replies, by week (friction = a nudge, correction or repeat):")
+                        for row in weekly:
+                            print("  %s  %4d replies  friction %5.1f%%  plain go-ahead %5.1f%%" % (
+                                row["week"], row["replies"], 100 * row["friction_rate"], 100 * row["go_ahead_rate"]))
             return EXIT_OK
         seed = _read_seed(args, log)
         if seed is None:
@@ -551,7 +558,7 @@ def cmd_experience(args, paths, cfg, log):
                 return EXIT_USAGE
             raw = sys.stdin.read() if args.context_file == "-" else Path(args.context_file).read_text(encoding="utf-8")
             context = normalize(json.loads(raw))
-        result = xp.build(paths, cfg, seed, current=context, now=args.now, use_situation=not args.no_situation)
+        result = xp.build(paths, cfg, seed, current=context, use_situation=not args.no_situation)
         if args.json:
             _emit(args, result)
         else:
@@ -823,7 +830,6 @@ def build_parser():
     p.add_argument("--seed")
     p.add_argument("--seed-file")
     p.add_argument("--context-file", help="show: JSON intent context (goal, recent_user_turns, ...)")
-    p.add_argument("--now", help="show: ISO 8601 time instead of the current time")
     p.add_argument("--no-situation", action="store_true", help="show: leave out situation hints")
     p.set_defaults(func=cmd_experience)
 

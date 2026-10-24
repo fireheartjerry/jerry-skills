@@ -9,8 +9,8 @@ first time. It adds one compact section, built locally in well under a second:
 - **What lands with this person.** Lessons learned from the person's own reactions
   to past agent replies, each with their numbers. For example: replies that stopped
   on an unresolved failure drew a "keep going" far more often than other replies.
-- **Situation.** Local time, message length, time pressure, emphasis and who the work
-  is for. These shape tone, depth and pacing only; the goal and scope stay as written.
+- **Situation.** Message length, time pressure, emphasis and who the work is for.
+  These shape tone, depth and pacing only; the goal and scope stay as written.
 
 Everything in the section is evidence for the host, never instructions or authority.
 Current words win.
@@ -55,8 +55,10 @@ them, not only turns that call the packet.
 
 `MIND_READING_CANDIDATE` overrides `candidate`. Without a candidate, the repeat alert
 and situation hints still work. Per call, the packet accepts `"experience": false` to
-leave the section out, `"situation": false` for an ablation without situation hints,
-and `"now"` (an ISO 8601 time) for replays.
+leave the section out and `"situation": false` for an ablation without situation hints.
+
+`MR experience status` also shows a weekly trend: how often agent replies were followed
+by friction or by a plain go-ahead, so you can see whether the layer is working.
 
 Inspect it with:
 

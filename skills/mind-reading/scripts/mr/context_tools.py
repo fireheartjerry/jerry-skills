@@ -88,7 +88,7 @@ def packet(paths, cfg, data):
     if not isinstance(data, dict):
         raise PacketError('packet must be one JSON object')
     allowed = {'version', 'seed', 'context', 'project', 'kind', 'mode', 'no_light', 'include_working',
-               'experience', 'situation', 'now'}
+               'experience', 'situation'}
     if set(data) - allowed:
         raise PacketError('unknown packet fields: %s' % ', '.join(sorted(set(data) - allowed)))
     if type(data.get('version', 1)) is not int or data.get('version', 1) != 1:
@@ -102,8 +102,6 @@ def packet(paths, cfg, data):
     for key in ('no_light', 'include_working', 'experience', 'situation'):
         if key in data and type(data[key]) is not bool:
             raise PacketError('%s must be boolean' % key)
-    if data.get('now') is not None and (not isinstance(data['now'], str) or len(data['now']) > 64):
-        raise PacketError('now must be an ISO 8601 time string')
     mode = data.get('mode', 'execute')
     if mode not in ('execute', 'discuss', 'status', 'hold', 'plan', 'initiative'):
         raise PacketError('unknown packet mode')
@@ -122,8 +120,7 @@ def packet(paths, cfg, data):
     xp_info, xp_text = None, ''
     if data.get('experience', experience.settings(cfg)['enabled']):
         try:
-            xp = experience.build(paths, cfg, seed, current=current, now=data.get('now'),
-                                  use_situation=data.get('situation'))
+            xp = experience.build(paths, cfg, seed, current=current, use_situation=data.get('situation'))
             xp_text = xp['text']
             xp_info = {'enabled': True, 'trace_store': xp['trace_store'], 'repeat': bool(xp['repeat']),
                        'lessons': [l['feature'] for l in xp['lessons']], 'situation': len(xp['situation']),

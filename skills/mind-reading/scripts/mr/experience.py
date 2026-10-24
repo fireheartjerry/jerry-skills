@@ -7,8 +7,8 @@ Three parts, each computed locally:
 - learned reply lessons: from the user's own reactions in a trace candidate, which kinds of agent replies were
   followed by friction (a nudge, a correction, a repeat) or by a plain go-ahead that a direct action would have
   saved; only differences that clear a significance bar are shown, each with the user's own numbers
-- situation: local time, message length, time pressure, emphasis and who the work is for; these shape tone, depth
-  and pacing only, never the goal or the scope
+- situation: message length, time pressure, emphasis and who the work is for; these shape tone, depth and pacing
+  only, never the goal or the scope
 
 The candidate's cases.jsonl is large, so its summary is cached in the data home and rebuilt whenever the candidate
 changes. A new candidate (for example from the weekly refresh) therefore updates the lessons with no review step.
@@ -18,10 +18,10 @@ import json
 import math
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
-SUMMARY_VERSION = 2
+SUMMARY_VERSION = 3
 SUMMARY_NAME = "experience-summary.json"
 REPEAT_JACCARD = 0.55
 RESEND_JACCARD = 0.6
@@ -207,27 +207,62 @@ def lessons_from(rows):
     return found[:MAX_LESSONS]
 
 
+def _replied(case):
+    reply = case.get("historical_response") or {}
+    text, tools = str(reply.get("assistant_text") or ""), reply.get("tools") or []
+    return (text, tools) if (text.strip() or tools) else None  # empty: a burst, nothing was reacted to
+
+
 def reply_rows(cases):
     """(features, outcome) for every case where the agent actually replied or worked before the next turn."""
     for case in cases:
+        replied = _replied(case)
+        if replied is None:
+            continue
+        text, tools = replied
         seed = str((case.get("input") or {}).get("seed") or "")
         nxt = str((case.get("target") or {}).get("text") or "")
-        reply = case.get("historical_response") or {}
-        text, tools = str(reply.get("assistant_text") or ""), reply.get("tools") or []
-        if not text.strip() and not tools:
-            continue  # a burst: the person wrote again before the agent replied, so nothing was reacted to
         yield {name: bool(f(text, tools)) for name, f in FEATURES.items()}, outcome(seed, nxt)
 
 
+def iso_week(stamp):
+    """ISO week of a timestamp such as 2026-10-23T19:25:09.045Z, or None."""
+    text = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], str(stamp or "").replace("Z", "+00:00"))
+    try:
+        year, week, _ = datetime.fromisoformat(text).isocalendar()
+    except ValueError:
+        return None
+    return "%04d-W%02d" % (year, week)
+
+
+def weekly_trend(cases, weeks=8):
+    """Friction and plain go-ahead rates after agent replies, per ISO week: how often the person had to push back."""
+    by = {}
+    for case in cases:
+        if _replied(case) is None:
+            continue
+        week = iso_week(case.get("seed_time"))
+        if not week:
+            continue
+        out = outcome(str((case.get("input") or {}).get("seed") or ""), str((case.get("target") or {}).get("text") or ""))
+        row = by.setdefault(week, {"week": week, "replies": 0, "friction": 0, "go_ahead": 0})
+        row["replies"] += 1
+        if out in ("friction", "go_ahead"):
+            row[out] += 1
+    rows = [by[w] for w in sorted(by)][-weeks:]
+    for row in rows:
+        n = max(1, row["replies"])
+        row["friction_rate"], row["go_ahead_rate"] = round(row["friction"] / n, 4), round(row["go_ahead"] / n, 4)
+    return rows
+
+
 def build_summary(cases_path):
-    def cases():
-        with open(cases_path, encoding="utf-8") as fh:
-            for line in fh:
-                if line.strip():
-                    yield json.loads(line)
-    rows = list(reply_rows(cases()))
+    with open(cases_path, encoding="utf-8") as fh:
+        cases = [json.loads(line) for line in fh if line.strip()]
+    rows = list(reply_rows(cases))
     counts = {k: sum(1 for _, o in rows if o == k) for k in OUTCOMES}
-    return {"version": SUMMARY_VERSION, "replies": len(rows), "outcomes": counts, "lessons": lessons_from(rows)}
+    return {"version": SUMMARY_VERSION, "replies": len(rows), "outcomes": counts, "lessons": lessons_from(rows),
+            "weekly": weekly_trend(cases)}
 
 
 def load_summary(paths, cfg, rebuild=False):
@@ -290,30 +325,12 @@ def repeat_check(seed, context=None):
     return {"earlier": best, "marker": marker.group(0) if marker else None, "kind": kind}
 
 
-def _local_now(cfg, now=None):
-    if isinstance(now, str):
-        try:
-            now = datetime.fromisoformat(now.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ExperienceError("now must be an ISO 8601 time") from exc
-    now = now or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    name = (cfg or {}).get("timezone") or "UTC"
-    try:
-        from zoneinfo import ZoneInfo
-        return now.astimezone(ZoneInfo(name))
-    except Exception:  # unknown zone or no tz database: fall back to the machine's local time
-        return now.astimezone()
+def situation(seed, context=None, cfg=None):
+    """Presentation hints from the moment itself. Each shapes tone, depth or pacing; none changes the goal.
 
-
-def situation(seed, context=None, cfg=None, now=None):
-    """Presentation hints from the moment itself. Each shapes tone, depth or pacing; none changes the goal."""
-    local = _local_now(cfg, now)
+    Time of day is left out on purpose: in replayed history, late-night friction matched daytime."""
     seed = human_text(seed)
     hints = []
-    if 0 <= local.hour < 5:
-        hints.append("late night (%s local): keep the reply brief and finish-oriented" % local.strftime("%H:%M"))
     words = len((seed or "").split())
     if words <= 5:
         hints.append("very short message: lead with the result, keep prose minimal")
@@ -338,7 +355,7 @@ def situation(seed, context=None, cfg=None, now=None):
 
 # ---------------------------------------------------------------- packet section
 
-def build(paths, cfg, seed, current=None, now=None, use_situation=None, summary=None):
+def build(paths, cfg, seed, current=None, use_situation=None, summary=None):
     """Experience signals and the rendered packet section. `current` is the host's observed conversation."""
     opts = settings(cfg)
     if summary is None:
@@ -348,7 +365,7 @@ def build(paths, cfg, seed, current=None, now=None, use_situation=None, summary=
         "repeat": repeat_check(seed, current),
         "lessons": list((summary or {}).get("lessons") or []),
         "replies": (summary or {}).get("replies", 0),
-        "situation": situation(seed, current, cfg, now) if want_situation else [],
+        "situation": situation(seed, current, cfg) if want_situation else [],
         "trace_store": summary is not None,
     }
     result["text"] = render(result, opts.get("max_chars", 3500))

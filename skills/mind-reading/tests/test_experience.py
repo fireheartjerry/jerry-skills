@@ -99,6 +99,28 @@ class LessonTest(unittest.TestCase):
         self.assertIn("plain go-ahead 40%", ask)
 
 
+class TrendTest(unittest.TestCase):
+    def test_iso_week_parses_millis_and_zulu(self):
+        self.assertEqual(xp.iso_week("2026-10-23T19:25:09.045Z"), "2026-W43")
+        self.assertEqual(xp.iso_week("2026-10-26T00:00:00+00:00"), "2026-W44")
+        self.assertIsNone(xp.iso_week("not a time"))
+
+    def test_weekly_trend_counts_reactions_after_real_replies(self):
+        def case(i, day, nxt, reply="Done, tests pass."):
+            c = _case(i, "ship the build", reply, nxt)
+            c["seed_time"] = "2026-10-%02dT12:00:00.5Z" % day
+            return c
+        cases = [case(0, 19, "keep going"), case(1, 20, "yes do it"), case(2, 21, "now the pricing page"),
+                 case(3, 21, "keep going", reply=""),  # a burst: no reply, not counted
+                 case(4, 26, "now the onboarding copy"), case(5, 27, "now the footer")]
+        rows = xp.weekly_trend(cases)
+        self.assertEqual([r["week"] for r in rows], ["2026-W43", "2026-W44"])
+        w43, w44 = rows
+        self.assertEqual((w43["replies"], w43["friction"], w43["go_ahead"]), (3, 1, 1))
+        self.assertAlmostEqual(w43["friction_rate"], 0.3333, places=4)
+        self.assertEqual((w44["replies"], w44["friction_rate"]), (2, 0.0))
+
+
 class SummaryCacheTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -184,30 +206,22 @@ class LiveSignalTest(unittest.TestCase):
                      "send me this again"):
             self.assertIsNone(xp.repeat_check(seed, {}), seed)
 
-    def test_situation_hints_use_the_configured_timezone(self):
-        cfg = {"timezone": "America/Toronto", "people": {"Jordan Lee": "<stakeholder>"}}
-        late = xp.situation("ship it", {}, cfg, now="2026-01-15T07:30:00Z")  # 02:30 in Toronto
-        self.assertTrue(any(h.startswith("late night (02:30") for h in late))
-        day = xp.situation("ship it", {}, cfg, now="2026-01-15T17:30:00Z")
-        self.assertFalse(any(h.startswith("late night") for h in day))
+    def test_time_of_day_adds_no_hint(self):
+        hints = xp.situation("ship it", {}, {"timezone": "America/Toronto"})
+        self.assertFalse(any("late night" in h for h in hints))
 
     def test_situation_hints_cover_length_pressure_emphasis_and_people(self):
         cfg = {"timezone": "UTC", "people": {"Jordan Lee": "<stakeholder>"}}
         hints = xp.situation("send the deck to Jordan Lee before the meeting, make it ALL fit on one page!!",
-                             {}, cfg, now="2026-01-15T15:00:00Z")
+                             {}, cfg)
         joined = "\n".join(hints)
         self.assertIn("time pressure", joined)
         self.assertIn("(ALL)", joined)
         self.assertIn("frustration markers", joined)
         self.assertIn("Jordan Lee (stakeholder)", joined)
-        self.assertNotIn("(API", "\n".join(xp.situation("the API and CLI are down", {}, cfg, now="2026-01-15T15:00:00Z")))
-        long = xp.situation(" ".join(["word"] * 90), {}, cfg, now="2026-01-15T15:00:00Z")
+        self.assertNotIn("(API", "\n".join(xp.situation("the API and CLI are down", {}, cfg)))
+        long = xp.situation(" ".join(["word"] * 90), {}, cfg)
         self.assertIn("long dictated message", "\n".join(long))
-
-    def test_bad_time_is_rejected(self):
-        with self.assertRaises(xp.ExperienceError):
-            xp.situation("hi", {}, {}, now="yesterday")
-
 
 class PacketIntegrationTest(unittest.TestCase):
     def setUp(self):
@@ -228,8 +242,7 @@ class PacketIntegrationTest(unittest.TestCase):
 
     def run_packet(self, **extra):
         data = {"seed": "make the navbar sticky on mobile please", "project": "demo", "no_light": True,
-                "context": {"recent_user_turns": ["make the navbar sticky on mobile", "looks good"]},
-                "now": "2026-01-15T15:00:00Z"}
+                "context": {"recent_user_turns": ["make the navbar sticky on mobile", "looks good"]}}
         data.update(extra)
         return packet(self.paths, self.cfg, data)
 
@@ -279,7 +292,8 @@ class PacketIntegrationTest(unittest.TestCase):
         self.assertNotIn("## Experience layer", result["slice"])
 
     def test_odd_candidate_rows_never_block_the_packet(self):
-        (self.cand / "cases.jsonl").write_text('{"input": ["not", "an", "object"]}\n', encoding="utf-8")
+        (self.cand / "cases.jsonl").write_text('{"input": ["not", "an", "object"], '
+                                               '"historical_response": {"assistant_text": "Done."}}\n', encoding="utf-8")
         self.cfg["experience"]["enabled"] = True
         self.cfg["candidate"] = str(self.cand)
         result = self.run_packet()
@@ -288,7 +302,7 @@ class PacketIntegrationTest(unittest.TestCase):
 
     def test_field_types_are_validated(self):
         from mr.context_tools import PacketError
-        for bad in ({"experience": "yes"}, {"situation": 1}, {"now": 5}, {"now": "x" * 65}):
+        for bad in ({"experience": "yes"}, {"situation": 1}, {"now": "2026-01-15T15:00:00Z"}):
             with self.assertRaises(PacketError):
                 self.run_packet(**bad)
 
@@ -343,16 +357,17 @@ class CliTest(unittest.TestCase):
         out = run_cli(self.root / "home", "experience", "status", env_extra=env)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("learned from 240 replies", out.stdout)
+        self.assertEqual(report["weekly"], [])  # synthetic cases carry no timestamps
         ctx = self.root / "ctx.json"
         ctx.write_text(json.dumps({"recent_user_turns": ["make the navbar sticky on mobile"]}), encoding="utf-8")
         out = run_cli(self.root / "home", "experience", "show", "--seed", "make the navbar sticky on mobile now",
-                      "--context-file", str(ctx), "--now", "2026-01-15T15:00:00Z", env_extra=env)
+                      "--context-file", str(ctx), env_extra=env)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("### Repeat alert", out.stdout)
 
     def test_packet_cli_includes_the_layer(self):
         out = run_cli(self.root / "home", "packet", env_extra={"MIND_READING_CANDIDATE": ""},
-                      stdin=json.dumps({"seed": "ship it", "no_light": True, "now": "2026-01-15T15:00:00Z",
+                      stdin=json.dumps({"seed": "ship it", "no_light": True,
                                         "context": {"goal": "Release the build"}}))
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("## Experience layer", out.stdout)
