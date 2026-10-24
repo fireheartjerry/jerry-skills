@@ -102,8 +102,8 @@ instead of retrying it, and say in one line what is different this time.
 
 ### What lands with this user (learned from 1840 past replies and the reactions that followed)
 - Do not stop on an unresolved failure: fix it or take the next step before replying.
-  Replies that reported a failure were followed by a nudge, correction or repeat 11% of
-  the time, against 5.8% otherwise (n=412).
+  Replies that reported a failure were followed by a nudge, correction or repeat 10% of
+  the time, against 5.3% otherwise (n=556).
 
 ### Situation (tone, depth and pacing only)
 - very short message: lead with the result, keep prose minimal
