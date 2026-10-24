@@ -44,8 +44,12 @@ In `config.json`:
 
 ```json
 {"candidate": "<trace candidate directory, or a link to the current one>",
- "experience": {"enabled": true, "situation": true, "max_chars": 3500}}
+ "experience": {"enabled": true, "situation": true, "always_on": false, "max_chars": 3500}}
 ```
+
+With `"always_on": true`, the learned lessons also join the always-on block the next
+time it is rendered (`MR refresh --always-on --write-to <file>`), so every turn gets
+them, not only turns that call the packet.
 
 `MIND_READING_CANDIDATE` overrides `candidate`. Without a candidate, the repeat alert
 and situation hints still work. Per call, the packet accepts `"experience": false` to

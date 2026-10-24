@@ -128,7 +128,7 @@ def packet(paths, cfg, data):
             xp_info = {'enabled': True, 'trace_store': xp['trace_store'], 'repeat': bool(xp['repeat']),
                        'lessons': [l['feature'] for l in xp['lessons']], 'situation': len(xp['situation']),
                        'chars': len(xp_text)}
-        except (OSError, ValueError) as exc:  # a broken candidate never blocks the packet
+        except Exception as exc:  # an optional layer: a broken or odd candidate never blocks the packet
             xp_info = {'enabled': True, 'error': str(exc)[:300]}
     select_cfg = copy.deepcopy(cfg['select'])
     for key in ('budget_chars', 'initiative_budget_chars'):

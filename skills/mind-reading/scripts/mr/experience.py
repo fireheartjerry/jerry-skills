@@ -139,7 +139,7 @@ def _short(text, n):
 
 
 def settings(cfg):
-    base = {"enabled": False, "max_chars": 3500, "situation": True}
+    base = {"enabled": False, "max_chars": 3500, "situation": True, "always_on": False}
     base.update((cfg or {}).get("experience") or {})
     return base
 

@@ -174,11 +174,30 @@ def render_block(light_text, model_hash, name, date=None, home_label="$MIND_READ
             "%s\n\n%s\n%s\n" % (date, home_label, model_hash, _demote(light_text), footer, END_MARK))
 
 
+def experience_block(paths, cfg):
+    """Learned reply lessons for the always-on block, when the experience layer and its always-on option are both on."""
+    from . import experience
+    opts = experience.settings(cfg)
+    if not (opts.get("enabled") and opts.get("always_on")):
+        return ""
+    try:
+        lessons = (experience.load_summary(paths, cfg) or {}).get("lessons") or []
+    except Exception:  # an optional addition never blocks the always-on block
+        return ""
+    if not lessons:
+        return ""
+    return "## Learned from reactions to past replies\n" + "\n".join("- " + experience.lesson_text(l) for l in lessons)
+
+
 def current_block(paths, cfg):
     if not paths.light.exists():
         raise RefreshError("model/light.md missing")
     manifest = read_json(paths.model_json, {}) or {}
-    return render_block(paths.light.read_text(encoding="utf-8"), manifest.get("model_hash") or _select.files_hash(paths.model), cfg["name"])
+    light = paths.light.read_text(encoding="utf-8")
+    extra = experience_block(paths, cfg)
+    if extra:
+        light = light.rstrip("\n") + "\n\n" + extra + "\n"
+    return render_block(light, manifest.get("model_hash") or _select.files_hash(paths.model), cfg["name"])
 
 
 def _strip_date(block):

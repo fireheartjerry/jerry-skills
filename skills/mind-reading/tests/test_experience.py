@@ -274,11 +274,49 @@ class PacketIntegrationTest(unittest.TestCase):
         self.assertIn("error", result["decision"]["experience"])
         self.assertNotIn("## Experience layer", result["slice"])
 
+    def test_odd_candidate_rows_never_block_the_packet(self):
+        (self.cand / "cases.jsonl").write_text('{"input": ["not", "an", "object"]}\n', encoding="utf-8")
+        self.cfg["experience"]["enabled"] = True
+        self.cfg["candidate"] = str(self.cand)
+        result = self.run_packet()
+        self.assertIn("error", result["decision"]["experience"])
+        self.assertEqual(result["seed"], "make the navbar sticky on mobile please")
+
     def test_field_types_are_validated(self):
         from mr.context_tools import PacketError
         for bad in ({"experience": "yes"}, {"situation": 1}, {"now": 5}, {"now": "x" * 65}):
             with self.assertRaises(PacketError):
                 self.run_packet(**bad)
+
+
+class AlwaysOnTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.cand = write_candidate(self.root / "cand", synthetic_cases())
+        self.paths, self.cfg = init_home(self.root / "home")
+        self.paths.model.mkdir(parents=True, exist_ok=True)
+        self.paths.light.write_text("# Light\n\n## Rules\n- Lead with the result.\n", encoding="utf-8")
+        self.cfg["candidate"] = str(self.cand)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("MIND_READING_CANDIDATE", None)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_lessons_join_the_always_on_block_only_when_opted_in(self):
+        from mr.refresh import current_block
+        self.assertNotIn("Learned from reactions", current_block(self.paths, self.cfg))
+        self.cfg["experience"]["enabled"] = True
+        self.assertNotIn("Learned from reactions", current_block(self.paths, self.cfg))
+        self.cfg["experience"]["always_on"] = True
+        block = current_block(self.paths, self.cfg)
+        self.assertIn("### Learned from reactions to past replies", block)
+        self.assertIn("End every turn with a written result", block)
+        self.assertTrue(block.startswith("<!-- BEGIN mind-reading"))
+        self.assertLess(block.index("Lead with the result"), block.index("Learned from reactions"))
 
 
 class CliTest(unittest.TestCase):
