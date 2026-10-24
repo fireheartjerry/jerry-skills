@@ -76,6 +76,14 @@ One stdin packet combines that state with current context; no extra model call i
 needed just to interpret the request. Portable handoffs and an offline explorer make
 the memory inspectable. [Working-memory guide](skills/mind-reading/references/working-memory.md).
 
+**Why a skill instead of a longer system prompt?** A system prompt is static, and you
+write and maintain it. Asking the agent to infer only uses the current chat, and the
+context window forgets when the session ends. `mind-reading` learns from every Claude
+Code and Codex session you have had, loads only the evidence that applies to this
+request, shows whether each inference was stated, learned or assumed, and relearns
+every week from how you react. Four words in, the full intent out, in about 0.2 s on
+your machine.
+
 An **experience layer** learns from how you actually reacted to past agent replies.
 If stopping on a failure made you type "keep going", or needless questions made
 you type "yes, do it", the packet tells the agent so with your own numbers, and a
