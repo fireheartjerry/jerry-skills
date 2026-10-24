@@ -20,8 +20,12 @@ def _case(i, seed, reply, nxt, family=None, tools=None):
 def synthetic_cases():
     """Fictional history: silent endings draw nudges, questions draw a plain go-ahead, lists change nothing."""
     cases, i = [], 0
-    for k in range(40):  # silent endings: 16 of 40 followed by a nudge
-        cases.append(_case(i, "refactor the parser module", "", "keep going" if k < 16 else "now add the export button"))
+    for k in range(40):  # silent endings after real work: 16 of 40 followed by a nudge
+        cases.append(_case(i, "refactor the parser module", "", "keep going" if k < 16 else "now add the export button",
+                           tools=[{"name": "edit", "kind": "tool"}]))
+        i += 1
+    for k in range(20):  # bursts: the person wrote again before any reply, so these are never counted
+        cases.append(_case(i, "refactor the parser module", "", "keep going"))
         i += 1
     for k in range(40):  # asking first: 16 of 40 answered with a plain go-ahead
         cases.append(_case(i, "deploy the staging build", "Built it. Want me to deploy it to staging?",
@@ -64,12 +68,10 @@ class OutcomeTest(unittest.TestCase):
 
 class LessonTest(unittest.TestCase):
     def rows(self):
-        out = []
-        for case in synthetic_cases():
-            reply = case["historical_response"]["assistant_text"]
-            feats = {name: bool(f(reply, [])) for name, f in xp.FEATURES.items()}
-            out.append((feats, xp.outcome(case["input"]["seed"], case["target"]["text"])))
-        return out
+        return list(xp.reply_rows(synthetic_cases()))
+
+    def test_bursts_without_a_reply_are_not_counted(self):
+        self.assertEqual(len(self.rows()), 240)
 
     def test_only_significant_plausible_differences_become_lessons(self):
         lessons = {(l["feature"], l["outcome"]): l for l in xp.lessons_from(self.rows())}
@@ -114,14 +116,14 @@ class SummaryCacheTest(unittest.TestCase):
 
     def test_summary_is_cached_and_rebuilt_when_the_candidate_changes(self):
         first = xp.load_summary(self.paths, self.cfg)
-        self.assertEqual(first["replies"], 240)
+        self.assertEqual(first["replies"], 240)  # the 20 bursts have no reply to react to
         cache = Path(self.paths.derived) / xp.SUMMARY_NAME
         self.assertTrue(cache.is_file())
         self.assertEqual(oct(cache.stat().st_mode & 0o777), "0o600")
         with mock.patch.object(xp, "build_summary", side_effect=AssertionError("cache not used")):
             self.assertEqual(xp.load_summary(self.paths, self.cfg)["replies"], 240)
         write_candidate(self.cand, synthetic_cases()[:200])
-        self.assertEqual(xp.load_summary(self.paths, self.cfg)["replies"], 200)
+        self.assertEqual(xp.load_summary(self.paths, self.cfg)["replies"], 180)  # 200 cases minus 20 bursts
 
     def test_no_candidate_means_no_summary(self):
         self.cfg["candidate"] = ""
@@ -174,6 +176,8 @@ class LiveSignalTest(unittest.TestCase):
         self.assertEqual(xp.human_text(files), "keep going")
         self.assertEqual(xp.outcome("fix it", files), "friction")
         self.assertEqual(xp.outcome("fix it", block + "yes do it"), "go_ahead")
+        self.assertEqual(xp.human_text("#1 priority: fix the login"), "#1 priority: fix the login")
+        self.assertEqual(xp.human_text("# Only a heading"), "# Only a heading")
 
     def test_plain_redo_requests_are_not_repeats(self):
         for seed in ("run the tests again", "open it again and check the layout", "I asked Codex for a review",

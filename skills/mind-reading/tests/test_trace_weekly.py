@@ -37,7 +37,8 @@ class FakeBuilder:
             out = Path(argv[argv.index("--output") + 1])
             out.mkdir(parents=True)
             rows = [{"id": "c%d" % i, "input": {"seed": "build the page"}, "target": {"text": "keep going"},
-                     "historical_response": {"assistant_text": ""}} for i in range(self.cases)]
+                     "historical_response": {"assistant_text": "Started the build.", "tools": [{"name": "edit"}]}}
+                    for i in range(self.cases)]
             (out / "cases.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
             (out / "manifest.json").write_text("{}", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0)

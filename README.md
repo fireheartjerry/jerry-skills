@@ -77,9 +77,9 @@ needed just to interpret the request. Portable handoffs and an offline explorer 
 the memory inspectable. [Working-memory guide](skills/mind-reading/references/working-memory.md).
 
 An **experience layer** learns from how you actually reacted to past agent replies.
-If silent endings made you type "keep going", or needless questions made you type
-"yes, do it", the packet tells the agent so with your own numbers, and a repeat
-alert fires the moment you restate a request. A weekly self-refresh relearns from
+If stopping on a failure made you type "keep going", or needless questions made
+you type "yes, do it", the packet tells the agent so with your own numbers, and a
+repeat alert fires the moment you restate a request. A weekly self-refresh relearns from
 your newest sessions with no ratings. [Experience layer](skills/mind-reading/references/experience.md).
 
 **Try it without importing anything:** follow the

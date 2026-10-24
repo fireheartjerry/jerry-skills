@@ -7,8 +7,8 @@ first time. It adds one compact section, built locally in well under a second:
   uses repeat wording such as "again" or "still not". The earlier approach did not
   land, so the host changes the method and says in one line what is different.
 - **What lands with this person.** Lessons learned from the person's own reactions
-  to past agent replies, each with their numbers. For example: turns that ended
-  without a written result drew a nudge far more often than turns that ended with one.
+  to past agent replies, each with their numbers. For example: replies that stopped
+  on an unresolved failure drew a "keep going" far more often than other replies.
 - **Situation.** Local time, message length, time pressure, emphasis and who the work
   is for. These shape tone, depth and pacing only; the goal and scope stay as written.
 
@@ -26,10 +26,12 @@ the person's next turn. The next turn is read as one of three reactions:
 | plain go-ahead | "yes do it", "ok", "go ahead" |
 | request to test | "did you test it on mobile?" |
 
-Each reply is described by a few observable features: it ended without text, it
-reported a failure, it asked or proposed instead of acting, it claimed done without
-evidence, it ran long, or it was heavily formatted. A feature becomes a lesson only
-when the reaction it can plausibly cause is clearly more common after it:
+Each reply is described by a few observable features: it did work but ended without
+text, it reported a failure, it asked or proposed instead of acting, it claimed done
+without evidence, it ran long, or it was heavily formatted. Moments where the person
+wrote again before the agent replied are left out, since there was nothing to react
+to. A feature becomes a lesson only when the reaction it can plausibly cause is
+clearly more common after it:
 
 - at least 30 replies with the feature and 5 reactions after them
 - a rate at least 1.3 times the rate without the feature
@@ -97,8 +99,9 @@ Treat it as a correction: the earlier approach did not land. Change the approach
 instead of retrying it, and say in one line what is different this time.
 
 ### What lands with this user (learned from 1840 past replies and the reactions that followed)
-- End every turn with a written result or status. Turns that ended without one were
-  followed by a nudge, correction or repeat 21% of the time, against 6.4% otherwise (n=96).
+- Do not stop on an unresolved failure: fix it or take the next step before replying.
+  Replies that reported a failure were followed by a nudge, correction or repeat 11% of
+  the time, against 5.8% otherwise (n=412).
 
 ### Situation (tone, depth and pacing only)
 - very short message: lead with the result, keep prose minimal

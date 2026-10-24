@@ -21,7 +21,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-SUMMARY_VERSION = 1
+SUMMARY_VERSION = 2
 SUMMARY_NAME = "experience-summary.json"
 REPEAT_JACCARD = 0.55
 RESEND_JACCARD = 0.6
@@ -73,7 +73,7 @@ _ACRONYMS = frozenset({"API", "CLI", "PR", "CI", "UI", "UX", "URL", "SQL", "AWS"
                        "CSS", "SSH", "ETA", "EST", "EDT", "UTC", "LLM", "MCP", "SDK", "IOS", "README", "TODO", "OK", "ASAP"})
 
 FEATURES = {
-    "silent_end": lambda text, tools: not text.strip(),
+    "silent_end": lambda text, tools: not text.strip() and bool(tools),  # worked, then wrote nothing
     "failure_reported": lambda text, tools: bool(_FAILURE.search(text)),
     "asks_or_plans": lambda text, tools: bool(_ASKS.search(text)),
     "done_unverified": lambda text, tools: bool(_DONE.search(text[:400])) and not _VERIFIED.search(text),
@@ -120,8 +120,8 @@ def human_text(text):
         pass
     if last:
         t = t[last.end():]
-    blocks = [b for b in re.split(r"\n\s*\n", t) if b.strip() and not b.lstrip().startswith("#")]
-    return "\n\n".join(b.strip() for b in blocks).strip()
+    blocks = [b for b in re.split(r"\n\s*\n", t) if b.strip() and not re.match(r"\s*#+\s", b)]
+    return "\n\n".join(b.strip() for b in blocks).strip() or t.strip()
 
 
 def tokens(text):
@@ -207,21 +207,26 @@ def lessons_from(rows):
     return found[:MAX_LESSONS]
 
 
+def reply_rows(cases):
+    """(features, outcome) for every case where the agent actually replied or worked before the next turn."""
+    for case in cases:
+        seed = str((case.get("input") or {}).get("seed") or "")
+        nxt = str((case.get("target") or {}).get("text") or "")
+        reply = case.get("historical_response") or {}
+        text, tools = str(reply.get("assistant_text") or ""), reply.get("tools") or []
+        if not text.strip() and not tools:
+            continue  # a burst: the person wrote again before the agent replied, so nothing was reacted to
+        yield {name: bool(f(text, tools)) for name, f in FEATURES.items()}, outcome(seed, nxt)
+
+
 def build_summary(cases_path):
-    rows, counts = [], {k: 0 for k in OUTCOMES}
-    with open(cases_path, encoding="utf-8") as fh:
-        for line in fh:
-            if not line.strip():
-                continue
-            case = json.loads(line)
-            seed = str((case.get("input") or {}).get("seed") or "")
-            nxt = str((case.get("target") or {}).get("text") or "")
-            reply = case.get("historical_response") or {}
-            text, tools = str(reply.get("assistant_text") or ""), reply.get("tools") or []
-            out = outcome(seed, nxt)
-            if out:
-                counts[out] += 1
-            rows.append(({name: bool(f(text, tools)) for name, f in FEATURES.items()}, out))
+    def cases():
+        with open(cases_path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    yield json.loads(line)
+    rows = list(reply_rows(cases()))
+    counts = {k: sum(1 for _, o in rows if o == k) for k in OUTCOMES}
     return {"version": SUMMARY_VERSION, "replies": len(rows), "outcomes": counts, "lessons": lessons_from(rows)}
 
 
