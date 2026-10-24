@@ -60,8 +60,10 @@ _DONE = re.compile(r"\b(?:done|completed?|all set|finished|fixed|implemented|shi
 _VERIFIED = re.compile(r"\b(?:tests? pass|passed|verified|green|exit 0|screenshot|confirmed)\b", re.I)
 _LIST_LINE = re.compile(r"(?m)^\s*(?:[-*•]|\d+\.)\s")
 
-_REPEAT_MARK = re.compile(r"\b(?:again|still (?:not|broken|doesn'?t|isn'?t|failing|wrong)|i (?:already )?(?:said|told you|asked)|"
-                          r"like i said|as i said|same (?:issue|problem|thing|error|bug)|once more|for the \w+ time)\b", re.I)
+# "again" counts only when it opens the message ("again, use the second monitor"); "run it again" is a plain request
+_REPEAT_MARK = re.compile(r"(?:^\s*again\b|\bonce again\b|\bstill (?:not|broken|doesn'?t|isn'?t|failing|wrong)\b|"
+                          r"\bi (?:said|told you|already (?:said|asked|told you)|asked you)\b|\blike i said\b|\bas i said\b|"
+                          r"\bsame (?:issue|problem|thing|error|bug)\b|\bfor the \w+ time\b)", re.I)
 _CONTINUE = re.compile(r"\b(?:keep going|continue|carry on|resume|go on|pick (?:it|this) back up|where (?:you|we) left off|"
                        r"try again|don'?t stop)\b", re.I)
 _DEADLINE = re.compile(r"\b(?:due|deadline|tonight|asap|urgent|right now|before (?:class|the (?:meeting|call|demo|deadline))|"
@@ -102,8 +104,24 @@ _SUBJECT = {
 }
 
 
+_TAG_BLOCK = re.compile(r"<([A-Za-z][\w-]*)\b[^>]*>.*?</\1>", re.S)
+_REQUEST_HEADER = re.compile(r"^#+\s*my request for [^\n:]+:?[ \t]*$", re.I | re.M)
+
+
 class ExperienceError(ValueError):
     pass
+
+
+def human_text(text):
+    """The person's own words: drop host-injected tagged blocks and header sections such as attached-file lists."""
+    t = _TAG_BLOCK.sub("\n\n", str(text or ""))
+    last = None
+    for last in _REQUEST_HEADER.finditer(t):
+        pass
+    if last:
+        t = t[last.end():]
+    blocks = [b for b in re.split(r"\n\s*\n", t) if b.strip() and not b.lstrip().startswith("#")]
+    return "\n\n".join(b.strip() for b in blocks).strip()
 
 
 def tokens(text):
@@ -128,9 +146,9 @@ def settings(cfg):
 
 def outcome(seed, next_text):
     """How the user's next turn reacted: friction, go_ahead, check, or None for anything else."""
-    nxt = next_text or ""
+    nxt = human_text(next_text)
     nt = tokens(nxt)
-    if len(set(nt)) >= 2 and _jaccard(tokens(seed), nt) >= RESEND_JACCARD:
+    if len(set(nt)) >= 2 and _jaccard(tokens(human_text(seed)), nt) >= RESEND_JACCARD:
         return "friction"  # a re-send
     if _CORRECTION.search(nxt) or _NUDGE.search(nxt):
         return "friction"
@@ -249,11 +267,13 @@ def lesson_text(lesson):
 
 def repeat_check(seed, context=None):
     """Does the seed restate something already asked in this conversation?"""
-    turns = [str(t) for t in ((context or {}).get("recent_user_turns") or []) if str(t).strip()]
+    seed = human_text(seed)
+    turns = [human_text(t) for t in ((context or {}).get("recent_user_turns") or [])]
+    turns = [t for t in turns if t]
     q = tokens(seed)
     best = None
     for back, turn in enumerate(reversed(turns[-6:]), start=1):
-        if back == 1 and turn.strip() == (seed or "").strip():
+        if back == 1 and turn.strip() == seed.strip():
             continue  # the host echoed the seed itself as the newest turn
         jac = _jaccard(q, tokens(turn)) if len(set(q)) >= 3 else 0.0
         if jac >= REPEAT_JACCARD and (best is None or jac > best["similarity"]):
@@ -285,6 +305,7 @@ def _local_now(cfg, now=None):
 def situation(seed, context=None, cfg=None, now=None):
     """Presentation hints from the moment itself. Each shapes tone, depth or pacing; none changes the goal."""
     local = _local_now(cfg, now)
+    seed = human_text(seed)
     hints = []
     if 0 <= local.hour < 5:
         hints.append("late night (%s local): keep the reply brief and finish-oriented" % local.strftime("%H:%M"))

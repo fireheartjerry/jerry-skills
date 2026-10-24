@@ -163,6 +163,22 @@ class LiveSignalTest(unittest.TestCase):
         rep = xp.repeat_check("it's still not loading", {})
         self.assertEqual(rep["marker"], "still not")
         self.assertIsNone(rep["earlier"])
+        self.assertEqual(xp.repeat_check("again, put every demo on the second monitor", {})["marker"].lower(), "again")
+        self.assertIsNotNone(xp.repeat_check("like i said, use the staging database", {}))
+
+    def test_injected_context_is_ignored(self):
+        block = '<in-app-browser-context source="ambient-ui-state">Tabs: docs, dashboard, pricing page</in-app-browser-context>\n'
+        self.assertIsNone(xp.repeat_check(block + "rename the settings page",
+                                          {"recent_user_turns": [block + "write the onboarding copy"]}))
+        files = "# Files mentioned by the user:\n\n## shot.png: /x/shot.png\n\n## My request for Codex:\nkeep going"
+        self.assertEqual(xp.human_text(files), "keep going")
+        self.assertEqual(xp.outcome("fix it", files), "friction")
+        self.assertEqual(xp.outcome("fix it", block + "yes do it"), "go_ahead")
+
+    def test_plain_redo_requests_are_not_repeats(self):
+        for seed in ("run the tests again", "open it again and check the layout", "I asked Codex for a review",
+                     "send me this again"):
+            self.assertIsNone(xp.repeat_check(seed, {}), seed)
 
     def test_situation_hints_use_the_configured_timezone(self):
         cfg = {"timezone": "America/Toronto", "people": {"Jordan Lee": "<stakeholder>"}}
